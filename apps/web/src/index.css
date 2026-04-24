@@ -1,0 +1,18 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* CL2 brand tokens — placeholders, sobreescribir desde Figma */
+  --cl2-bg: 12 12 16;
+  --cl2-surface: 22 22 28;
+  --cl2-border: 38 38 48;
+  --cl2-fg: 240 240 245;
+  --cl2-muted: 140 140 155;
+  --cl2-accent: 99 152 255;
+}
+
+html, body, #root {
+  height: 100%;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}

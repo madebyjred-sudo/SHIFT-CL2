@@ -1,0 +1,10 @@
+{
+  "name": "@shift-cl2/cerebro-config",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "lint": "echo 'no-op'",
+    "typecheck": "echo 'no-op'"
+  }
+}
