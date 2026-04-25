@@ -21,6 +21,7 @@ yarn-debug.log*
 .parcel-cache/
 .eslintcache
 .tsbuildinfo
+*.tsbuildinfo
 .pnp.*
 .yarn/*
 !.yarn/patches
@@ -31,3 +32,14 @@ yarn-debug.log*
 playwright-report/
 test-results/
 .supabase/
+
+# Secrets — never commit SA JSONs, keys, certs
+infra/secrets/
+*.pem
+*.key
+gcp-sa*.json
+
+# Local backup directories (not part of the project)
+apps/web/src.old-backup/
+.shifty-vps-clone/
+.shifty-replication-playbook.md

@@ -2,7 +2,10 @@
   "name": "@shift-cl2/cerebro-config",
   "version": "0.1.0",
   "private": true,
-  "main": "index.js",
+  "description": "Agent YAMLs for Shift CL2 (Lexa, Atlas, Centinela). Consumed by apps/api via fs.readdirSync.",
+  "files": [
+    "agents/**/*.yaml"
+  ],
   "scripts": {
     "lint": "echo 'no-op'",
     "typecheck": "echo 'no-op'"

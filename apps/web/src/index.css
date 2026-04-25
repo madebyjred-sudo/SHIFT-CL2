@@ -1,18 +1,339 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import url('https://fonts.googleapis.com/css2?family=Figtree:wght@300;400;500;600;700;800;900&family=Newsreader:opsz,wght@6..72,300;6..72,400;6..72,500;6..72,600&display=swap');
+@import "tailwindcss";
 
-:root {
-  /* CL2 brand tokens — placeholders, sobreescribir desde Figma */
-  --cl2-bg: 12 12 16;
-  --cl2-surface: 22 22 28;
-  --cl2-border: 38 38 48;
-  --cl2-fg: 240 240 245;
-  --cl2-muted: 140 140 155;
-  --cl2-accent: 99 152 255;
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+    /* Two-font system: Figtree (sans, body+UI) + Newsreader (serif, display).
+       No more Fira Sans — repo-wide unification 2026-04-24. */
+    --font-sans: "Figtree", ui-sans-serif, system-ui, sans-serif;
+    --font-heading: "Figtree", ui-sans-serif, system-ui, sans-serif;
+    /* Editorial serif for legislative gravitas (Anthropic-style headings).
+       Use sparingly: hero, agent name, section titles. */
+    --font-display: "Newsreader", ui-serif, Georgia, serif;
+    --color-primary: #0047AB;
+    --color-secondary: #8b5cf6;
+    --color-tertiary: #00235E;
+
+    /* CL2 brand tokens — burgundy + coral palette. The hex values below
+       are the canonical reference; new components SHOULD pull from
+       `var(--color-cl2-*)` instead of inlining literals. Existing inline
+       hex usages predate this and are tolerated until a dedicated branding
+       sprint replaces them. */
+    --color-cl2-accent: #F93549;          /* coral CTA / interactive */
+    --color-cl2-accent-hover: #E11D48;    /* coral pressed state */
+    --color-cl2-accent-soft: #FF6877;     /* coral gradient end */
+    --color-cl2-burgundy: #7A3B47;        /* Lexa pill / institutional */
+    --color-cl2-burgundy-soft: #7A3B4712; /* Lexa pill bg (transparent) */
+    --color-cl2-ink: #0e1745;             /* deep navy ink (headings) */
+
+    --color-shift-primary: #1534dc;
+    --color-shift-primaryHover: #1028b8;
+    --color-shift-surface-base: #ffffff;
+    --color-shift-surface-raised: #f8f9fc;
+    --color-shift-surface-overlay: rgba(14, 23, 69, 0.4);
+    /* Dark surfaces — neutro warm. Base #231f1f + raised
+       elevation ligeramente más cálido. Sin azules. */
+    --color-shift-surface-dark-base: #231f1f;
+    --color-shift-surface-dark-raised: #2d2828;
+    --color-shift-surface-dark-overlay: rgba(0, 0, 0, 0.6);
+    --color-shift-border-subtle: rgba(148, 163, 184, 0.15);
+    --color-shift-border-default: rgba(148, 163, 184, 0.3);
+    --color-shift-border-strong: rgba(148, 163, 184, 0.5);
+    --color-shift-status-running: #6366f1;
+    --color-shift-status-completed: #10b981;
+    --color-shift-status-failed: #ef4444;
+    --color-shift-status-idle: #94a3b8;
+
+    --spacing-chat-bubble: 1.25rem;
+    --spacing-panel: 1.5rem;
+
+    --radius-pill: 9999px;
+    --radius-card: 1rem;
+    --radius-bubble: 1.25rem;
+    --radius-modal: 1rem;
+
+    --text-micro: 0.6875rem;
+    --text-micro--line-height: 1rem;
+    --text-caption: 0.75rem;
+    --text-caption--line-height: 1.1rem;
+    --text-body: 0.875rem;
+    --text-body--line-height: 1.4rem;
+    --text-heading: 1rem;
+    --text-heading--line-height: 1.5rem;
+    --text-heading--font-weight: 600;
+
+    --transition-duration-instant: 100ms;
+    --transition-duration-fast: 150ms;
+    --transition-duration-base: 200ms;
+    --transition-duration-slow: 400ms;
+
+    --shadow-subtle: 0 1px 2px rgba(0, 0, 0, 0.04);
+    --shadow-raised: 0 2px 8px rgba(0, 0, 0, 0.06);
+    --shadow-floating: 0 8px 24px rgba(0, 0, 0, 0.08);
+    --shadow-modal: 0 20px 40px rgba(0, 0, 0, 0.12);
 }
 
-html, body, #root {
-  height: 100%;
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+:root {
+    --primary: #0047AB;
+    --secondary: #8b5cf6;
+    --tertiary: #00235E;
+    --surface: #FFFFFF;
+    --surface-dim: #F5F5F7;
+    --surface-container: #E8EAF6;
+    --on-surface: #00235E;
+    --glass: rgba(255, 255, 255, 0.08);
+    --glass-border: rgba(255, 255, 255, 0.12);
+}
+
+body {
+    font-family: 'Figtree', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* Headings default to serif (Newsreader) for editorial feel.
+   Use `font-sans` utility if a heading needs Figtree instead. */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+    font-family: 'Newsreader', ui-serif, Georgia, serif;
+    letter-spacing: -0.01em;
+    font-weight: 400;
+}
+
+button {
+    font-family: 'Figtree', sans-serif;
+    letter-spacing: -0.02em;
+}
+
+/* ─── Dark surface (bg-mesh) — solid legislative tone ─────────────
+   2026-04-24: sin degradados. Color único #231f1f (near-black warm
+   neutral). Vibe institucional, austera. Pixel-dot overlay encima
+   hace el trabajo visual.
+   ──────────────────────────────────────────────────────────────── */
+@utility bg-mesh {
+    background-color: #231f1f;
+    background-attachment: fixed;
+}
+
+/* ─── Pixel dotted overlay — barely visible 1px grid ───────────────
+   Use as overlay: <div class="bg-pixel-dots"/>. Light mode: subtle
+   dark dots; dark mode: subtle white dots. */
+@utility bg-pixel-dots {
+    background-image: radial-gradient(circle, rgba(14, 23, 69, 0.06) 1px, transparent 1px);
+    background-size: 4px 4px;
+}
+.dark .bg-pixel-dots {
+    background-image: radial-gradient(circle, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+}
+
+@utility glass-dark {
+    background: rgba(0, 0, 0, 0.2);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+@utility scrollbar-hide {
+    -ms-overflow-style: none;
+    /* IE and Edge */
+    scrollbar-width: none;
+    /* Firefox */
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+    display: none;
+    /* Chrome, Safari, Opera */
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   ReactFlow / xyflow — Dark Mode Overrides
+   Controls buttons, MiniMap, and edges need explicit dark styling
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* Controls: button backgrounds & SVG fill */
+.dark .react-flow__controls {
+    background: rgba(0, 0, 0, 0.6) !important;
+    border-color: rgba(255, 255, 255, 0.1) !important;
+    border-radius: 0.75rem;
+}
+
+.dark .react-flow__controls-button {
+    background: transparent !important;
+    border-color: rgba(255, 255, 255, 0.08) !important;
+    fill: rgba(255, 255, 255, 0.8) !important;
+    color: rgba(255, 255, 255, 0.8) !important;
+}
+
+.dark .react-flow__controls-button:hover {
+    background: rgba(255, 255, 255, 0.1) !important;
+}
+
+.dark .react-flow__controls-button svg {
+    fill: rgba(255, 255, 255, 0.8) !important;
+}
+
+/* MiniMap: dark background & node colors */
+.dark .react-flow__minimap {
+    background: rgba(0, 0, 0, 0.6) !important;
+    border-color: rgba(255, 255, 255, 0.1) !important;
+    border-radius: 0.75rem;
+}
+
+.dark .react-flow__minimap-mask {
+    fill: rgba(255, 255, 255, 0.08) !important;
+}
+
+.dark .react-flow__minimap-node {
+    fill: rgba(255, 255, 255, 0.3) !important;
+    stroke: rgba(255, 255, 255, 0.15) !important;
+}
+
+/* Edge labels */
+.dark .react-flow__edge-text {
+    fill: rgba(255, 255, 255, 0.7) !important;
+}
+
+/* Attribution (backup hide) */
+.react-flow__attribution {
+    display: none !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   ShinyButton (21st.dev) — adapted as Deep Insight toggle.
+   Original CTA tuned down to fit input bar (compact pill, coral CL2).
+   ═══════════════════════════════════════════════════════════════════ */
+
+@property --gradient-angle {
+    syntax: "<angle>";
+    initial-value: 0deg;
+    inherits: false;
+}
+
+@property --gradient-angle-offset {
+    syntax: "<angle>";
+    initial-value: 0deg;
+    inherits: false;
+}
+
+@property --gradient-percent {
+    syntax: "<percentage>";
+    initial-value: 5%;
+    inherits: false;
+}
+
+@property --gradient-shine {
+    syntax: "<color>";
+    initial-value: white;
+    inherits: false;
+}
+
+.shiny-cta {
+    --shiny-cta-bg: #231f1f;
+    --shiny-cta-bg-subtle: #2d2828;
+    --shiny-cta-fg: #ffffff;
+    --shiny-cta-highlight: #F93549;
+    --shiny-cta-highlight-subtle: #FF6877;
+    --animation: gradient-angle linear infinite;
+    --duration: 3s;
+    --shadow-size: 2px;
+    --transition: 600ms cubic-bezier(0.25, 1, 0.5, 1);
+
+    isolation: isolate;
+    position: relative;
+    overflow: hidden;
+    cursor: pointer;
+    outline: none;
+    -webkit-tap-highlight-color: transparent;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.4rem 0.85rem;
+    font-family: "Figtree", sans-serif;
+    font-size: 11px;
+    line-height: 1;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    border: 1px solid transparent;
+    border-radius: 9999px;
+    color: var(--shiny-cta-fg);
+    transition: var(--transition);
+    transition-property: --gradient-angle-offset, --gradient-percent, --gradient-shine,
+        background-color, color, border-color, box-shadow;
+}
+
+.shiny-cta:focus-visible {
+    box-shadow: 0 0 0 2px rgba(249, 53, 73, 0.4);
+}
+
+/* OFF state — neutral pill, no animation */
+.shiny-cta--off {
+    background: transparent;
+    color: rgba(14, 23, 69, 0.55);
+    border-color: rgba(14, 23, 69, 0.10);
+}
+
+.dark .shiny-cta--off {
+    color: rgba(255, 255, 255, 0.55);
+    border-color: rgba(255, 255, 255, 0.15);
+}
+
+.shiny-cta--off:hover {
+    color: rgba(14, 23, 69, 0.9);
+}
+
+.dark .shiny-cta--off:hover {
+    color: rgba(255, 255, 255, 0.9);
+}
+
+/* ON state — full shiny treatment. Conic siempre fill completo:
+   highlight base + shine que rota encima, sin gaps transparentes. */
+.shiny-cta--on {
+    background: linear-gradient(var(--shiny-cta-bg), var(--shiny-cta-bg)) padding-box,
+        conic-gradient(
+            from calc(var(--gradient-angle) - var(--gradient-angle-offset)),
+            var(--shiny-cta-highlight),
+            var(--gradient-shine) calc(var(--gradient-percent) * 2),
+            var(--shiny-cta-highlight) calc(var(--gradient-percent) * 4),
+            var(--shiny-cta-highlight)
+        ) border-box;
+    box-shadow: inset 0 0 0 1px var(--shiny-cta-bg-subtle), 0 4px 14px rgba(249, 53, 73, 0.25);
+}
+
+.shiny-cta:active {
+    translate: 0 1px;
+}
+
+.shiny-cta span {
+    z-index: 1;
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+}
+
+/* Animate ON state — solo el ángulo del conic rota, sin masks */
+.shiny-cta--on {
+    animation: gradient-angle var(--duration) linear infinite;
+}
+
+.shiny-cta--on:is(:hover, :focus-visible) {
+    --gradient-percent: 12%;
+    --gradient-shine: var(--shiny-cta-highlight-subtle);
+}
+
+@keyframes gradient-angle {
+    to {
+        --gradient-angle: 360deg;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .shiny-cta--on {
+        animation: none !important;
+    }
 }

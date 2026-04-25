@@ -97,11 +97,13 @@ alter table conversations enable row level security;
 alter table messages enable row level security;
 alter table ingest_jobs enable row level security;
 
+drop policy if exists "users see own conversations" on conversations;
 create policy "users see own conversations"
   on conversations for all
   using (user_id = auth.uid())
   with check (user_id = auth.uid());
 
+drop policy if exists "users see own messages" on messages;
 create policy "users see own messages"
   on messages for all
   using (
@@ -111,6 +113,7 @@ create policy "users see own messages"
     )
   );
 
+drop policy if exists "users see own ingest jobs" on ingest_jobs;
 create policy "users see own ingest jobs"
   on ingest_jobs for all
   using (created_by = auth.uid())
@@ -120,10 +123,12 @@ create policy "users see own ingest jobs"
 alter table sessions enable row level security;
 alter table legislative_chunks enable row level security;
 
+drop policy if exists "authed users read sessions" on sessions;
 create policy "authed users read sessions"
   on sessions for select
   using (auth.role() = 'authenticated');
 
+drop policy if exists "authed users read chunks" on legislative_chunks;
 create policy "authed users read chunks"
   on legislative_chunks for select
   using (auth.role() = 'authenticated');

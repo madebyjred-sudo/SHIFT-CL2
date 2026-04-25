@@ -3,8 +3,6 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 
-const AGENTS_DIR = dirname(fileURLToPath(import.meta.url));
-
 export interface AgentConfig {
   id: string;
   display_name: string;
@@ -22,6 +20,12 @@ export interface AgentConfig {
   guardrails: string[];
 }
 
+const HERE = dirname(fileURLToPath(import.meta.url));
+const AGENTS_DIR = join(HERE, '..', '..', '..', '..', 'packages', 'cerebro-config', 'agents');
+
+// No module-level cache: YAML files are tiny (3 files, ~3KB total) and not
+// imported by tsx watch, so caching here would mean editing a persona requires
+// an API restart. Re-read on each call keeps dev fast and safe.
 export function loadAgents(): AgentConfig[] {
   return readdirSync(AGENTS_DIR)
     .filter((f) => f.endsWith('.yaml'))

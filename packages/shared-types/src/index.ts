@@ -54,6 +54,21 @@ export interface Session {
   status: 'pending' | 'processing' | 'indexed' | 'error';
 }
 
+/**
+ * Optional scope binding sent with a chat request.
+ *
+ * `legacy_session_id` is the integer id from the legacy CL2 plenarias API
+ * (api.agentescl2.com/api/users/transcripciones). When present, the BFF
+ * fetches that session's metadata and injects it into the LLM as a system
+ * message — the user's content stays clean and the conversation is tagged
+ * in the database as belonging to that plenaria.
+ *
+ * See docs/issues/001-session-scoped-chat-production.md.
+ */
+export interface ChatScope {
+  legacy_session_id?: number;
+}
+
 export interface CerebroRequest {
   tenant: 'cl2';
   agent_id: AgentId;
@@ -62,11 +77,26 @@ export interface CerebroRequest {
   deep_insight: boolean;
   model_override?: string;
   context?: Record<string, unknown>;
+  scope?: ChatScope;
 }
 
 export interface CerebroStreamChunk {
-  type: 'token' | 'tool_call' | 'tool_result' | 'citation' | 'done' | 'error';
-  payload: unknown;
+  type:
+    | 'token'
+    | 'tool_call'
+    | 'tool_result'
+    | 'citation'
+    | 'conversation'
+    | 'confidence'
+    | 'done'
+    | 'error';
+  payload?: unknown;
+}
+
+export interface ConfidencePayload {
+  score: number;
+  level: 'high' | 'medium' | 'low';
+  rationale: string;
 }
 
 export interface IngestJob {

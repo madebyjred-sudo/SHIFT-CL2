@@ -12,19 +12,31 @@
   },
   "dependencies": {
     "@shift-cl2/shared-types": "*",
+    "@shift-cl2/ui-kit": "*",
     "@supabase/supabase-js": "^2.46.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "dompurify": "^3.3.3",
+    "lucide-react": "^0.546.0",
+    "motion": "^12.23.24",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "react-syntax-highlighter": "^16.1.1",
+    "react-textarea-autosize": "^8.5.9",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^3.5.0",
     "zustand": "^5.0.1"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.1.14",
+    "@types/dompurify": "^3.0.5",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/react-syntax-highlighter": "^15.5.13",
     "@vitejs/plugin-react": "^4.3.3",
-    "autoprefixer": "^10.4.20",
-    "postcss": "^8.4.49",
-    "tailwindcss": "^3.4.15",
+    "tailwindcss": "^4.1.14",
     "typescript": "^5.6.3",
-    "vite": "^5.4.11"
+    "vite": "^6.0.0"
   }
 }

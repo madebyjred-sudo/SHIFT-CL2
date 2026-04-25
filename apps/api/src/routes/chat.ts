@@ -1,6 +1,44 @@
 import { Router } from 'express';
-import type { CerebroRequest } from '@shift-cl2/shared-types';
-import { cerebroStream } from '../services/cerebroClient.js';
+import type { CerebroRequest, CerebroStreamChunk } from '@shift-cl2/shared-types';
+import { openRouterStream } from '../services/openRouterClient.js';
+import { getAgent } from '../services/agentLoader.js';
+import { getUserIdFromRequest } from '../services/auth.js';
+import { ResilienceError } from '../services/resilience.js';
+import { estimateConfidence } from '../services/confidence.js';
+import {
+  loadSessionContext,
+  buildSessionSystemPrompt,
+} from '../services/sessionContextLoader.js';
+import {
+  ensureConversation,
+  insertUserMessage,
+  insertAssistantMessage,
+  type CitationRow,
+} from '../services/conversationStore.js';
+
+/**
+ * Convert an upstream/internal error into a user-friendly Spanish message
+ * the frontend can show as-is. Detail goes to server logs only — never
+ * leak provider keys, internal hostnames, or stack traces to the client.
+ */
+function userFacingError(err: unknown): { code: string; message: string } {
+  if (err instanceof ResilienceError) {
+    if (err.code === 'timeout') {
+      return { code: 'timeout', message: 'La respuesta tardó demasiado. Intentá de nuevo en un momento.' };
+    }
+    if (err.code === 'aborted') {
+      return { code: 'aborted', message: 'No se pudo completar la consulta. Probá reformulándola.' };
+    }
+  }
+  const raw = (err as Error)?.message ?? '';
+  if (/openrouter\s+5\d\d/i.test(raw)) {
+    return { code: 'upstream', message: 'El proveedor del modelo está teniendo problemas. Reintentá en unos segundos.' };
+  }
+  if (/openrouter\s+429/i.test(raw)) {
+    return { code: 'rate_limit', message: 'Estamos al límite de uso por el momento. Esperá un momento y volvé a intentar.' };
+  }
+  return { code: 'internal', message: 'Ocurrió un error procesando tu consulta. Intentá de nuevo.' };
+}
 
 export const chatRouter = Router();
 
@@ -17,22 +55,161 @@ chatRouter.post('/stream', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
+  const send = (chunk: CerebroStreamChunk | { type: string; payload?: unknown }) => {
+    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+  };
+
+  // --- Auth + persistence setup -----------------------------------------
+  // Anonymous traffic is allowed (the stream still works) — we just skip
+  // persistence. This keeps local dev / unauthed smoke tests working.
+  const userId = await getUserIdFromRequest(req);
+  const agent = getAgent(body.agent_id);
+  const deepInsight = body.deep_insight ?? false;
+  const modelUsed =
+    body.model_override ??
+    (deepInsight ? agent?.deep_insight_model : agent?.default_model);
+
+  // --- Scope resolution -------------------------------------------------
+  // If the request carries a scope.legacy_session_id, load the session
+  // metadata and build a system prompt from it. Failures are non-fatal —
+  // the conversation falls back to "general" mode rather than 500ing the
+  // user out. See docs/issues/001 for the design rationale.
+  const scopeLegacySessionId =
+    typeof body.scope?.legacy_session_id === 'number' && Number.isFinite(body.scope.legacy_session_id)
+      ? body.scope.legacy_session_id
+      : null;
+
+  let scopeSystemPrompt: string | undefined;
+  if (scopeLegacySessionId !== null) {
+    try {
+      const ctx = await loadSessionContext(scopeLegacySessionId);
+      if (ctx) {
+        scopeSystemPrompt = buildSessionSystemPrompt(ctx);
+      } else {
+        req.log.warn('scope_session_not_found', { id: scopeLegacySessionId });
+      }
+    } catch (err) {
+      req.log.error('scope_load_failed', {
+        error: (err as Error).message,
+        id: scopeLegacySessionId,
+      });
+    }
+  }
+
+  let conversationId: string | null = null;
+  if (userId) {
+    try {
+      const ensured = await ensureConversation({
+        userId,
+        conversationId: body.conversation_id ?? null,
+        agentId: body.agent_id,
+        firstUserMessage: body.query,
+        scopeLegacySessionId,
+      });
+      conversationId = ensured.id;
+      // Tell the client which conversation this is — important on first turn
+      // so the frontend can pin it in the URL / sidebar before the stream ends.
+      send({
+        type: 'conversation',
+        payload: {
+          id: ensured.id,
+          isNew: ensured.isNew,
+          // Echo the *persisted* scope, not the request scope — they can differ
+          // when the caller reuses an existing UUID with a stale or mismatched
+          // scope (in which case ensureConversation spawned a fresh thread).
+          scope_legacy_session_id: ensured.scopeLegacySessionId,
+        },
+      });
+      await insertUserMessage(ensured.id, body.query);
+    } catch (err) {
+      req.log.error('persistence_pre_stream_failed', {
+        error: (err as Error).message,
+        agent: body.agent_id,
+      });
+      // Non-fatal: continue streaming even if persistence broke. Better demo
+      // experience than aborting because the DB hiccupped.
+      conversationId = null;
+    }
+  }
+
+  // --- Stream + accumulate ----------------------------------------------
+  let assistantText = '';
+  let citations: CitationRow[] = [];
+
   try {
-    await cerebroStream({
-      tenant: 'cl2',
+    await openRouterStream({
       agent_id: body.agent_id,
       query: body.query,
       conversation_id: body.conversation_id,
-      deep_insight: body.deep_insight ?? false,
+      deep_insight: deepInsight,
       model_override: body.model_override,
+      scope_system_prompt: scopeSystemPrompt,
+      scope_legacy_session_id: scopeLegacySessionId,
       onChunk: (chunk) => {
-        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+        if (chunk.type === 'token' && typeof chunk.payload === 'string') {
+          assistantText += chunk.payload;
+        } else if (chunk.type === 'citation' && Array.isArray(chunk.payload)) {
+          citations = chunk.payload as CitationRow[];
+        }
+        send(chunk);
       },
     });
-    res.write('data: {"type":"done"}\n\n');
-    res.end();
+
+    // --- Confidence post-process (per agent contract) ------------------
+    // Emit only when the agent's response_contract opts in (e.g. Centinela).
+    // Lexa/Atlas don't surface this to the user — fewer chrome elements,
+    // less cognitive load. We still persist it for any agent that emitted.
+    let confidenceScore: number | null = null;
+    if (assistantText.length > 0 && agent?.response_contract?.must_show_confidence) {
+      const conf = estimateConfidence(assistantText, citations);
+      confidenceScore = conf.score;
+      send({ type: 'confidence', payload: conf });
+    }
+
+    send({ type: 'done' });
+
+    // Persist post-stream so the row has the final text + confidence in one shot.
+    if (conversationId && assistantText.length > 0) {
+      try {
+        await insertAssistantMessage({
+          conversationId,
+          content: assistantText,
+          agentId: body.agent_id,
+          model: modelUsed,
+          deepInsight,
+          citations,
+          confidence: confidenceScore,
+        });
+      } catch (err) {
+        req.log.error('assistant_persistence_failed', { error: (err as Error).message });
+      }
+    }
   } catch (err) {
-    res.write(`data: ${JSON.stringify({ type: 'error', payload: (err as Error).message })}\n\n`);
+    req.log.error('stream_failed', {
+      error: (err as Error)?.message,
+      stack: (err as Error)?.stack,
+      agent: body.agent_id,
+    });
+    send({ type: 'error', payload: { ...userFacingError(err), request_id: req.requestId } });
+
+    // Best-effort persist of partial response so the user can retry without
+    // losing what came through.
+    if (conversationId && assistantText.length > 0) {
+      try {
+        await insertAssistantMessage({
+          conversationId,
+          content: assistantText,
+          agentId: body.agent_id,
+          model: modelUsed,
+          deepInsight,
+          citations,
+          confidence: null,
+        });
+      } catch (persistErr) {
+        req.log.error('partial_persistence_failed', { error: (persistErr as Error).message });
+      }
+    }
+  } finally {
     res.end();
   }
 });

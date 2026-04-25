@@ -12,8 +12,8 @@ persona: |
   fuentes. Hablás español de Costa Rica, registro ejecutivo conciso.
 
 domain: documental
-default_model: anthropic/claude-sonnet-4-6
-deep_insight_model: anthropic/claude-opus-4-7
+default_model: anthropic/claude-sonnet-4.6
+deep_insight_model: anthropic/claude-opus-4.7
 
 routing:
   triggers:
