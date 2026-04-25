@@ -16,6 +16,7 @@ import {
   type CitationRow,
 } from '../services/conversationStore.js';
 import { firePeajeIngest } from '../services/peajeClient.js';
+import { getApprovedRag } from '../services/puntoMedioClient.js';
 
 /**
  * Convert an upstream/internal error into a user-friendly Spanish message
@@ -133,6 +134,19 @@ chatRouter.post('/stream', async (req, res) => {
     }
   }
 
+  // --- Pull approved-only Punto Medio RAG ------------------------------
+  // Manual-gated flywheel enrichment: cerebro's get_dynamic_rag() filters
+  // by approval_status='approved'. Until an operator OK's a consolidation
+  // at /admin/punto-medio, this returns mostly the seed RAG (or empty).
+  // Best-effort — if cerebro is down the LLM still answers, just without
+  // institutional context.
+  const tenant = process.env.CEREBRO_TENANT ?? 'cl2';
+  const dynamicRag = await getApprovedRag(tenant);
+  const dynamicRagPrompt =
+    dynamicRag?.combined_rag && dynamicRag.combined_rag.trim().length > 50
+      ? `[Inteligencia institucional Shift — patrones aprobados]:\n\n${dynamicRag.combined_rag.trim()}\n\n— Usá esto como contexto general; citá expedientes/transcripciones específicas con [N] cuando aplique.`
+      : undefined;
+
   // --- Stream + accumulate ----------------------------------------------
   let assistantText = '';
   let citations: CitationRow[] = [];
@@ -144,6 +158,7 @@ chatRouter.post('/stream', async (req, res) => {
       conversation_id: body.conversation_id,
       deep_insight: deepInsight,
       model_override: body.model_override,
+      dynamic_rag_prompt: dynamicRagPrompt,
       scope_system_prompt: scopeSystemPrompt,
       scope_legacy_session_id: scopeLegacySessionId,
       onChunk: (chunk) => {

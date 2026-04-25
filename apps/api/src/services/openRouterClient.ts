@@ -24,6 +24,12 @@ interface StreamArgs {
   conversation_id?: string;
   deep_insight: boolean;
   model_override?: string;
+  // Approved-only RAG bundle from Cerebro Punto Medio. When present, gets
+  // injected as a system message between the agent persona and the scope
+  // block. Empty/null means the operator hasn't approved any patterns yet
+  // (the manual review gate at /admin/punto-medio is closed) — we run
+  // without flywheel enrichment, never blind injection.
+  dynamic_rag_prompt?: string;
   // Optional second system message that scopes this turn to a specific
   // legacy plenaria. Built by sessionContextLoader from `scope.legacy_session_id`.
   // Kept separate from agent.persona so future contracts (RAG over transcript,
@@ -335,8 +341,14 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     args.model_override ??
     (args.deep_insight ? agent.deep_insight_model : agent.default_model);
 
+  // System message ordering: persona FIRST (kept at index 0 so prompt
+  // caching against the LLM provider doesn't churn), then approved-only
+  // RAG patterns (Punto Medio), then session scope (if any), then user.
   const messages: OAMessage[] = [
     { role: 'system', content: agent.persona },
+    ...(args.dynamic_rag_prompt
+      ? [{ role: 'system' as const, content: args.dynamic_rag_prompt }]
+      : []),
     ...(args.scope_system_prompt
       ? [{ role: 'system' as const, content: args.scope_system_prompt }]
       : []),

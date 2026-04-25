@@ -55,6 +55,8 @@ export interface SilDocumentoRow {
   source_url: string;
   status: string;
   text_chars: number | null;
+  /** gs://bucket/path — set once process-sil-docs has mirrored the original. */
+  gcs_path: string | null;
 }
 
 /** Lightweight chunk hit from legislative_chunks for SIL-sourced rows. */
@@ -151,7 +153,7 @@ export async function getExpedienteById(numero: number): Promise<SilExpedienteFu
 
           const { data: docs, error: e2 } = await supa()
             .from('sil_documentos')
-            .select('id, expediente_id, tipo, titulo, fecha, source_url, status, text_chars')
+            .select('id, expediente_id, tipo, titulo, fecha, source_url, status, text_chars, gcs_path')
             .eq('expediente_id', numero)
             .order('fecha', { ascending: false, nullsFirst: false })
             .abortSignal(signal);

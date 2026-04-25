@@ -20,6 +20,8 @@ import { ingestRouter } from './routes/ingest.js';
 import { healthRouter } from './routes/health.js';
 import { sessionsRouter } from './routes/sessions.js';
 import { uploadsRouter } from './routes/uploads.js';
+import { expedientesRouter } from './routes/expedientes.js';
+import { puntoMedioRouter } from './routes/puntoMedio.js';
 import { requestContext } from './middleware/requestContext.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { logger } from './services/logger.js';
@@ -64,6 +66,20 @@ app.use(
   // worker which is slow + costs RapidAPI quota.
   rateLimit({ bucket: 'uploads', max: 5, windowMs: 60_000 }),
   uploadsRouter,
+);
+app.use(
+  // Expediente detail page hits this on every navigation; cap is generous
+  // because GCS sign URL calls are cheap and the supabase reads are
+  // cached server-side.
+  '/api/expedientes',
+  rateLimit({ bucket: 'expedientes', max: 120, windowMs: 60_000 }),
+  expedientesRouter,
+);
+app.use(
+  // Admin-facing review queue. Tight cap — operator clicks, not bot loops.
+  '/api/punto-medio',
+  rateLimit({ bucket: 'punto_medio', max: 60, windowMs: 60_000 }),
+  puntoMedioRouter,
 );
 
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {

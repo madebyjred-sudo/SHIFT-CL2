@@ -154,10 +154,19 @@ function PlenariaCitationCard({ citation: c, index: i }: { citation: ChunkCitati
 }
 
 // SIL-source card (expediente / dictamen / moción) — different visual layout
-// to make the source distinction obvious. Number prominent, link to SIL.
+// to make the source distinction obvious. Number prominent.
+//
+// Link target: when the citation carries an expediente_numero we deeplink
+// to OUR canonical viewer (/expediente/:numero), which renders from our DB
+// + serves PDFs from our GCS mirror — works even when the SIL is down.
+// Falls back to the upstream `url_detalle` for citations without a number.
 function SilCitationCard({ citation: c, index: i }: { citation: ChunkCitation; index: number }) {
   const typeLabel = silTypeLabel(c.source_type);
-  const link = c.url_detalle ?? null;
+  const link = c.expediente_numero
+    ? `/expediente/${encodeURIComponent(c.expediente_numero.replace(/[^\d]/g, ''))}`
+    : c.url_detalle ?? null;
+  const linkLabel = c.expediente_numero ? 'Ver expediente' : 'Ver en SIL';
+  const linkExternal = !c.expediente_numero;
   return (
     <article className="rounded-xl border border-cl2-accent/15 bg-cl2-accent/5 dark:bg-cl2-accent/[0.07] p-3 text-[12.5px]">
       <header className="flex items-center justify-between gap-2 mb-2">
@@ -188,11 +197,11 @@ function SilCitationCard({ citation: c, index: i }: { citation: ChunkCitation; i
         {link && (
           <a
             href={link}
-            target="_blank"
-            rel="noopener noreferrer"
+            target={linkExternal ? '_blank' : undefined}
+            rel={linkExternal ? 'noopener noreferrer' : undefined}
             className="inline-flex items-center gap-1 text-[10.5px] text-cl2-accent hover:underline shrink-0"
           >
-            Ver en SIL <ExternalLink className="w-3 h-3" />
+            {linkLabel} <ExternalLink className="w-3 h-3" />
           </a>
         )}
       </header>

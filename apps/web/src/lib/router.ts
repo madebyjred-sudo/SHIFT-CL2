@@ -43,3 +43,14 @@ export function matchSesionId(path: string): string | null {
   const m = path.match(/^\/sesiones\/(\d+)\/?$/);
   return m ? m[1] : null;
 }
+
+/** Match `/expediente/:numero` → returns numero (string) or null. */
+export function matchExpedienteNumero(path: string): string | null {
+  const m = path.match(/^\/expediente\/(\d+)\/?$/);
+  return m ? m[1] : null;
+}
+
+/** Match `/admin/punto-medio` (exact) — single page, no params. */
+export function isAdminPuntoMedio(path: string): boolean {
+  return /^\/admin\/punto-medio\/?$/.test(path);
+}
