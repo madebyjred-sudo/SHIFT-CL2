@@ -165,18 +165,22 @@ export async function searchByNumber(
     throw new Error(`searchByNumber: invalid expediente number ${expedienteNum}`);
   }
 
-  // Form fields the search page submits when the user types a number and
-  // hits "Consultar". Exact field names verified from the rendered HTML.
-  // If the SIL ever renames these we'll see a 200 with the unfiltered grid
-  // — searchByNumber returns null in that case rather than crashing.
+  // ASP.NET MasterPage prefixes every server control with the placeholder
+  // id, so on the wire the field names look like
+  // `ctl00$ContentPlaceHolder1$<localId>`. The search form has:
+  //   tbxBuscaLey         → number input (expediente number)
+  //   tbxBuscaDescripcion → text input (kept empty — we filter by number)
+  //   btnBuscar           → submit button (the `__EVENTTARGET`)
+  // Verified by inspecting the live page on 2026-04-25.
   const form = new URLSearchParams();
-  form.set('__EVENTTARGET', 'btnConsultar');
+  form.set('__EVENTTARGET', '');
   form.set('__EVENTARGUMENT', '');
   form.set('__VIEWSTATE', session.viewState);
   form.set('__VIEWSTATEGENERATOR', session.viewStateGenerator);
   form.set('__EVENTVALIDATION', session.eventValidation);
-  form.set('txtNumExp', String(expedienteNum));
-  form.set('txtDescripcion', '');
+  form.set('ctl00$ContentPlaceHolder1$tbxBuscaLey', String(expedienteNum));
+  form.set('ctl00$ContentPlaceHolder1$tbxBuscaDescripcion', '');
+  form.set('ctl00$ContentPlaceHolder1$btnBuscar', 'Buscar');
 
   const { html, setCookie } = await rawFetch(
     `${SIL_WEBFORMS_BASE}${PAGE_PATH}`,
@@ -203,78 +207,71 @@ export async function searchByNumber(
 }
 
 /**
- * Best-effort cheerio walk over the search-result + detail page. The SIL
- * renders both in one HTML document — first the grid (1 row), then the
- * inline detail panel below it. Field names and table positions verified
- * during the recon phase but kept defensive against rename.
+ * Cheerio walk over the SIL search result. The grid (`grvLey`) carries the
+ * minimal expediente row: select-button + número + título. Full details
+ * (proponente, comisión, fecha, dictámenes, PDFs) require a SECOND postback
+ * (`Select$0`) which we don't perform during bulk backfill — that flow
+ * lives in the on-demand `fetch_sil_live` tool. The number + title pair is
+ * enough to make `search_sil_expedientes` work and to give the LLM a
+ * citable URL to the SIL.
+ *
+ * The grid id renders as `ContentPlaceHolder1_grvLey` because of ASP.NET's
+ * MasterPage prefix; we use a `[id$=grvLey]` selector so the parser
+ * survives any prefix changes.
  */
 export function parseExpedienteDetail(html: string, expedienteNum: number): ExpedienteDetail | null {
   const $ = cheerio.load(html);
 
-  // The grid renders zero rows when the number doesn't exist. Detect by
-  // counting data rows in `grvLey` (the GridView control).
-  const gridRows = $('#grvLey tbody tr').filter((_, el) => $(el).find('td').length > 1);
-  if (gridRows.length === 0) return null;
+  // Defensive selector: any element ending in "grvLey" → tr without forcing
+  // tbody (ASP.NET sometimes omits it). First row is the header (uses
+  // <th>); the filter `td > 1` keeps only data rows.
+  const allRows = $('[id$="grvLey"] tr');
+  const dataRows = allRows.filter((_, el) => $(el).find('td').length > 1);
+  if (dataRows.length === 0) return null;
 
-  const numero = formatExpedienteNumber(expedienteNum);
-  const detailUrl = `${SIL_WEBFORMS_BASE}${PAGE_PATH}?numero=${expedienteNum}`;
+  const targetStr = String(expedienteNum);
+  const numeroFormatted = formatExpedienteNumber(expedienteNum);
 
-  // Fields appear in a label/value table after the grid. We grep label
-  // strings rather than rely on positional indexing — server can reorder
-  // rows without changing the visible labels.
-  const fieldByLabel = (labels: string[]): string | null => {
-    let value: string | null = null;
-    $('table tr').each((_, tr) => {
-      const cells = $(tr).find('td, th');
-      if (cells.length < 2) return;
-      const label = ($(cells[0]).text() ?? '').trim().toLowerCase();
-      if (labels.some((l) => label.includes(l.toLowerCase()))) {
-        value = ($(cells[1]).text() ?? '').trim() || null;
-        return false; // break .each
-      }
-    });
-    return value;
-  };
-
-  const titulo = fieldByLabel(['título', 'titulo', 'asunto']);
-  const proponente = fieldByLabel(['proponente', 'autor']);
-  const comision = fieldByLabel(['comisión', 'comision']);
-  const estado = fieldByLabel(['estado']);
-  const tipo = fieldByLabel(['tipo de iniciativa', 'tipo']);
-  const legislatura = fieldByLabel(['legislatura']);
-  const fechaPresentacion = parseDate(fieldByLabel(['fecha de presentación', 'fecha presentación', 'fecha']));
-
-  // Document links live in anchor tags pointing to PDFs on asamblea.go.cr.
-  // We capture URL + visible label + a tipo guess from the surrounding text.
-  const documentos: ExpedienteDoc[] = [];
-  $('a[href$=".pdf"], a[href*=".pdf?"]').each((_, a) => {
-    const href = $(a).attr('href');
-    if (!href) return;
-    const url = href.startsWith('http') ? href : new URL(href, SIL_WEBFORMS_BASE).toString();
-    const label = ($(a).text() ?? '').trim() || null;
-    documentos.push({
-      tipo: classifyDocByLabel(label),
-      titulo: label,
-      fecha: null,
-      url,
-    });
+  // Find the row whose number cell matches the requested expediente.
+  // The grid columns are: [select-button][número][título].
+  let titulo: string | null = null;
+  let matchedRow: cheerio.Cheerio<any> | null = null;
+  dataRows.each((_, tr) => {
+    const tds = $(tr).find('td');
+    if (tds.length < 3) return;
+    const numText = ($(tds[1]).text() ?? '').replace(/[^\d]/g, '');
+    if (numText === targetStr) {
+      titulo = ($(tds[2]).text() ?? '').replace(/\s+/g, ' ').trim() || null;
+      matchedRow = $(tr);
+      return false; // break .each
+    }
   });
+  if (!matchedRow) return null;
 
-  // Snippet of the visible body (after stripping nav/footer) for debugging.
+  // Detail URL: ASP.NET WebForms is stateful, there is no per-expediente
+  // deep link. Best we can give the citation card is the search page —
+  // the user lands there and the result row is one click away. Encoding
+  // the number in a query param is harmless even though the server
+  // ignores it (helps debugging).
+  const detailUrl = `${SIL_WEBFORMS_BASE}${PAGE_PATH}?expediente=${expedienteNum}`;
+
+  // Snippet of the visible body for debugging — kept small.
   const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
-  const rawTextSnippet = bodyText.length > 4000 ? bodyText.slice(0, 4000) : bodyText;
+  const rawTextSnippet = bodyText.length > 1000 ? bodyText.slice(0, 1000) : bodyText;
 
   return {
-    numero,
+    numero: numeroFormatted,
     numeroNum: expedienteNum,
     titulo,
-    proponente,
-    comision,
-    fechaPresentacion,
-    estado,
-    tipo,
-    legislatura,
-    documentos,
+    // Detail-only fields stay null in the bulk backfill path. Filled later
+    // by the on-demand selectExpediente() flow (see fetchExpedienteFull).
+    proponente: null,
+    comision: null,
+    fechaPresentacion: null,
+    estado: null,
+    tipo: null,
+    legislatura: null,
+    documentos: [],
     rawTextSnippet,
     detailUrl,
   };
