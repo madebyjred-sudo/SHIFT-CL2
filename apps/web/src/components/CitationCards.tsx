@@ -77,9 +77,9 @@ export function CitationCards({ citations }: CitationCardsProps) {
                       <span
                         className="px-2 py-0.5 rounded-full text-[10.5px] font-medium"
                         style={{
-                          backgroundColor: '#7A3B4712',
-                          color: '#7A3B47',
-                          border: '1px solid #7A3B4730',
+                          backgroundColor: 'var(--color-cl2-burgundy-soft)',
+                          color: 'var(--color-cl2-burgundy)',
+                          border: '1px solid color-mix(in srgb, var(--color-cl2-burgundy) 19%, transparent)',
                         }}
                       >
                         {c.comision}
@@ -96,7 +96,7 @@ export function CitationCards({ citations }: CitationCardsProps) {
                         href={c.video_url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 text-[10.5px] text-[#7A3B47] hover:underline shrink-0"
+                        className="inline-flex items-center gap-1 text-[10.5px] text-cl2-burgundy hover:underline shrink-0"
                       >
                         Video <ExternalLink className="w-3 h-3" />
                       </a>

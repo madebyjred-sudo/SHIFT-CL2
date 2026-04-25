@@ -26,7 +26,7 @@ export function TopDock({ onOpenHistory, onToggleHistory, isHistoryOpen }: TopDo
             className="relative h-9 w-9 rounded-xl overflow-hidden shrink-0"
             aria-label="CL2 Logo"
           >
-            <div className="absolute inset-0 bg-gradient-to-br from-[#F93549] to-[#FF6877]" />
+            <div className="absolute inset-0 bg-gradient-to-br from-cl2-accent to-cl2-accent-soft" />
             <div
               className="absolute inset-0 opacity-30"
               style={{

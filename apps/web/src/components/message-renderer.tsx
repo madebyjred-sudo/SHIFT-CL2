@@ -45,7 +45,7 @@ function linkifyTimecodes(children: React.ReactNode, onSeek: (s: number) => void
             key={`tc-${i}-${match.index}`}
             type="button"
             onClick={(e) => { e.stopPropagation(); onSeek(secs); }}
-            className="inline-flex items-center gap-1 px-1.5 py-0.5 mx-0.5 rounded-md bg-[#F93549]/10 hover:bg-[#F93549]/20 text-[#F93549] font-mono text-[0.85em] tabular-nums transition-colors align-baseline"
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 mx-0.5 rounded-md bg-cl2-accent/10 hover:bg-cl2-accent/20 text-cl2-accent font-mono text-[0.85em] tabular-nums transition-colors align-baseline"
             title={`Saltar al ${full} en el reproductor`}
           >
             <Play className="w-2.5 h-2.5 fill-current" />

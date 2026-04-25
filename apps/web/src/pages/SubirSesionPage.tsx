@@ -164,14 +164,14 @@ export function SubirSesionPage() {
         <div className="max-w-2xl mx-auto">
           <button
             onClick={() => navigate('/sesiones')}
-            className="inline-flex items-center gap-1.5 text-sm text-gray-500 dark:text-gray-400 hover:text-[#F93549] mb-4 transition-colors"
+            className="inline-flex items-center gap-1.5 text-sm text-gray-500 dark:text-gray-400 hover:text-cl2-accent mb-4 transition-colors"
           >
             <ArrowLeft size={14} /> Volver a plenarias
           </button>
 
           <header className="flex items-center gap-3 mb-6">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#F93549]/15 to-[#E11D48]/10 flex items-center justify-center">
-              <Upload size={18} strokeWidth={1.75} className="text-[#F93549]" />
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cl2-accent/15 to-cl2-accent-hover/10 flex items-center justify-center">
+              <Upload size={18} strokeWidth={1.75} className="text-cl2-accent" />
             </div>
             <div>
               <h1 className="text-2xl font-semibold tracking-tight text-[#0e1745] dark:text-white">
@@ -285,7 +285,7 @@ export function SubirSesionPage() {
                   'w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium transition-all',
                   isBusy
                     ? 'bg-gray-200 dark:bg-white/10 text-gray-500 dark:text-white/50 cursor-not-allowed'
-                    : 'bg-[#F93549] text-white hover:bg-[#E11D48] shadow-[0_4px_15px_rgba(249,53,73,0.3)]',
+                    : 'bg-cl2-accent text-white hover:bg-cl2-accent-hover shadow-[0_4px_15px_rgba(249,53,73,0.3)]',
                 )}
               >
                 {phase.kind === 'submitting' ? (
@@ -310,7 +310,7 @@ export function SubirSesionPage() {
 }
 
 const inputCls =
-  'w-full px-3 py-2 rounded-lg bg-gray-50 dark:bg-white/5 border border-[#0e1745]/[0.08] dark:border-white/10 text-sm focus:outline-none focus:ring-2 focus:ring-[#F93549]/30 transition disabled:opacity-50';
+  'w-full px-3 py-2 rounded-lg bg-gray-50 dark:bg-white/5 border border-[#0e1745]/[0.08] dark:border-white/10 text-sm focus:outline-none focus:ring-2 focus:ring-cl2-accent/30 transition disabled:opacity-50';
 
 function Field({
   label, icon, children,

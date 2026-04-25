@@ -27,8 +27,18 @@ export function requestContext(req: Request, res: Response, next: NextFunction):
   req.log = logger.with({ requestId, route: req.path, method: req.method });
   res.setHeader('X-Request-Id', requestId);
 
+  // Skip access logs for health probes — they hammer /health every few
+  // seconds in prod and would drown out anything useful.
+  const ua = req.headers['user-agent'] ?? '';
+  const isHealthProbe =
+    req.path === '/health' || (req.path === '/' && ua.includes('kube-probe'));
+
   const t0 = Date.now();
+  if (!isHealthProbe) {
+    req.log.debug('request_received', { ua: ua.slice(0, 80) });
+  }
   res.on('finish', () => {
+    if (isHealthProbe && res.statusCode < 400) return;
     req.log.info('request', {
       status: res.statusCode,
       ms: Date.now() - t0,

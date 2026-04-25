@@ -51,8 +51,8 @@ export function SesionesListPage() {
         <div className="max-w-5xl mx-auto">
           {/* Header */}
           <header className="flex items-center gap-3 mb-6">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#F93549]/15 to-[#E11D48]/10 flex items-center justify-center">
-              <Radio size={20} strokeWidth={1.75} className="text-[#F93549]" />
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cl2-accent/15 to-cl2-accent-hover/10 flex items-center justify-center">
+              <Radio size={20} strokeWidth={1.75} className="text-cl2-accent" />
             </div>
             <div className="flex-1 min-w-0">
               <h1 className="text-2xl font-semibold tracking-tight text-[#0e1745] dark:text-white">
@@ -65,7 +65,7 @@ export function SesionesListPage() {
             <button
               onClick={() => navigate('/sesiones/subir')}
               aria-label="Subir nueva sesión"
-              className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#F93549] text-white text-sm font-medium hover:bg-[#E11D48] shadow-[0_4px_15px_rgba(249,53,73,0.25)] transition-all focus:outline-none focus:ring-2 focus:ring-[#F93549]/40 focus:ring-offset-2 focus:ring-offset-gray-50 dark:focus:ring-offset-transparent"
+              className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-cl2-accent text-white text-sm font-medium hover:bg-cl2-accent-hover shadow-[0_4px_15px_rgba(249,53,73,0.25)] transition-all focus:outline-none focus:ring-2 focus:ring-cl2-accent/40 focus:ring-offset-2 focus:ring-offset-gray-50 dark:focus:ring-offset-transparent"
             >
               <Plus size={14} strokeWidth={2.5} />
               <span className="hidden sm:inline">Subir sesión</span>
@@ -80,7 +80,7 @@ export function SesionesListPage() {
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder="Buscar por título de sesión..."
-              className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-white dark:bg-white/5 border border-[#0e1745]/[0.08] dark:border-white/10 text-sm focus:outline-none focus:ring-2 focus:ring-[#F93549]/30 transition"
+              className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-white dark:bg-white/5 border border-[#0e1745]/[0.08] dark:border-white/10 text-sm focus:outline-none focus:ring-2 focus:ring-cl2-accent/30 transition"
             />
           </div>
 
@@ -123,7 +123,7 @@ export function SesionesListPage() {
                   >
                     <div className="flex items-start justify-between gap-4">
                       <div className="min-w-0 flex-1">
-                        <h3 className="text-sm sm:text-base font-medium text-[#0e1745] dark:text-white line-clamp-2 group-hover:text-[#F93549] transition-colors">
+                        <h3 className="text-sm sm:text-base font-medium text-[#0e1745] dark:text-white line-clamp-2 group-hover:text-cl2-accent transition-colors">
                           {s.titulo}
                         </h3>
                         <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-gray-500 dark:text-gray-400">

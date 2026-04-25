@@ -210,7 +210,7 @@ function TabButton({ active, onClick, icon, label }: { active: boolean; onClick:
       className={cn(
         'inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-md transition-colors',
         active
-          ? 'text-[#F93549] bg-[#F93549]/8'
+          ? 'text-cl2-accent bg-cl2-accent/8'
           : 'text-gray-500 dark:text-gray-400 hover:text-[#0e1745] dark:hover:text-white',
       )}
     >
@@ -427,7 +427,7 @@ function TranscriptPanel({
             onChange={(e) => setSearch(e.target.value)}
             placeholder={`Buscar en ${transcript.word_count.toLocaleString('es-CR')} palabras…`}
             aria-label="Buscar en transcripción"
-            className="w-full pl-8 pr-3 py-1.5 rounded-md bg-gray-50 dark:bg-white/5 border border-transparent text-xs transition focus:outline-none focus:ring-2 focus:ring-[var(--color-cl2-accent)]/30 focus:border-[var(--color-cl2-accent)]/40"
+            className="w-full pl-8 pr-3 py-1.5 rounded-md bg-gray-50 dark:bg-white/5 border border-transparent text-xs transition focus:outline-none focus:ring-2 focus:ring-cl2-accent/30 focus:border-cl2-accent/40"
           />
         </div>
       </div>
@@ -441,10 +441,10 @@ function TranscriptPanel({
                 <button
                   type="button"
                   onClick={() => onSeek(seg.start)}
-                  className="group w-full text-left px-3 py-2.5 hover:bg-[#F93549]/5 transition-colors"
+                  className="group w-full text-left px-3 py-2.5 hover:bg-cl2-accent/5 transition-colors"
                 >
                   <div className="flex items-start gap-3">
-                    <span className="shrink-0 mt-0.5 text-[10px] font-mono tabular-nums text-gray-400 group-hover:text-[#F93549] transition-colors">
+                    <span className="shrink-0 mt-0.5 text-[10px] font-mono tabular-nums text-gray-400 group-hover:text-cl2-accent transition-colors">
                       {fmtClock(seg.start)}
                     </span>
                     <p className="text-[13px] leading-snug text-gray-700 dark:text-gray-300">

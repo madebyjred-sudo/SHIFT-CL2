@@ -43,7 +43,7 @@ export function UserMenu() {
         {avatar ? (
           <img src={avatar} alt="" className="w-7 h-7 rounded-full" />
         ) : (
-          <div className="w-7 h-7 rounded-full bg-gradient-to-br from-[#F93549] to-[#E11D48] flex items-center justify-center text-white text-xs font-semibold">
+          <div className="w-7 h-7 rounded-full bg-gradient-to-br from-cl2-accent to-cl2-accent-hover flex items-center justify-center text-white text-xs font-semibold">
             {initials}
           </div>
         )}

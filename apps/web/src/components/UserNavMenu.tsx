@@ -58,7 +58,7 @@ function ProfileItem() {
         {avatar ? (
           <img src={avatar} alt="" className="w-full h-full object-cover" />
         ) : (
-          <div className="w-full h-full bg-gradient-to-br from-[#F93549] to-[#E11D48] flex items-center justify-center text-white text-[11px] font-semibold">
+          <div className="w-full h-full bg-gradient-to-br from-cl2-accent to-cl2-accent-hover flex items-center justify-center text-white text-[11px] font-semibold">
             {initials}
           </div>
         )}
@@ -73,7 +73,7 @@ function ProfileItem() {
             {avatar ? (
               <img src={avatar} alt="" className="w-10 h-10 rounded-full" />
             ) : (
-              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#F93549] to-[#E11D48] flex items-center justify-center text-white text-sm font-semibold">
+              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-cl2-accent to-cl2-accent-hover flex items-center justify-center text-white text-sm font-semibold">
                 {initials}
               </div>
             )}

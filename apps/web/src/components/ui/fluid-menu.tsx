@@ -28,7 +28,7 @@ export function MenuItem({
             ? 'text-gray-400 dark:text-white/30 cursor-not-allowed'
             : 'text-gray-600 dark:text-white/70 hover:text-[#0e1745] dark:hover:text-white'
         }
-        ${isActive ? 'text-[#F93549] dark:text-[#FF6877]' : ''}
+        ${isActive ? 'text-cl2-accent dark:text-cl2-accent-soft' : ''}
       `}
       role="menuitem"
       onClick={onClick}

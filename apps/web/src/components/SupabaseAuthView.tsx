@@ -31,7 +31,7 @@ export function SupabaseAuthView() {
               className="mx-auto h-16 w-16 rounded-2xl relative overflow-hidden"
               style={{ boxShadow: '0 0 40px rgba(244, 63, 94, 0.3)' }}
             >
-              <div className="absolute inset-0 bg-gradient-to-br from-[#F93549] to-[#FF6877]" />
+              <div className="absolute inset-0 bg-gradient-to-br from-cl2-accent to-cl2-accent-soft" />
               <div
                 className="absolute inset-0 opacity-30"
                 style={{
@@ -47,7 +47,7 @@ export function SupabaseAuthView() {
 
             <div className="space-y-1">
               <h1 className="text-3xl font-extrabold tracking-tight font-heading">
-                <span className="bg-gradient-to-r from-[#F93549] to-[#FF6877] bg-clip-text text-transparent">
+                <span className="bg-gradient-to-r from-cl2-accent to-cl2-accent-soft bg-clip-text text-transparent">
                   Inteligencia
                 </span>
                 <br />
@@ -64,7 +64,7 @@ export function SupabaseAuthView() {
             className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-6 space-y-5"
           >
             <div className="flex items-center justify-between text-white/60">
-              <AgentMini icon={<Scale className="h-4 w-4" />} name="Lexa" color="#7A3B47" />
+              <AgentMini icon={<Scale className="h-4 w-4" />} name="Lexa" color="var(--color-cl2-burgundy)" />
               <AgentMini icon={<FileText className="h-4 w-4" />} name="Atlas" color="#8B6E54" />
               <AgentMini icon={<Radar className="h-4 w-4" />} name="Centinela" color="#F43F5E" />
             </div>
@@ -85,7 +85,7 @@ export function SupabaseAuthView() {
             <button
               onClick={() => signInGoogle()}
               disabled={isAuthLoading}
-              className="w-full rounded-xl bg-gradient-to-br from-[#F93549] to-[#E11D48] text-white font-semibold py-3 hover:shadow-[0_0_30px_rgba(244,63,94,0.4)] transition-shadow disabled:opacity-50 flex items-center justify-center gap-3"
+              className="w-full rounded-xl bg-gradient-to-br from-cl2-accent to-cl2-accent-hover text-white font-semibold py-3 hover:shadow-[0_0_30px_rgba(244,63,94,0.4)] transition-shadow disabled:opacity-50 flex items-center justify-center gap-3"
             >
               <GoogleIcon />
               Continuar con Google

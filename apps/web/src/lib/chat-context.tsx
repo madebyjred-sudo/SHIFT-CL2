@@ -26,6 +26,9 @@ export const AGENT_INFO: Record<
     name: 'Lexa',
     role: 'Análisis Plenario',
     skills: 'Actas del Plenario, transcripciones, votaciones, mociones, discusiones',
+    // Hex literal (NOT var(--color-cl2-burgundy)) because consumers like
+    // ThinkingIndicator and AgentBadge concat alpha suffixes at runtime
+    // (`${color}20`). CSS vars don't survive that concatenation.
     color: '#7A3B47',
     icon: 'Scale',
   },
