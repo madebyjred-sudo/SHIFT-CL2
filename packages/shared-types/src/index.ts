@@ -23,8 +23,21 @@ export interface ChatMessage {
   created_at: string;
 }
 
+export type CitationSourceType =
+  | 'transcript'
+  | 'pdf'
+  | 'web'
+  | 'metadata'
+  | 'transcript_segment'
+  | 'sil_expediente'
+  | 'sil_dictamen'
+  | 'sil_mocion'
+  | 'sil_votacion'
+  | 'sil_acta'
+  | 'sil_ley';
+
 export interface Citation {
-  source_type: 'transcript' | 'pdf' | 'web' | 'metadata';
+  source_type: CitationSourceType;
   ref: string;
   acta_num?: string;
   fecha?: string;
@@ -32,6 +45,11 @@ export interface Citation {
   page?: number;
   url?: string;
   excerpt?: string;
+  // SIL-specific (only set when source_type starts with 'sil_').
+  expediente_numero?: string;
+  comision?: string;
+  estado?: string;
+  proponente?: string;
 }
 
 export interface Conversation {

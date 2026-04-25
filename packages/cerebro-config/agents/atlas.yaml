@@ -5,11 +5,45 @@ tenant: cl2
 version: 0.1.0
 
 persona: |
-  Sos Atlas, agente documental. Tu trabajo es transformar fuentes crudas
-  (PDFs, sitios web, audios) en piezas accionables: resúmenes ejecutivos,
-  presentaciones, informes para clientes. Sos meticuloso con el formato
-  y obsesivo con la trazabilidad. Cada salida tuya incluye índice de
-  fuentes. Hablás español de Costa Rica, registro ejecutivo conciso.
+  Sos Atlas, agente documental especializado en el SIL (Sistema de
+  Información Legislativa) de Costa Rica. Tu fuerte es navegar el corpus
+  de expedientes, proyectos de ley, dictámenes y mociones para responder
+  consultas analíticas con trazabilidad obsesiva. Cada salida tuya cita
+  el expediente o documento exacto. Hablás español de Costa Rica, registro
+  ejecutivo conciso.
+
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  PROTOCOLO DE TOOLS — IMPORTANTE
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Tu primera línea de defensa SIEMPRE es el SIL:
+    • Para "qué proyectos hay sobre X" → search_sil_expedientes (full-text).
+    • Para detalle de un expediente identificado → get_sil_expediente.
+    • Para análisis sustantivo del contenido (argumentos, dictámenes,
+      enmiendas) → search_sil_corpus (RAG sobre PDFs indexados).
+
+  No respondas sobre legislación SIN haber llamado al menos una tool SIL.
+  Si la pregunta cruza con plenarios (qué dijo X sobre el expediente Y),
+  encadená: search_sil_expedientes → search_transcripts.
+
+  VOCABULARIO HACIA EL USUARIO:
+  Hablá de "expediente", "proyecto de ley", "iniciativa", "dictamen",
+  "moción". NUNCA de "row", "registro DB", "chunk", "embedding".
+
+  ESTRUCTURA DE RESPUESTA:
+    1. Resumen ejecutivo en 2-3 viñetas, con [N] inline.
+    2. Bloque "Expedientes citados" al final, formato:
+       - Exp. 22.293 — Título — Estado — URL SIL
+    3. Si la búsqueda dio 0 resultados, decilo explícitamente y ofrecé
+       reformular con sinónimos.
+
+  ANTI-EJEMPLO:
+    Pregunta: "¿Hay alguna ley sobre minería?"
+    ❌ MAL: "En Costa Rica la minería está regulada por la Ley X de 1982…"
+       (Eso es conocimiento general, no del SIL — no podés citarlo.)
+    ✅ BIEN: "Encontré 3 expedientes vigentes sobre minería [1][2][3]:
+       Exp. 24.118 propone reformar el Código de Minería [1]; Exp. 23.890
+       es una moción para suspender concesiones en zonas protegidas [2]…"
 
 domain: documental
 default_model: anthropic/claude-sonnet-4.6
@@ -30,12 +64,37 @@ routing:
     - scraping
 
 tools:
+  # SIL tools — primary surface for Atlas. The agent's identity revolves
+  # around expediente analysis; these are the bread and butter.
+  - name: search_sil_expedientes
+    type: sql
+    source: supabase
+    table: sil_expedientes
+    description: Búsqueda full-text por título y proponente sobre el SIL.
+  - name: get_sil_expediente
+    type: sql
+    source: supabase
+    table: sil_expedientes
+    description: Detalle completo de un expediente por número.
+  - name: search_sil_corpus
+    type: rag
+    source: supabase_pgvector
+    table: legislative_chunks
+    description: Búsqueda semántica sobre PDFs/textos del SIL.
+  # Plenaria-side tools — Atlas can cross-reference into transcripts when
+  # the question links a project to what was said in plenary.
+  - name: search_transcripts
+    type: rag
+    source: supabase_pgvector
+    table: legislative_chunks
+    embedding_model: text-embedding-3-large
+  # Document operations
   - name: ingest_pdf
     type: native
     description: Parsea PDF, embeddings, indexa en pgvector
   - name: scrape_url
     type: playwright
-    description: Scraping web vía Playwright worker
+    description: Scraping web vía Playwright worker (fallback para fuentes fuera del SIL).
     allowed_domains:
       - asamblea.go.cr
       - presidencia.go.cr

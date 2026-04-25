@@ -2,6 +2,13 @@ import type { CerebroStreamChunk, AgentId } from '@shift-cl2/shared-types';
 import { getAgent } from './agentLoader.js';
 import { searchTranscripts, type ChunkHit } from './searchTranscripts.js';
 import { searchSessionTranscript } from './searchSessionTranscript.js';
+import {
+  searchExpedientes,
+  getExpedienteById,
+  searchSilCorpus,
+  renderExpedientesForLlm,
+  renderExpedienteFullForLlm,
+} from './silClient.js';
 import { withTimeout, withRetry, ResilienceError } from './resilience.js';
 
 // Pass-1 (non-stream) is short and idempotent → retry safely.
@@ -133,6 +140,99 @@ function hasSearchTranscriptsTool(agentTools: Array<Record<string, unknown>>): b
   return agentTools.some((t) => t.name === 'search_transcripts');
 }
 
+function hasSilTools(agentTools: Array<Record<string, unknown>>): boolean {
+  return agentTools.some(
+    (t) =>
+      t.name === 'search_sil_expedientes' ||
+      t.name === 'get_sil_expediente' ||
+      t.name === 'search_sil_corpus',
+  );
+}
+
+// ─── SIL tool definitions ─────────────────────────────────────────────
+// These three cover the breadth of legislative-file queries:
+//   - search_sil_expedientes: keyword over titles (cheap, instant — use FIRST
+//     for "qué expedientes hay sobre X" type questions).
+//   - get_sil_expediente:     detail lookup once a number is identified
+//     (returns metadata + attached docs URLs).
+//   - search_sil_corpus:      semantic RAG over indexed PDFs (use for
+//     deep_insight queries that need actual statute text or arguments).
+// Citations emitted with source_type='sil_*' so the UI renders the SIL
+// badge instead of the plenaria-transcript badge.
+
+const SEARCH_SIL_EXPEDIENTES_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'search_sil_expedientes',
+    description:
+      'Busca expedientes legislativos en el SIL (Sistema de Información Legislativa de Costa Rica) por palabra clave en el título y proponente. Usalo para: "¿qué proyectos de ley hay sobre X?", "expedientes de Y comisión", "iniciativas presentadas en 2024 sobre Z". Devuelve hasta K expedientes con número, título, proponente, comisión, estado y URL canónica del SIL. Citá [N] inline después de cada afirmación. NO inventes números de expediente — solo usá los que la tool devolvió.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Términos de búsqueda en español. Ej: "minería", "reforma fiscal", "Otto Guevara".',
+        },
+        k: {
+          type: 'integer',
+          description: 'Número de expedientes a recuperar (default 10, max 25).',
+          default: 10,
+        },
+        comision: {
+          type: 'string',
+          description: 'Filtrar por comisión específica (omitir si no aplica).',
+        },
+        fecha_from: { type: 'string', description: 'Fecha desde (YYYY-MM-DD), opcional.' },
+        fecha_to: { type: 'string', description: 'Fecha hasta (YYYY-MM-DD), opcional.' },
+      },
+      required: ['query'],
+    },
+  },
+};
+
+const GET_SIL_EXPEDIENTE_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'get_sil_expediente',
+    description:
+      'Recupera el detalle completo de un expediente legislativo por su número. Usalo cuando ya identificaste el expediente (e.g. después de search_sil_expedientes) y necesitás la lista de dictámenes, mociones y otros documentos adjuntos para responder con precisión. Devuelve metadata + lista de PDFs/HTMLs disponibles con URLs.',
+    parameters: {
+      type: 'object',
+      properties: {
+        numero: {
+          type: 'integer',
+          description: 'Número de expediente (entero, sin separador de miles). Ej: 22293, no "22.293".',
+        },
+      },
+      required: ['numero'],
+    },
+  },
+};
+
+const SEARCH_SIL_CORPUS_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'search_sil_corpus',
+    description:
+      'Búsqueda semántica sobre el corpus indexado del SIL (textos de proyectos, dictámenes, mociones). Usá esta tool cuando la pregunta requiere análisis de CONTENIDO, no solo títulos: "¿cómo se ha discutido X en el congreso?", "argumentos a favor/en contra de Y", "qué dice el dictamen de mayoría sobre Z". Más cara que search_sil_expedientes — preferila SOLO si el deep_insight está activado o si la pregunta es claramente analítica.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Pregunta o tema en lenguaje natural. La tool embebe la consulta y trae los chunks más cercanos.',
+        },
+        k: {
+          type: 'integer',
+          description: 'Número de extractos a recuperar (default 6, max 15).',
+          default: 6,
+        },
+      },
+      required: ['query'],
+    },
+  },
+};
+
 // Render seconds as h:mm:ss (or m:ss for short videos). Used both in the
 // rendered tool payload Lexa reads and in citation events the UI consumes.
 function fmtTimecode(seconds: number): string {
@@ -254,6 +354,13 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   if (hasSearchTranscriptsTool(agent.tools)) tools.push(SEARCH_TRANSCRIPTS_TOOL);
   const scopeId = args.scope_legacy_session_id ?? null;
   if (scopeId !== null) tools.push(SEARCH_SESSION_TRANSCRIPT_TOOL);
+  // SIL tools: only registered when the agent YAML opts in. Letting every
+  // agent see all three would balloon the system prompt and confuse the
+  // model about when to use search_transcripts (plenarias) vs search_sil_*
+  // (expedientes). Lexa keeps both, Atlas leans on SIL, Centinela none.
+  if (hasSilTools(agent.tools)) {
+    tools.push(SEARCH_SIL_EXPEDIENTES_TOOL, GET_SIL_EXPEDIENTE_TOOL, SEARCH_SIL_CORPUS_TOOL);
+  }
 
   if (tools.length === 0) {
     await streamCompletion(
@@ -479,6 +586,191 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
         role: 'tool',
         tool_call_id: tc.id,
         content: toolPayload,
+      });
+      continue;
+    }
+
+    if (tc.function.name === 'search_sil_expedientes') {
+      let parsedArgs: { query: string; k?: number; comision?: string; fecha_from?: string; fecha_to?: string };
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments);
+      } catch {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: 'invalid json' }) });
+        continue;
+      }
+
+      let rows: Awaited<ReturnType<typeof searchExpedientes>> = [];
+      try {
+        rows = await searchExpedientes(parsedArgs);
+      } catch (err) {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: (err as Error).message }) });
+        continue;
+      }
+
+      // Citation event — same shape as plenaria citations so the UI renders
+      // them in the same cards. source_type='sil_expediente' lets the badge
+      // switch and the user can click straight to the SIL detail page.
+      args.onChunk({
+        type: 'citation',
+        payload: rows.map((r, i) => ({
+          id: `sil:exp:${r.id}`,
+          session_id: '',
+          source_ref: `Exp. ${r.numero}`,
+          content: r.titulo ?? '',
+          similarity: 1 - i / Math.max(rows.length, 1), // pseudo-rank for UI ordering
+          fecha: r.fecha_presentacion,
+          comision: r.comision,
+          tipo: r.tipo,
+          source_type: 'sil_expediente',
+          expediente_numero: r.numero,
+          estado: r.estado,
+          proponente: r.proponente,
+          url_detalle: r.url_detalle,
+          video_url: null,
+          transcript_url: null,
+        })),
+      });
+
+      const renderedExpedientes = renderExpedientesForLlm(rows);
+      messages.push({
+        role: 'tool',
+        tool_call_id: tc.id,
+        content:
+          `Resultados SIL (${rows.length}):\n\n${renderedExpedientes}\n\n---\n` +
+          `INSTRUCCIONES:\n` +
+          `1. Citá [N] inline después de cada afirmación que se base en un expediente.\n` +
+          `2. Mencioná el número de expediente con formato "Exp. 22.293" (con punto, no coma).\n` +
+          `3. Si la lista está vacía, decí "no encontré expedientes en el SIL sobre X" — no inventes.\n` +
+          `4. Si necesitás detalle de un expediente específico para profundizar, llamá a get_sil_expediente con su número.\n` +
+          `5. Hablale al usuario de "expediente", "proyecto de ley", "iniciativa" — nunca "row" ni "registro".`,
+      });
+      continue;
+    }
+
+    if (tc.function.name === 'get_sil_expediente') {
+      let parsedArgs: { numero: number };
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments);
+      } catch {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: 'invalid json' }) });
+        continue;
+      }
+      const num = Number(parsedArgs.numero);
+      if (!Number.isInteger(num) || num <= 0) {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: 'numero must be positive integer' }) });
+        continue;
+      }
+
+      let exp: Awaited<ReturnType<typeof getExpedienteById>> = null;
+      try {
+        exp = await getExpedienteById(num);
+      } catch (err) {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: (err as Error).message }) });
+        continue;
+      }
+      if (!exp) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: `Expediente ${num} no encontrado en la base local. Decile al usuario que ese expediente no está en SIL aún (puede ser muy reciente o estar archivado), y ofrecé buscar por palabra clave.`,
+        });
+        continue;
+      }
+
+      // Single-expediente citation event — useful for "tell me about Exp X"
+      // queries so the UI surfaces the link prominently.
+      args.onChunk({
+        type: 'citation',
+        payload: [
+          {
+            id: `sil:exp:${exp.id}`,
+            session_id: '',
+            source_ref: `Exp. ${exp.numero}`,
+            content: exp.titulo ?? '',
+            similarity: 1.0,
+            fecha: exp.fecha_presentacion,
+            comision: exp.comision,
+            tipo: exp.tipo,
+            source_type: 'sil_expediente',
+            expediente_numero: exp.numero,
+            estado: exp.estado,
+            proponente: exp.proponente,
+            url_detalle: exp.url_detalle,
+            video_url: null,
+            transcript_url: null,
+          },
+        ],
+      });
+
+      messages.push({
+        role: 'tool',
+        tool_call_id: tc.id,
+        content:
+          `${renderExpedienteFullForLlm(exp)}\n\n---\n` +
+          `INSTRUCCIONES:\n` +
+          `1. Si la respuesta del usuario implica analizar el TEXTO del expediente, llamá a search_sil_corpus con palabras clave del expediente — el corpus tiene los PDFs ya parseados.\n` +
+          `2. Citá [1] cuando hables de este expediente. Mencioná número como "Exp. ${exp.numero}".\n` +
+          `3. Si el usuario pide el texto literal y no aparece en los documentos listados, decile que el documento aún no está indexado.`,
+      });
+      continue;
+    }
+
+    if (tc.function.name === 'search_sil_corpus') {
+      let parsedArgs: { query: string; k?: number };
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments);
+      } catch {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: 'invalid json' }) });
+        continue;
+      }
+
+      let hits: Awaited<ReturnType<typeof searchSilCorpus>> = [];
+      try {
+        hits = await searchSilCorpus(parsedArgs);
+      } catch (err) {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: (err as Error).message }) });
+        continue;
+      }
+
+      args.onChunk({
+        type: 'citation',
+        payload: hits.map((h, i) => ({
+          id: h.chunk_id,
+          session_id: '',
+          source_ref: h.source_ref,
+          content: h.content,
+          similarity: h.similarity,
+          fecha: h.fecha,
+          comision: h.comision,
+          tipo: h.tipo,
+          source_type: h.source_type,
+          expediente_numero: h.expediente_numero,
+          url_detalle: h.url_detalle,
+          video_url: null,
+          transcript_url: null,
+          rank: i + 1,
+        })),
+      });
+
+      const renderedHits =
+        hits.length === 0
+          ? `SIN RESULTADOS — no encontré pasajes en el corpus SIL sobre "${parsedArgs.query}". Decile al usuario que no hay material indexado al respecto y ofrecé buscar por título con search_sil_expedientes.`
+          : hits
+              .map(
+                (h, i) =>
+                  `[${i + 1}] (${h.source_ref}, ${h.fecha ?? 's/f'}, ${h.comision ?? '—'})\n${h.content}`,
+              )
+              .join('\n\n---\n\n');
+      messages.push({
+        role: 'tool',
+        tool_call_id: tc.id,
+        content:
+          `Extractos del corpus SIL (${hits.length}):\n\n${renderedHits}\n\n---\n` +
+          `INSTRUCCIONES:\n` +
+          `1. Citá [N] inline después de cada afirmación.\n` +
+          `2. Si combinás varios extractos para argumentar, citá [N][M].\n` +
+          `3. Hablale al usuario de "el dictamen", "el proyecto", "la moción" — nunca "el chunk".\n` +
+          `4. Si un argumento depende de un dato que no aparece literalmente en los extractos, decí "no aparece explícito en los documentos que tengo".`,
       });
       continue;
     }

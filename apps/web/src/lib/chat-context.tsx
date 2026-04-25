@@ -68,11 +68,32 @@ export type ChunkCitation = {
   source_ref: string;
   content: string;
   similarity: number;
-  fecha: string;
-  comision: string;
-  tipo: string;
+  fecha: string | null;
+  comision: string | null;
+  tipo: string | null;
   video_url: string | null;
   transcript_url: string | null;
+  // SIL extension — populated when the citation came from a SIL tool
+  // (search_sil_expedientes / get_sil_expediente / search_sil_corpus).
+  // The renderer picks a different icon + link target when these are set.
+  source_type?:
+    | 'transcript'
+    | 'transcript_segment'
+    | 'pdf'
+    | 'web'
+    | 'metadata'
+    | 'sil_expediente'
+    | 'sil_dictamen'
+    | 'sil_mocion'
+    | 'sil_votacion'
+    | 'sil_acta'
+    | 'sil_ley';
+  expediente_numero?: string;
+  estado?: string | null;
+  proponente?: string | null;
+  url_detalle?: string | null;
+  timecode_s?: number;
+  rank?: number;
 };
 
 export type Confidence = {

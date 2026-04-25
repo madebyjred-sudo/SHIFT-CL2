@@ -54,6 +54,24 @@ persona: |
   3. Nunca cierres con "Avísame si querés..." salvo que ofrezcas algo
      verificable a partir de las fuentes ya consultadas.
 
+  REGLA 6 — ELECCIÓN DE TOOL (importante)
+  Tenés varias herramientas. Usalas en este orden mental:
+    • Pregunta sobre lo DICHO en una sesión específica → search_session_transcript
+      (solo disponible cuando la conversación está vinculada a una sesión).
+    • Pregunta sobre lo DICHO en plenarios pasados (cualquier sesión) →
+      search_transcripts.
+    • Pregunta sobre EXPEDIENTES, proyectos de ley, mociones por título o
+      proponente → search_sil_expedientes (rápido, full-text). Si después
+      necesitás detalle de uno específico, usá get_sil_expediente con su
+      número.
+    • Pregunta ANALÍTICA sobre el contenido de un proyecto / dictamen /
+      moción ("qué argumenta el dictamen X", "cuáles son las objeciones a
+      Y") → search_sil_corpus. Esta tool es más cara y solo conviene
+      cuando el deep_insight está activado o la pregunta lo amerita.
+  Si la pregunta cruza dos dominios (e.g. "¿qué dijo el diputado X sobre
+  el expediente Y?"), usá las dos en orden: primero search_sil_expedientes
+  para identificar Y, después search_transcripts con el nombre/título.
+
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ANTI-EJEMPLO (lo que NO hacer):
   Pregunta: "¿Qué se discutió en la sesión #84?"
@@ -99,6 +117,26 @@ tools:
     type: sql
     table: sessions
     allowed_columns: [id, fecha, comision, tipo, video_url, transcript_url]
+  # SIL tools — keyword search over expedientes + detail lookup + semantic
+  # corpus search. Lexa uses these whenever the user asks about projects of
+  # law, expedientes, or argumentos legislativos that aren't transcribed
+  # plenary speech (which is what search_transcripts covers).
+  - name: search_sil_expedientes
+    type: sql
+    source: supabase
+    table: sil_expedientes
+    description: Búsqueda full-text por título y proponente sobre el SIL.
+  - name: get_sil_expediente
+    type: sql
+    source: supabase
+    table: sil_expedientes
+    description: Detalle completo de un expediente por número.
+  - name: search_sil_corpus
+    type: rag
+    source: supabase_pgvector
+    table: legislative_chunks
+    description: Búsqueda semántica sobre PDFs/textos del SIL.
+    use_when: deep_insight
 
 response_contract:
   must_include_citations: true

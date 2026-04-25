@@ -107,17 +107,61 @@ Click una sesión (la elegida en §1.2) → pestaña 3.
 
 Abrir el sidebar (icono historial top-dock) — mostrar el agrupamiento "Sesión #N" arriba, conversaciones generales abajo.
 
-### Acto 3 — Chat general (2 min)
+### Acto 3 — Chat general + SIL + Deep Insight (3-4 min) ⭐ pico técnico
 
 Volver a `/` → pestaña 1.
 
-Selector de agente arriba: hacer click en `Atlas` (o `Centinela`).
+Selector de agente arriba: click en `Atlas`.
 
-> "Hasta acá vimos a Lexa, especialista en plenarias. Atlas analiza documentos y proyectos de ley; Centinela monitorea y alerta. Cada uno tiene una persona y herramientas distintas, definidas en YAML — agregar un agente nuevo es escribir un archivo, no desplegar código".
+> "Lexa es especialista en lo que se DICE en plenarias. Atlas es especialista en el SIL — el Sistema de Información Legislativa. Cada agente tiene su propia persona y conjunto de herramientas, definidas en YAML; agregar un agente nuevo es escribir un archivo, no desplegar código".
 
-Hacer una pregunta cross-session ("¿qué plenarias mencionaron `<TOPIC>`?"). Mostrar las citations que vienen de **distintas** sesiones.
+**3.A — Query SIL básico (45 s)**
 
-> **NO IDEAL** para Sprint 2: la corpus RAG (`legislative_chunks`) está parcialmente vacía hasta Fase B. Si la pregunta cross-session falla, decir: "el corpus completo se llena con la pipeline propia que entra después de la demo — para hoy quería mostrarles la mecánica".
+Tipear: `¿Qué proyectos de ley hay sobre <TEMA_HOT_DEMO>?` (e.g. "minería",
+"reforma fiscal 2024", "violencia contra la mujer").
+
+Atlas llama a `search_sil_expedientes`. Mostrar:
+- Streaming de la respuesta con `[1]`, `[2]` inline.
+- Citation cards al final: cada card es un **expediente del SIL** con badge
+  coral, número Exp., estado, proponente, link "Ver en SIL" funcional.
+
+Click "Ver en SIL" en una card → abre `consultassil3.asamblea.go.cr` con el
+expediente real. **Acá viene el moment de claim crítico**:
+
+> "Esto NO es un demo simulado. Estamos consultando 25 mil expedientes
+> reales del SIL, indexados anoche. Cada cita es verificable contra la
+> fuente oficial".
+
+**3.B — Deep Insight (1.5 min)**
+
+Toggle `Deep Insight` ON (botón shiny coral en la barra de input).
+
+Hacer una pregunta analítica: `Compará los argumentos a favor y en contra
+del Exp. <NUMERO_DEMO>`.
+
+> **TIP:** elegir un expediente con dictamen de mayoría + minoría públicos.
+
+Atlas (ahora con Opus 4.7) llama a `search_sil_corpus` (RAG semántico).
+La respuesta es estructuralmente más rica: párrafos con argumentos
+contrastados, citas a dictámenes específicos `[N]`, link al PDF
+correspondiente.
+
+> "El toggle Deep Insight cambia el modelo a Claude Opus y habilita la
+> búsqueda semántica sobre el contenido completo de los proyectos. Para
+> queries simples Sonnet alcanza; para análisis de fondo, Opus saca el
+> jugo".
+
+**3.C — Cross-domain (45 s, opcional)**
+
+Si hay tiempo, hacer una pregunta que cruza SIL + plenarios:
+`¿Qué dijo el diputado <NOMBRE> sobre el Exp. <NUM> en plenario?`
+
+Atlas encadena `search_sil_expedientes` → `search_transcripts`. La respuesta
+trae citations de los DOS tipos: una card SIL (badge coral) y una card de
+transcripción (badge burgundy). El usuario ve la convergencia.
+
+> **NO IDEAL** si el corpus RAG todavía está corto: si Lexa/Atlas dicen
+> "no encontré X", redirigir el ejemplo a uno preparado en §1.2.
 
 ### Acto 4 — Subir sesión (1-2 min)
 
