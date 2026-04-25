@@ -82,6 +82,48 @@ async function checkLegacy(): Promise<SubsystemResult> {
   return { ok: true, latency_ms: ms, detail: { sample_rows: result } };
 }
 
+/**
+ * Cerebro Punto Medio reachability + a count of approved consolidations
+ * (the institutional flywheel's enrichment surface). NOT critical for
+ * chat to function — the BFF degrades gracefully when this returns
+ * not-ok — but it tells the operator at a glance whether
+ * /admin/punto-medio approvals will reach the live system prompt.
+ */
+async function checkPuntoMedio(): Promise<SubsystemResult> {
+  const base = process.env.CEREBRO_BASE_URL;
+  if (!base) return { ok: false, latency_ms: 0, error: 'CEREBRO_BASE_URL not set' };
+  const tenant = process.env.CEREBRO_TENANT ?? 'cl2';
+  const { result, ms, error } = await timed(async () =>
+    withTimeout(
+      async (signal) => {
+        const res = await fetch(`${base}/punto-medio/rag/${encodeURIComponent(tenant)}`, { signal });
+        if (!res.ok) throw new Error(`status ${res.status}`);
+        return (await res.json()) as {
+          combined_rag_length?: number;
+          tenant_rag_length?: number;
+          patterns_rag_length?: number;
+          global_rag_length?: number;
+        };
+      },
+      { ms: 4_000, label: 'health:punto_medio' },
+    ),
+  );
+  if (error) return { ok: false, latency_ms: ms, error };
+  // Flag empty enrichment as "ok but quiet" — not an error, just informs
+  // the operator that the manual review queue hasn't approved anything yet.
+  const lens = {
+    combined: result?.combined_rag_length ?? 0,
+    tenant: result?.tenant_rag_length ?? 0,
+    patterns: result?.patterns_rag_length ?? 0,
+    global: result?.global_rag_length ?? 0,
+  };
+  return {
+    ok: true,
+    latency_ms: ms,
+    detail: { tenant, rag_chars: lens, enriched: lens.combined > 50 },
+  };
+}
+
 async function checkOpenRouter(): Promise<SubsystemResult> {
   const key = process.env.OPENROUTER_API_KEY;
   if (!key) return { ok: false, latency_ms: 0, error: 'OPENROUTER_API_KEY not set' };
@@ -127,26 +169,29 @@ async function checkVertex(): Promise<SubsystemResult> {
 }
 
 healthRouter.get('/deep', async (req, res) => {
-  const [supabase, openrouter, vertex, legacy] = await Promise.all([
+  const [supabase, openrouter, vertex, legacy, puntoMedio] = await Promise.all([
     checkSupabase(),
     checkOpenRouter(),
     checkVertex(),
     checkLegacy(),
+    checkPuntoMedio(),
   ]);
 
-  const allOk = supabase.ok && openrouter.ok && vertex.ok && legacy.ok;
-  if (!allOk) {
+  // puntoMedio is informational, not gating: chat works without it.
+  const criticalOk = supabase.ok && openrouter.ok && vertex.ok && legacy.ok;
+  if (!criticalOk) {
     req.log?.warn('health_deep_degraded', {
       supabase: supabase.ok,
       openrouter: openrouter.ok,
       vertex: vertex.ok,
       legacy: legacy.ok,
+      punto_medio: puntoMedio.ok,
     });
   }
-  res.status(allOk ? 200 : 503).json({
-    ok: allOk,
+  res.status(criticalOk ? 200 : 503).json({
+    ok: criticalOk,
     timestamp: new Date().toISOString(),
-    subsystems: { supabase, openrouter, vertex, legacy },
+    subsystems: { supabase, openrouter, vertex, legacy, punto_medio: puntoMedio },
     caches: {
       session_context: sessionContextCacheStats(),
     },

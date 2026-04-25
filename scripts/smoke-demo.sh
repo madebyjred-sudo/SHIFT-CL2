@@ -144,7 +144,37 @@ else
   FAIL=$((FAIL+1))
 fi
 
-# 7. Rate-limit shape on /api/uploads (only verify the header exists) ─
+# 7. Expedientes auth gate ─────────────────────────────────────────────
+hr 'expedientes (canonical SIL view)'
+status="$(curl -s -o /dev/null -w '%{http_code}' "$API/api/expedientes/22293")"
+expect '/api/expedientes/:numero blocks anon' '401' "$status"
+
+if [[ -n "$JWT" ]]; then
+  body="$(curl -s -H "authorization: Bearer $JWT" "$API/api/expedientes/22293")"
+  ok=$(printf '%s' "$body" | grep -o '"ok":true' | head -1 || true)
+  if [[ -n "$ok" ]]; then
+    expect_in 'expediente lookup returns numero' '"numero"' "$body"
+  else
+    # 404 is also valid if the backfill hasn't reached this expediente yet.
+    nf=$(printf '%s' "$body" | grep -o '"not_found"' | head -1 || true)
+    if [[ -n "$nf" ]]; then
+      printf '  %s expediente 22293 not yet in DB %s\n' "$(c_dim '·')" "$(c_dim '(backfill incomplete?)')"
+    else
+      printf '  %s /api/expedientes returned unexpected shape %s\n' "$(c_red '✗')" "$(c_dim "$body")"
+      FAIL=$((FAIL+1))
+    fi
+  fi
+fi
+
+# 8. Punto Medio admin gate ────────────────────────────────────────────
+hr 'punto-medio admin gate'
+status="$(curl -s -o /dev/null -w '%{http_code}' "$API/api/punto-medio/pending")"
+expect '/api/punto-medio/pending blocks anon' '401' "$status"
+status="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/punto-medio/review/1" \
+  -H 'content-type: application/json' -d '{"action":"approve","item_type":"consolidation"}')"
+expect '/api/punto-medio/review blocks anon' '401' "$status"
+
+# 9. Rate-limit shape on /api/uploads (only verify the header exists) ─
 hr 'rate-limit headers'
 curl -s -o /dev/null -D /tmp/smoke-headers \
   -X POST "$API/api/uploads/youtube" \

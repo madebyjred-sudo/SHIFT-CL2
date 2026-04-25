@@ -123,14 +123,27 @@ Tipear: `¿Qué proyectos de ley hay sobre <TEMA_HOT_DEMO>?` (e.g. "minería",
 Atlas llama a `search_sil_expedientes`. Mostrar:
 - Streaming de la respuesta con `[1]`, `[2]` inline.
 - Citation cards al final: cada card es un **expediente del SIL** con badge
-  coral, número Exp., estado, proponente, link "Ver en SIL" funcional.
+  coral, número Exp., estado, proponente, botón "Ver expediente".
 
-Click "Ver en SIL" en una card → abre `consultassil3.asamblea.go.cr` con el
-expediente real. **Acá viene el moment de claim crítico**:
+**3.A.bis — Click en una citation → vista canónica nuestra (30 s)**
 
-> "Esto NO es un demo simulado. Estamos consultando 25 mil expedientes
-> reales del SIL, indexados anoche. Cada cita es verificable contra la
-> fuente oficial".
+Click "Ver expediente" en una card → abre **`/expediente/:numero` en
+nuestra propia URL**, no la del SIL. Layout:
+- Izquierda: cards de meta (Comisión, Proponente, Fecha, Tipo, Legislatura)
+- Derecha: lista de documentos adjuntos con pills tipadas
+  (Texto base / Dictamen mayoría / Dictamen minoría / Moción / etc.)
+- Click en un documento → se abre el PDF servido desde nuestro GCS
+  (signed URL, válida 10 min).
+
+**Acá viene el claim crítico:**
+
+> "Esto NO es un demo simulado, ni un proxy en vivo al SIL. Tenemos
+> 25 mil expedientes reales mirroreados en nuestra infraestructura.
+> Cada PDF que ven se sirve desde nuestro storage, no del sitio de la
+> Asamblea. Si el SIL se cae mañana, esto sigue funcionando".
+
+Nota chiquita: en el header del expediente hay un link "SIL oficial" que
+abre el portal upstream — opcional, para Oscar verificar contra la fuente.
 
 **3.B — Deep Insight (1.5 min)**
 
@@ -193,6 +206,8 @@ Pausar para Q&A.
 | **¿Funciona en celular?** | Responsive baseline (sidebar drawer en mobile, video stacked top). No hay PWA aún — Sprint 4 si lo piden. |
 | **¿Cómo agregamos un agente nuevo?** | YAML en `packages/cerebro-config/agents/`: persona, default_model, tools, response_contract. Reload del API. Mostrar `lexa.yaml` en pantalla si hace falta. |
 | **¿Qué pasa si OpenAI/Anthropic suben los precios?** | OpenRouter desacopla del proveedor — cambiar el `default_model` en YAML y se prueba con otro. Soportamos Anthropic, OpenAI, Mistral, Google sin tocar código. |
+| **¿Cómo controlan que la herramienta no propague mala información?** | Tres capas: (1) cada respuesta exige citation `[N]` a un extracto literal — si no hay evidencia, el agente dice "no encontré". (2) El flywheel de aprendizaje institucional pasa por una cola de revisión manual en `/admin/punto-medio` — ningún patrón consolidado entra al system prompt sin que tu equipo lo apruebe explícitamente. (3) Logging structured de cada turno con `request_id` permite auditar de dónde vino cada afirmación. |
+| **¿Y si quieren que la herramienta funcione sin internet?** | Hoy depende de OpenRouter (LLM) y Vertex (embeddings) — ambos son cloud. Para deployment on-premise hay que considerar modelos locales (Llama / Qwen). Posible pero es Sprint 6+. |
 
 ---
 
