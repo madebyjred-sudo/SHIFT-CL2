@@ -15,6 +15,7 @@ import {
   insertAssistantMessage,
   type CitationRow,
 } from '../services/conversationStore.js';
+import { firePeajeIngest } from '../services/peajeClient.js';
 
 /**
  * Convert an upstream/internal error into a user-friendly Spanish message
@@ -183,6 +184,16 @@ chatRouter.post('/stream', async (req, res) => {
       } catch (err) {
         req.log.error('assistant_persistence_failed', { error: (err as Error).message });
       }
+
+      // Fire-and-forget hand-off to the Cerebro Peaje (institutional
+      // flywheel). Voided intentionally — must not block the response or
+      // surface failures to the user. The client logs its own outcome.
+      void firePeajeIngest({
+        sessionId: conversationId,
+        agentId: body.agent_id,
+        messages: [{ role: 'user', content: body.query }],
+        response: assistantText,
+      });
     }
   } catch (err) {
     req.log.error('stream_failed', {
