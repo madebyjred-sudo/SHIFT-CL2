@@ -246,8 +246,11 @@ export const HeroDashboard = () => {
         <div className="w-[60px]" />
       </div>
 
-      {/* Body grid */}
-      <div className="grid min-h-[480px]" style={{ gridTemplateColumns: "220px minmax(0,1fr) 260px" }}>
+      {/* Body grid — single column on mobile (sidebars are hidden lg:flex,
+          but the inline grid template would still reserve 220+260px
+          tracks and squeeze the conversation off-screen on a 375px
+          phone). The lg+ breakpoint restores the original 3-col chrome. */}
+      <div className="grid min-h-[460px] grid-cols-1 lg:[grid-template-columns:220px_minmax(0,1fr)_260px]">
         {/* Sidebar (decorative) */}
         <aside className="hidden lg:flex border-r border-cl2-ink/[0.06] bg-cl2-ink/[0.015] p-4 flex-col gap-5">
           <div className="flex items-center gap-2 px-2.5 py-2 bg-white border border-cl2-ink/[0.08] rounded-lg text-[12px] text-cl2-ink/50">
