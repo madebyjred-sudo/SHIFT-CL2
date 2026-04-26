@@ -17,7 +17,7 @@
  * load (e.g. CDN blocked). In normal operation playback never stops.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Calendar, Clock, FileSliders, MessageSquare, Search, Sparkles } from 'lucide-react';
+import { ArrowLeft, Calendar, Clock, Eye, EyeOff, FileSliders, MessageSquare, Search, Sparkles } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -70,6 +70,10 @@ export function SesionViewPage({ sesionId }: Props) {
   // video is playing; idle when paused. Used by the transcript pane to
   // highlight the active segment and auto-scroll to it.
   const [currentTime, setCurrentTime] = useState(0);
+  // True only while the YT player is actually PLAYING. Drives the
+  // transcript focus-mode blur (we lift the blur on pause so the user
+  // can read freely without toggling).
+  const [isPlaying, setIsPlaying] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -164,6 +168,7 @@ export function SesionViewPage({ sesionId }: Props) {
               youtubeId={detail?.youtube_id ?? null}
               seekToken={seekToken}
               onTimeUpdate={setCurrentTime}
+              onPlayStateChange={setIsPlaying}
             />
             <div className="mt-5">
               <ResumenPanel resumen={detail?.resumen} />
@@ -186,6 +191,7 @@ export function SesionViewPage({ sesionId }: Props) {
                   setSearch={setSearch}
                   onSeek={handleSeek}
                   currentTime={currentTime}
+                  isPlaying={isPlaying}
                 />
               ) : (
                 <div className="h-full min-h-0">
@@ -279,6 +285,7 @@ function VideoPlayer({
   youtubeId,
   seekToken,
   onTimeUpdate,
+  onPlayStateChange,
 }: {
   youtubeId: string | null;
   seekToken: { t: number; n: number } | null;
@@ -286,6 +293,10 @@ function VideoPlayer({
    *  position in seconds (float). Pauses tick when the player isn't
    *  PLAYING so the parent doesn't churn re-renders for nothing. */
   onTimeUpdate?: (seconds: number) => void;
+  /** Fired whenever YT.PlayerState transitions. Lets the transcript
+   *  pane gate its focus-mode blur to actual playback instead of
+   *  blurring while the user paused to study a segment. */
+  onPlayStateChange?: (isPlaying: boolean) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<YTPlayer | null>(null);
@@ -296,6 +307,8 @@ function VideoPlayer({
   // re-render that passes a new arrow function tears down the loop).
   const onTimeUpdateRef = useRef(onTimeUpdate);
   useEffect(() => { onTimeUpdateRef.current = onTimeUpdate; }, [onTimeUpdate]);
+  const onPlayStateChangeRef = useRef(onPlayStateChange);
+  useEffect(() => { onPlayStateChangeRef.current = onPlayStateChange; }, [onPlayStateChange]);
 
   // Load the API lazily on first mount. If it fails we fall back to the
   // older iframe-reload behavior so the demo never ends up with a black box.
@@ -353,8 +366,10 @@ function VideoPlayer({
         onStateChange: (e: { data: number }) => {
           // YT.PlayerState: 1 = playing. Ticks while playing, idle
           // otherwise — keeps re-render cost near zero on pause.
-          if (e.data === 1) startPolling();
+          const playing = e.data === 1;
+          if (playing) startPolling();
           else stopPolling();
+          onPlayStateChangeRef.current?.(playing);
         },
       },
     });
@@ -457,7 +472,7 @@ function ResumenPanel({ resumen }: { resumen?: SessionDetail['resumen'] }) {
 // --- Transcript ---------------------------------------------------------
 
 function TranscriptPanel({
-  transcript, segments, search, setSearch, onSeek, currentTime,
+  transcript, segments, search, setSearch, onSeek, currentTime, isPlaying,
 }: {
   transcript: TranscriptPayload | null;
   segments: TranscriptSegment[];
@@ -466,6 +481,9 @@ function TranscriptPanel({
   onSeek: (t: number) => void;
   /** Live playhead (seconds, float). 0 when paused/cued. */
   currentTime: number;
+  /** True while YT player state === PLAYING. Drives the focus-mode
+   *  blur (paused → blur lifts so the user can read freely). */
+  isPlaying: boolean;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
   const activeRef = useRef<HTMLLIElement>(null);
@@ -475,6 +493,18 @@ function TranscriptPanel({
   // than USER_SCROLL_PAUSE_MS.
   const userScrolledAtRef = useRef(0);
   const USER_SCROLL_PAUSE_MS = 4000;
+  // Apple-Music-style focus mode. User toggles via the eye button; we
+  // store in localStorage so the preference survives refresh. The blur
+  // only takes effect while the video is actually PLAYING — pause
+  // lifts everything so the user can scan freely without un-toggling.
+  const [focusMode, setFocusMode] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem('cl2.transcript.focusMode') === '1';
+  });
+  useEffect(() => {
+    localStorage.setItem('cl2.transcript.focusMode', focusMode ? '1' : '0');
+  }, [focusMode]);
+  const focusActive = focusMode && isPlaying;
 
   // Active segment by binary-searching the playhead against segment.start.
   // `segments` may be filtered by the search box, but we want highlighting
@@ -540,31 +570,100 @@ function TranscriptPanel({
   return (
     <div className="h-full flex flex-col min-h-0">
       <div className="px-3 pt-2 pb-2 border-b border-[#0e1745]/[0.06] dark:border-white/[0.06]">
-        <div className="relative">
-          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={`Buscar en ${transcript.word_count.toLocaleString('es-CR')} palabras…`}
-            aria-label="Buscar en transcripción"
-            className="w-full pl-8 pr-3 py-1.5 rounded-md bg-gray-50 dark:bg-white/5 border border-transparent text-xs transition focus:outline-none focus:ring-2 focus:ring-cl2-accent/30 focus:border-cl2-accent/40"
-          />
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1">
+            <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={`Buscar en ${transcript.word_count.toLocaleString('es-CR')} palabras…`}
+              aria-label="Buscar en transcripción"
+              className="w-full pl-8 pr-3 py-1.5 rounded-md bg-gray-50 dark:bg-white/5 border border-transparent text-xs transition focus:outline-none focus:ring-2 focus:ring-cl2-accent/30 focus:border-cl2-accent/40"
+            />
+          </div>
+          {/*
+            Focus-mode toggle. Apple-Music style: when ON and the video
+            is playing, every segment except the active one fades + blurs.
+            When the video pauses, the blur lifts automatically so the
+            user can scan/read freely. Hover popover explains the
+            behavior — kept inline (no library) so this stays cheap.
+          */}
+          <div className="relative group">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={focusMode}
+              aria-label={focusMode ? 'Desactivar modo enfoque' : 'Activar modo enfoque'}
+              onClick={() => setFocusMode((v) => !v)}
+              className={cn(
+                'inline-flex h-7 w-7 items-center justify-center rounded-md border transition-all',
+                focusMode
+                  ? 'bg-cl2-accent/[0.10] border-cl2-accent/30 text-cl2-accent dark:text-cl2-accent-soft shadow-[0_0_0_3px_rgba(249,53,73,0.08)]'
+                  : 'bg-gray-50 dark:bg-white/5 border-transparent text-gray-400 hover:text-[#0e1745] dark:hover:text-white hover:border-[#0e1745]/[0.10] dark:hover:border-white/[0.10]',
+              )}
+            >
+              {focusMode ? <Eye size={14} strokeWidth={2} /> : <EyeOff size={14} strokeWidth={1.75} />}
+            </button>
+            <div
+              role="tooltip"
+              className={cn(
+                'pointer-events-none absolute right-0 top-[calc(100%+6px)] z-30 w-60',
+                'rounded-lg border border-[#0e1745]/[0.08] dark:border-white/10',
+                'bg-white dark:bg-[#231f1f] px-3 py-2.5 shadow-[0_8px_24px_rgba(14,23,69,0.12)] dark:shadow-[0_8px_24px_rgba(0,0,0,0.45)]',
+                'opacity-0 group-hover:opacity-100 translate-y-1 group-hover:translate-y-0 transition-all duration-150',
+              )}
+            >
+              <div className="text-[11.5px] font-semibold text-[#0e1745] dark:text-white mb-0.5">
+                Modo enfoque
+              </div>
+              <div className="text-[11px] leading-relaxed text-[#0e1745]/65 dark:text-white/65">
+                Mientras el video se reproduce, todo se difumina excepto el segmento que se está hablando. Pausá el video para volver a ver todo.
+              </div>
+            </div>
+          </div>
         </div>
       </div>
       <div ref={listRef} className="flex-1 min-h-0 overflow-y-auto px-1 py-2">
         {segments.length === 0 ? (
           <p className="text-center text-xs text-gray-400 py-8">Sin coincidencias.</p>
         ) : (
-          <ul className="divide-y divide-[#0e1745]/[0.04] dark:divide-white/[0.04]">
+          <ul
+            className={cn(
+              // Drop the divider lines when focus is active — blurred
+              // hairlines turn into a smudgy gradient that fights the
+              // Apple-Music feel. Without focus we keep them for scan-
+              // friendliness.
+              focusActive ? '' : 'divide-y divide-[#0e1745]/[0.04] dark:divide-white/[0.04]',
+            )}
+          >
             {segments.map((seg) => {
               const isActive = seg.index === activeSegmentIndex;
+              // Fade non-active rows when focus mode is engaged AND the
+              // video is playing. Each row also gets a soft scale shift
+              // — the active grows imperceptibly, the rest shrink — so
+              // the eye locks on the current line without conscious
+              // effort. Transitions are 380ms cubic-bezier — long
+              // enough to feel intentional, short enough to track speech.
+              const dim = focusActive && !isActive;
               return (
-                <li key={seg.index} ref={isActive ? activeRef : null}>
+                <li
+                  key={seg.index}
+                  ref={isActive ? activeRef : null}
+                  className="transition-all duration-[380ms]"
+                  style={{
+                    filter: dim ? 'blur(2px)' : 'blur(0)',
+                    opacity: dim ? 0.32 : 1,
+                    transform: focusActive
+                      ? isActive ? 'scale(1.015)' : 'scale(0.985)'
+                      : 'scale(1)',
+                    transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)',
+                  }}
+                >
                   <button
                     type="button"
                     onClick={() => onSeek(seg.start)}
                     className={cn(
-                      'group w-full text-left px-3 py-2.5 transition-all',
+                      'group w-full text-left px-3 py-2.5 transition-all duration-300',
                       isActive
                         ? 'bg-cl2-burgundy/[0.08] dark:bg-cl2-accent/[0.10] ring-1 ring-inset ring-cl2-burgundy/30 dark:ring-cl2-accent/30 shadow-[inset_2px_0_0_var(--color-cl2-accent)]'
                         : 'hover:bg-cl2-accent/5',
