@@ -1,9 +1,12 @@
 # CL2 Demo Runbook — 2026-05-08
 
-**Cliente:** Oscar Solano (Asamblea Legislativa de Costa Rica)
+**Audiencia primaria:** Oscar Solano (VP Shift, co-owner de CL2 con Rodrigo).
+**Audiencia secundaria (importante):** El comprador externo de Oscar+Rodrigo. Oscar **pasa este demo tal cual**, no lo re-pulir antes — lo que vea el cliente final es lo que Jred entregue.
 **Duración objetivo:** 12-15 min demo + Q&A abierto
 **Presentador:** Juanma (Jred)
 **Backup contact:** —
+
+> **Frame correcto (2026-04-26):** Oscar NO es cliente — es socio interno. El cliente es externo y el deal está cerrado. Pulir como si el comprador fuera a ver cada cuadro.
 
 ---
 
@@ -70,11 +73,13 @@ Loguearse **antes** de empezar. El demo arranca con app autenticada — la panta
 
 ## 2. Flow del demo (12-15 min)
 
-### Acto 0 — Apertura (30 s)
+### Acto 0 — Apertura (45 s)
 
-> "Cerebro Legislativo 2.0 es una plataforma de inteligencia conversacional construida específicamente sobre el corpus de la Asamblea. La que ven hoy es la versión que va a usar tu equipo."
+> "Cerebro Legislativo 2.0 no es un chatbot legislativo. Es un nodo en una infraestructura más grande — Cerebro — que aprende de cada interacción que hacen ustedes y de las otras verticales que corren sobre la misma base. Cada pregunta que hace tu equipo pasa por **Peaje** (lo registra), por revisión humana de calidad cuando aplica, y vuelve por **Punto Medio** enriquecida. La herramienta de hoy es más útil que la de mañana porque mañana el corpus pesa más. Eso es lo que están comprando."
 
 Abrir pestaña 1. **NO mostrar** la pantalla de login.
+
+> **TIP del presentador:** este párrafo es el ancla narrativa. Si Oscar lo pasa al cliente y solo retienen una idea, que sea esta — *activo que crece, no app estática.*
 
 ### Acto 1 — Sesiones index (1 min)
 
@@ -188,7 +193,13 @@ Submit → mostrar el banner de polling. Explicar: "el sistema baja el audio, tr
 
 ### Acto 5 — Cierre (1 min)
 
-> "Lo que vieron es Sprint 2: chat multi-agente con citations verificables, video sincronizado al timecode citado, e ingestión nueva. Sprint 3 (4-6 semanas post-demo) reemplaza el worker legacy con pipeline propia y libera Atlas y Centinela para análisis de PDF y alertas push".
+> "Lo que vieron es CL2 Sprint 2: chat multi-agente con citations verificables, video sincronizado al timecode citado, e ingestión nueva. Tres cosas para llevar:
+>
+> 1. **Cada query del equipo enriquece el cerebro.** Eso significa que en seis meses la herramienta va a responder mejor que hoy sobre exactamente los temas que más usaron — sin pedirles nada extra.
+>
+> 2. **Esto no es una isla.** Cerebro es la base sobre la que corren otras verticales — Shifty Studio (canvas conversacional + workflows visuales), Centinela (PR y riesgo enterprise) — y el conocimiento legislativo que ustedes generan acá puede conectarse cuando lo decidan. Hoy no se prende, pero la puerta está abierta.
+>
+> 3. **Sprint 3 (4-6 semanas post-demo)** reemplaza el worker legacy con pipeline propia y libera Atlas y Centinela para análisis de PDF y alertas push."
 
 Pausar para Q&A.
 
@@ -206,7 +217,9 @@ Pausar para Q&A.
 | **¿Funciona en celular?** | Responsive baseline (sidebar drawer en mobile, video stacked top). No hay PWA aún — Sprint 4 si lo piden. |
 | **¿Cómo agregamos un agente nuevo?** | YAML en `packages/cerebro-config/agents/`: persona, default_model, tools, response_contract. Reload del API. Mostrar `lexa.yaml` en pantalla si hace falta. |
 | **¿Qué pasa si OpenAI/Anthropic suben los precios?** | OpenRouter desacopla del proveedor — cambiar el `default_model` en YAML y se prueba con otro. Soportamos Anthropic, OpenAI, Mistral, Google sin tocar código. |
-| **¿Cómo controlan que la herramienta no propague mala información?** | Tres capas: (1) cada respuesta exige citation `[N]` a un extracto literal — si no hay evidencia, el agente dice "no encontré". (2) El flywheel de aprendizaje institucional pasa por una cola de revisión manual en `/admin/punto-medio` — ningún patrón consolidado entra al system prompt sin que tu equipo lo apruebe explícitamente. (3) Logging structured de cada turno con `request_id` permite auditar de dónde vino cada afirmación. |
+| **¿Cómo controlan que la herramienta no propague mala información?** | Tres capas: (1) cada respuesta exige citation `[N]` a un extracto literal — si no hay evidencia, el agente dice "no encontré". (2) El flywheel **Peaje → Punto Medio** pasa por una cola de revisión manual en `/admin/punto-medio` — ningún patrón consolidado entra al system prompt sin que un humano lo apruebe explícitamente. (3) Logging structured de cada turno con `request_id` permite auditar de dónde vino cada afirmación. |
+| **¿Esto es una herramienta que compramos hoy o también compramos lo que viene?** | Ambos. Hoy reciben CL2 funcionando para el equipo legislativo. Detrás vive Cerebro, la infraestructura compartida que también corre otras verticales de Shift — Shifty Studio y Centinela. Su corpus se queda con ustedes; cuando quieran abrir más superficies (PR, riesgo, análisis enterprise), no tienen que rehacer nada — los nodos ya hablan entre sí. |
+| **¿Qué nos diferencia de una herramienta como [competidor]?** | Tres cosas concretas: (1) **citation contract estricta** — el agente literalmente no responde sin evidencia citable; otros disclaim'an precisión y le dicen al usuario que verifique. (2) **Flywheel Peaje + Punto Medio** — cada uso fortalece el activo; otras herramientas reinician contexto cada sesión. (3) **Plataforma multi-vertical**: lo que hacen acá conecta con otras superficies cuando lo necesiten, sin migrar nada. |
 | **¿Y si quieren que la herramienta funcione sin internet?** | Hoy depende de OpenRouter (LLM) y Vertex (embeddings) — ambos son cloud. Para deployment on-premise hay que considerar modelos locales (Llama / Qwen). Posible pero es Sprint 6+. |
 
 ---
