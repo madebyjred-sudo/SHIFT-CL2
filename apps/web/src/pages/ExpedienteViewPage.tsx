@@ -15,7 +15,7 @@
  *   └──────────────────────┴──────────────────────┘
  */
 import { useEffect, useState, type MouseEvent } from 'react';
-import { ArrowLeft, ExternalLink, FileText, Gavel, Calendar, Users, Building2, Scale } from 'lucide-react';
+import { ArrowLeft, Download, ExternalLink, FileText, Gavel, Calendar, Users, Building2, Scale } from 'lucide-react';
 import { TopDock } from '@/components/top-dock';
 import { navigate } from '@/lib/router';
 import { fetchExpediente, resolveDocUrl, type Expediente, type ExpedienteDoc } from '@/services/expedientesApi';
@@ -206,57 +206,78 @@ function MetaCard({ icon, label, value, small }: { icon: React.ReactNode; label:
   );
 }
 
+/**
+ * Build a clean filename from doc + resolved URL.
+ *   "Exp-22501-dictamen-mayoria-2025-11-04.pdf"
+ * The extension is taken from the resolved URL's path (signed GCS URL
+ * preserves the original object name), with .pdf as a safety fallback.
+ */
+function computeDownloadFilename(doc: ExpedienteDoc, resolvedUrl: string): string {
+  const path = (() => {
+    try { return new URL(resolvedUrl).pathname; } catch { return resolvedUrl; }
+  })();
+  const extMatch = path.match(/\.([a-z0-9]{2,5})$/i);
+  const ext = (extMatch ? extMatch[1] : 'pdf').toLowerCase();
+  const tipoSlug = doc.tipo.replace(/_/g, '-');
+  const dateSlug = doc.fecha ? doc.fecha.slice(0, 10) : '';
+  return `Exp-${doc.expediente_id}-${tipoSlug}${dateSlug ? `-${dateSlug}` : ''}.${ext}`;
+}
+
 function DocRow({ doc }: { doc: ExpedienteDoc }) {
   const t = tipoLabel(doc.tipo);
-  const [opening, setOpening] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Click handler that resolves the auth-gated view_url to a signed URL
-  // (or source_url fallback) and opens it in a new tab.
-  //
-  // Two subtleties:
-  //   1. We pre-open a placeholder tab BEFORE the await so popup blockers
-  //      treat it as user-initiated — async window.open after a fetch
-  //      gets blocked.
-  //   2. We CANNOT pass 'noopener' to that placeholder open: with noopener,
-  //      window.open returns null and we lose the handle, so we can't
-  //      redirect it. Acceptable because we control the resolved URL
-  //      (our own GCS signed URL or the asamblea.go.cr source) — opener
-  //      reachback isn't a real risk here. We do scrub `window.opener`
-  //      from the placeholder side just in case.
-  const handleOpen = async (e: MouseEvent) => {
+  // Click handler — actual download:
+  //   1. resolveDocUrl(view_url) hits the BFF with the JWT and returns
+  //      a self-authenticating URL (GCS signed for mirrored, asamblea.go.cr
+  //      for not-yet-mirrored).
+  //   2. fetch() the URL and read as blob, then trigger download via a
+  //      synthesized <a download>. Bypasses cross-origin download
+  //      restrictions and gives the user a real file with a clean name.
+  //   3. If the blob fetch fails (CORS on asamblea.go.cr most likely),
+  //      fall back to opening in a new tab — the user can still save it
+  //      manually, no dead-end.
+  const handleDownload = async (e: MouseEvent) => {
     e.preventDefault();
-    if (opening) return;
-    setOpening(true);
+    if (downloading) return;
+    setDownloading(true);
     setError(null);
-    const placeholder = window.open('about:blank', '_blank');
-    if (placeholder) {
-      try { placeholder.opener = null; } catch { /* cross-origin lock-down ok */ }
-    }
     try {
       const url = await resolveDocUrl(doc.view_url);
-      if (placeholder && !placeholder.closed) {
-        placeholder.location.href = url;
-      } else {
-        window.open(url, '_blank', 'noopener');
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`http ${res.status}`);
+        const blob = await res.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = computeDownloadFilename(doc, url);
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        // Some browsers race the download — give it a beat before revoking.
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 5_000);
+      } catch {
+        // CORS or network fail — fall back to a tab so the file is reachable.
+        window.open(url, '_blank', 'noopener,noreferrer');
       }
     } catch (err) {
-      if (placeholder && !placeholder.closed) placeholder.close();
       setError((err as Error).message);
     } finally {
-      setOpening(false);
+      setDownloading(false);
     }
   };
 
   return (
     <li>
-      <a
-        href={doc.view_url}
-        onClick={handleOpen}
-        target="_blank"
-        rel="noopener noreferrer"
-        aria-busy={opening}
-        className="block px-4 py-3 hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors"
+      <button
+        type="button"
+        onClick={handleDownload}
+        disabled={downloading}
+        aria-busy={downloading}
+        title="Descargar documento"
+        className="w-full text-left block px-4 py-3 hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors disabled:opacity-70"
       >
         <div className="flex items-start gap-3">
           <div className="shrink-0 mt-0.5">
@@ -277,9 +298,9 @@ function DocRow({ doc }: { doc: ExpedienteDoc }) {
                   · {Math.round(doc.text_chars / 1000)}k chars
                 </span>
               )}
-              {opening && (
+              {downloading && (
                 <span className="text-[10px] text-[#0e1745]/45 dark:text-white/45">
-                  · abriendo…
+                  · descargando…
                 </span>
               )}
             </div>
@@ -290,13 +311,16 @@ function DocRow({ doc }: { doc: ExpedienteDoc }) {
             )}
             {error && (
               <p className="text-[11px] text-rose-600 dark:text-rose-400 mt-1">
-                No se pudo abrir el documento: {error}
+                No se pudo descargar: {error}
               </p>
             )}
           </div>
-          <ExternalLink size={14} className="shrink-0 mt-1 text-[#0e1745]/35 dark:text-white/35" />
+          <Download
+            size={14}
+            className="shrink-0 mt-1 text-[#0e1745]/45 dark:text-white/45 group-hover:text-cl2-accent transition-colors"
+          />
         </div>
-      </a>
+      </button>
     </li>
   );
 }
