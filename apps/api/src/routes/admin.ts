@@ -957,6 +957,108 @@ function quoteCsv(s: string): string {
   return s;
 }
 
+// ─── Podcasts telemetry ──────────────────────────────────────────────
+//
+// Operator visibility into the podcast pipeline: how many today / week,
+// status breakdown, ElevenLabs char cost, fail rate, and the most
+// recent rows so they can debug a stuck job.
+adminRouter.get('/podcasts/stats', async (req, res) => {
+  try {
+    const s = supa();
+    const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+    const [
+      { count: total },
+      { count: count24h },
+      { count: count7d },
+      { count: failed7d },
+      { count: inFlight },
+      { data: byStatusRows },
+      { data: bySourceRows },
+      { data: costRows },
+      { data: recentRows },
+    ] = await Promise.all([
+      s.from('podcasts').select('id', { count: 'exact', head: true }),
+      s
+        .from('podcasts')
+        .select('id', { count: 'exact', head: true })
+        .gte('created_at', since24h),
+      s
+        .from('podcasts')
+        .select('id', { count: 'exact', head: true })
+        .gte('created_at', since7d),
+      s
+        .from('podcasts')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'failed')
+        .gte('created_at', since7d),
+      s
+        .from('podcasts')
+        .select('id', { count: 'exact', head: true })
+        .in('status', ['queued', 'scripting', 'tts', 'encoding']),
+      s.from('podcasts').select('status').limit(2000),
+      s.from('podcasts').select('source_type').limit(2000),
+      s
+        .from('podcasts')
+        .select('cost_chars, duration_actual_s')
+        .gte('created_at', since7d)
+        .not('cost_chars', 'is', null)
+        .limit(2000),
+      s
+        .from('podcasts')
+        .select(
+          'id, source_type, source_id, title, status, progress, error, cost_chars, duration_actual_s, created_at, finished_at',
+        )
+        .order('created_at', { ascending: false })
+        .limit(20),
+    ]);
+
+    const byStatus: Record<string, number> = {};
+    for (const r of (byStatusRows ?? []) as Array<{ status: string }>) {
+      byStatus[r.status] = (byStatus[r.status] ?? 0) + 1;
+    }
+    const bySource: Record<string, number> = {};
+    for (const r of (bySourceRows ?? []) as Array<{ source_type: string }>) {
+      bySource[r.source_type] = (bySource[r.source_type] ?? 0) + 1;
+    }
+    const cost = (costRows ?? []).reduce(
+      (acc, r) => {
+        const cr = r as { cost_chars: number | null; duration_actual_s: number | null };
+        return {
+          chars7d: acc.chars7d + (cr.cost_chars ?? 0),
+          duration_s_7d: acc.duration_s_7d + (cr.duration_actual_s ?? 0),
+        };
+      },
+      { chars7d: 0, duration_s_7d: 0 },
+    );
+
+    res.json(
+      live({
+        totals: {
+          all_time: total ?? 0,
+          last_24h: count24h ?? 0,
+          last_7d: count7d ?? 0,
+          failed_7d: failed7d ?? 0,
+          in_flight: inFlight ?? 0,
+        },
+        by_status: byStatus,
+        by_source_type: bySource,
+        cost: {
+          // Eleven_multilingual_v2 ≈ $0.30 / 1k chars on the standard
+          // tier. Estimate USD client-side from chars.
+          chars_7d: cost.chars7d,
+          duration_seconds_7d: cost.duration_s_7d,
+        },
+        recent: recentRows ?? [],
+      }),
+    );
+  } catch (err) {
+    req.log?.warn('admin/podcasts/stats failed', { error: (err as Error).message });
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
 // Boot — log a one-time line so the operator can see the audit_log
 // will receive entries when actions land.
 void audit({

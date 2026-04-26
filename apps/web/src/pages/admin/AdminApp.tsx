@@ -18,6 +18,7 @@ import { AgentesSection } from './sections/AgentesSection';
 import { PuntoMedioSection } from './sections/PuntoMedioSection';
 import { SesionesSection } from './sections/SesionesSection';
 import { ExpedientesSection } from './sections/ExpedientesSection';
+import { PodcastsSection } from './sections/PodcastsSection';
 import { UsuariosSection } from './sections/UsuariosSection';
 import { AuditoriaSection } from './sections/AuditoriaSection';
 import { ConfigSection } from './sections/ConfigSection';
@@ -65,6 +66,7 @@ export function AdminApp({ section }: AdminAppProps): React.ReactElement {
         {section === 'curaduria' && <PuntoMedioSection />}
         {section === 'sesiones' && <SesionesSection />}
         {section === 'expedientes' && <ExpedientesSection />}
+        {section === 'podcasts' && <PodcastsSection />}
         {section === 'usuarios' && <UsuariosSection />}
         {section === 'auditoria' && <AuditoriaSection />}
         {section === 'config' && <ConfigSection />}
