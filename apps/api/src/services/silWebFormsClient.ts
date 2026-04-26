@@ -154,8 +154,8 @@ export async function createSession(): Promise<WebFormsSession> {
 }
 
 /**
- * Look up a specific expediente by its sequential number. Returns null if
- * the SIL didn't surface a result (deleted, archived, or out of range).
+ * Push the search form WITHOUT the Select$N postback. Returns just the
+ * grid row. Used by the bulk lightweight backfill.
  */
 export async function searchByNumber(
   session: WebFormsSession,
@@ -295,6 +295,456 @@ function parseDate(input: string | null): string | null {
   // ISO already?
   const iso = input.match(/(\d{4})-(\d{2})-(\d{2})/);
   return iso ? iso[0] : null;
+}
+
+// ─── Enriched detail (Select$0 postback) ─────────────────────────────
+
+export interface ExpedienteEnriched {
+  numero: string;
+  numeroNum: number;
+  titulo: string | null;
+  proponente: string | null;
+  tipo: string | null;
+  fechaPresentacion: string | null;     // ISO date when parseable
+  fechaPublicacion: string | null;
+  numeroGaceta: string | null;
+  numeroAlcance: string | null;
+  numeroArchivado: string | null;
+  vencimientoCuatrienal: string | null;
+  vencimientoOrdinario: string | null;
+  fechaDispensa: string | null;
+  numeroLey: string | null;
+  numeroAcuerdo: string | null;
+  proponentes: string[];                // multiple firmantes if any
+  comisiones: Array<{ organo: string; fecha: string | null }>;
+}
+
+/**
+ * After searchByNumber lands a row in the grid, fire the inline Select$0
+ * postback to expand the detail panel. Returns the parsed enriched fields
+ * (proponente, fechas, comisión, gaceta, ley number, etc.) — NOT the PDFs
+ * because those live in further nested grids that require additional
+ * postbacks (out of scope for bulk).
+ *
+ * Idempotent in spirit: running twice produces the same result for the
+ * same expediente, but the SIL VIEWSTATE rotates so callers should pass
+ * a freshly-searched session each time (don't reuse across expedientes).
+ */
+export async function selectExpedienteDetail(
+  session: WebFormsSession,
+  expedienteNum: number,
+): Promise<{ session: WebFormsSession; enriched: ExpedienteEnriched | null }> {
+  const form = new URLSearchParams();
+  form.set('__EVENTTARGET', 'ctl00$ContentPlaceHolder1$grvLey');
+  form.set('__EVENTARGUMENT', 'Select$0');
+  form.set('__VIEWSTATE', session.viewState);
+  form.set('__VIEWSTATEGENERATOR', session.viewStateGenerator);
+  form.set('__EVENTVALIDATION', session.eventValidation);
+  // Echo the search inputs back so the server keeps the same row context.
+  form.set('ctl00$ContentPlaceHolder1$tbxBuscaLey', String(expedienteNum));
+  form.set('ctl00$ContentPlaceHolder1$tbxBuscaDescripcion', '');
+
+  const { html, setCookie } = await rawFetch(
+    `${SIL_WEBFORMS_BASE}${PAGE_PATH}`,
+    {
+      method: 'POST',
+      headers: {
+        ...COMMON_HEADERS,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Cookie: session.cookies,
+        Origin: SIL_WEBFORMS_BASE,
+        Referer: `${SIL_WEBFORMS_BASE}${PAGE_PATH}`,
+      },
+      body: form.toString(),
+    },
+    `webforms:select:${expedienteNum}`,
+  );
+
+  const cookies = mergeCookies(session.cookies, setCookie);
+  const hidden = parseHiddenFields(html);
+  const newSession: WebFormsSession = { ...hidden, cookies, lastHtml: html };
+
+  const enriched = parseEnrichedDetail(html, expedienteNum);
+  return { session: newSession, enriched };
+}
+
+/** Flatten the detail panel into a flat label→value map for downstream parse. */
+function buildFieldMap(html: string): Map<string, string> {
+  const $ = cheerio.load(html);
+  const map = new Map<string, string>();
+  $('table tr').each((_, tr) => {
+    const cells = $(tr).find('td, th');
+    if (cells.length < 2) return;
+    const label = ($(cells[0]).text() ?? '').trim();
+    const value = ($(cells[1]).text() ?? '').trim();
+    if (!label || label.length > 80) return;
+    if (!map.has(label)) map.set(label, value);
+  });
+  return map;
+}
+
+const SPANISH_MONTH: Record<string, string> = {
+  ene: '01', feb: '02', mar: '03', abr: '04', may: '05', jun: '06',
+  jul: '07', ago: '08', sep: '09', set: '09', oct: '10', nov: '11', dic: '12',
+};
+
+function parseSilDate(input: string | null | undefined): string | null {
+  if (!input) return null;
+  // SIL formats: "09-nov.-2020" / "09-nov-2020" / "9 de noviembre de 2020"
+  const m1 = input.match(/(\d{1,2})[-\s\/]+([A-Za-zñ]+)\.?[-\s\/]+(\d{4})/);
+  if (m1) {
+    const [, d, m, y] = m1;
+    const monthKey = m.slice(0, 3).toLowerCase();
+    const month = SPANISH_MONTH[monthKey];
+    if (month) return `${y}-${month}-${d.padStart(2, '0')}`;
+  }
+  const m2 = input.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (m2) return m2[0];
+  // dd/mm/yyyy
+  const m3 = input.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m3) return `${m3[3]}-${m3[2].padStart(2, '0')}-${m3[1].padStart(2, '0')}`;
+  return null;
+}
+
+/**
+ * Pull what we can out of the rendered detail panel. The SIL doesn't expose
+ * stable element ids on these labels, so we rely on visible label strings.
+ * Anything not found stays null — callers shouldn't trust nullable fields.
+ */
+export function parseEnrichedDetail(html: string, expedienteNum: number): ExpedienteEnriched | null {
+  const $ = cheerio.load(html);
+  // The Select$0 response should still carry the grid row; if it doesn't,
+  // the postback failed.
+  const allRows = $('[id$="grvLey"] tr');
+  const dataRows = allRows.filter((_, el) => $(el).find('td').length > 1);
+  if (dataRows.length === 0) return null;
+
+  const targetStr = String(expedienteNum);
+  let titulo: string | null = null;
+  dataRows.each((_, tr) => {
+    const tds = $(tr).find('td');
+    if (tds.length < 3) return;
+    const numText = ($(tds[1]).text() ?? '').replace(/[^\d]/g, '');
+    if (numText === targetStr) {
+      titulo = ($(tds[2]).text() ?? '').replace(/\s+/g, ' ').trim() || null;
+      return false;
+    }
+  });
+
+  const fields = buildFieldMap(html);
+  const get = (...labels: string[]): string | null => {
+    for (const l of labels) {
+      // case-insensitive label scan
+      for (const [k, v] of fields) {
+        if (k.toLowerCase().includes(l.toLowerCase())) return v || null;
+      }
+    }
+    return null;
+  };
+
+  // Proponentes: the "Secuencia de Firma → Apellidos" row is followed by
+  // ordered numbered rows like "1 → RODRIGUEZ STELLER". Capture them.
+  const proponentes: string[] = [];
+  let inFirmantes = false;
+  $('table tr').each((_, tr) => {
+    const cells = $(tr).find('td, th');
+    if (cells.length < 2) return;
+    const a = ($(cells[0]).text() ?? '').trim();
+    const b = ($(cells[1]).text() ?? '').trim();
+    if (/^Secuencia de Firma$/i.test(a) && /Apellidos/i.test(b)) {
+      inFirmantes = true;
+      return;
+    }
+    if (inFirmantes) {
+      if (/^\d+$/.test(a) && b && b.length > 1 && b.length < 80) {
+        proponentes.push(b);
+      } else if (a !== '' && !/^\d+$/.test(a)) {
+        // we left the firmantes block
+        inFirmantes = false;
+      }
+    }
+  });
+
+  // Comisiones: rows under "Órgano → Fecha de Inicio" header.
+  const comisiones: Array<{ organo: string; fecha: string | null }> = [];
+  let inOrganos = false;
+  $('table tr').each((_, tr) => {
+    const cells = $(tr).find('td, th');
+    if (cells.length < 2) return;
+    const a = ($(cells[0]).text() ?? '').trim();
+    const b = ($(cells[1]).text() ?? '').trim();
+    if (/^Órgano$/i.test(a) && /Fecha/i.test(b)) {
+      inOrganos = true;
+      return;
+    }
+    if (inOrganos) {
+      if (a && a.length > 0 && a.length < 80 && b && /\d{4}/.test(b)) {
+        // a tends to be ALL CAPS like "PLENARIO", "ARCHIVO", "JURIDICOS (ÁREA VII)"
+        if (a === a.toUpperCase() || /^[A-ZÑÁÉÍÓÚ]/.test(a)) {
+          comisiones.push({ organo: a, fecha: parseSilDate(b) });
+        }
+      } else if (!b || !/\d{4}/.test(b)) {
+        inOrganos = false;
+      }
+    }
+  });
+
+  return {
+    numero: formatExpedienteNumber(expedienteNum),
+    numeroNum: expedienteNum,
+    titulo,
+    proponente: proponentes[0] ?? null,
+    tipo: get('Tipo de Expediente', 'Tipo'),
+    fechaPresentacion: parseSilDate(get('Fecha de Inicio', 'Fecha de Presentación', 'Fecha presentación')),
+    fechaPublicacion: parseSilDate(get('Fecha de Publicación', 'Fecha publicación')),
+    numeroGaceta: get('Número de Gaceta'),
+    numeroAlcance: get('Número de Alcance'),
+    numeroArchivado: get('Número de Archivado'),
+    vencimientoCuatrienal: parseSilDate(get('Vencimiento Cuatrienal')),
+    vencimientoOrdinario: parseSilDate(get('Vencimiento Ordinario')),
+    fechaDispensa: parseSilDate(get('Fecha de Dispensa')),
+    numeroLey: get('Número de Ley'),
+    numeroAcuerdo: get('Número de Acuerdo'),
+    proponentes,
+    comisiones,
+  };
+}
+
+// ─── Document downloads (DOCX, NOT PDF) ──────────────────────────────
+// Findings of the 2026-04-25 reconnaissance (sub-agent abb106391e7faa862):
+//   - SIL serves expediente documents as DOCX (Word 2007+, magic PK\x03\x04),
+//     not PDF.
+//   - There is no canonical URL per document. Downloads happen through the
+//     same `frmConsultaProyectos.aspx` ASP.NET WebForms postback mechanism,
+//     just with a different __EVENTTARGET / __EVENTARGUMENT.
+//   - Three surfaces, all reachable from the detail panel after a
+//     `searchByNumber` + `selectExpedienteDetail` pair:
+//        a) Texto base       — POST `btnDescargaTexto=Descargar` (single doc).
+//        b) Dictámenes       — POST __EVENTTARGET=grvDictamenes, EVENTARGUMENT=Select$N.
+//        c) Informes técnicos — POST __EVENTTARGET=grvTecnicos,    EVENTARGUMENT=Select$N.
+// The server responds with `Content-Disposition: attachment; filename=...`
+// + `Content-Type: application/octet-stream` + the raw DOCX bytes.
+
+export interface DocxDownload {
+  /** raw bytes of the .docx file. */
+  bytes: Buffer;
+  /** filename surfaced by the server in Content-Disposition (best-effort). */
+  filename: string | null;
+  /** content type the server reported (octet-stream typically). */
+  contentType: string | null;
+}
+
+async function rawFetchBinary(
+  url: string,
+  init: RequestInit,
+  label: string,
+): Promise<{
+  bytes: Buffer;
+  filename: string | null;
+  contentType: string | null;
+  setCookie: string[] | null;
+}> {
+  return withRetry(
+    () =>
+      withTimeout(
+        async (signal) => {
+          const res = await fetch(url, { ...init, signal });
+          if (!res.ok) throw new Error(`${label} ${res.status}`);
+          const sc =
+            typeof (res.headers as any).getSetCookie === 'function'
+              ? (res.headers as any).getSetCookie()
+              : (res.headers.get('set-cookie') ? [res.headers.get('set-cookie')!] : null);
+          const cd = res.headers.get('content-disposition') ?? '';
+          // filename can come quoted, unquoted, or RFC5987 (filename*=).
+          let filename: string | null = null;
+          const m1 = cd.match(/filename\*=UTF-8''([^;]+)/i);
+          if (m1) filename = decodeURIComponent(m1[1]);
+          if (!filename) {
+            const m2 = cd.match(/filename="?([^";]+)"?/i);
+            if (m2) filename = m2[1];
+          }
+          const contentType = res.headers.get('content-type');
+          const ab = await res.arrayBuffer();
+          const bytes = Buffer.from(ab);
+          return { bytes, filename, contentType, setCookie: sc };
+        },
+        { ms: 30_000, label },
+      ),
+    {
+      attempts: 3,
+      baseDelayMs: 800,
+      label,
+      shouldRetry: (err) => {
+        const m = (err as Error)?.message ?? '';
+        const code = m.match(/ (\d{3})$/)?.[1];
+        if (!code) return true;
+        const n = Number(code);
+        return n === 429 || n >= 500;
+      },
+    },
+  );
+}
+
+function isDocxMagic(bytes: Buffer): boolean {
+  // ZIP signature (.docx is a zipped Office Open XML container).
+  return bytes.length > 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
+}
+
+/**
+ * Download the texto base (the proyecto de ley as filed) for the currently-
+ * loaded expediente. Caller must have just done a successful
+ * searchByNumber + selectExpedienteDetail (the SIL session needs to be on
+ * the detail panel of THIS expediente).
+ *
+ * Returns null when the expediente doesn't have a downloadable texto.
+ */
+export async function downloadTextoBase(
+  session: WebFormsSession,
+  expedienteNum: number,
+): Promise<{ session: WebFormsSession; download: DocxDownload | null }> {
+  const form = new URLSearchParams();
+  form.set('__EVENTTARGET', '');
+  form.set('__EVENTARGUMENT', '');
+  form.set('__VIEWSTATE', session.viewState);
+  form.set('__VIEWSTATEGENERATOR', session.viewStateGenerator);
+  form.set('__EVENTVALIDATION', session.eventValidation);
+  form.set('ctl00$ContentPlaceHolder1$tbxBuscaLey', String(expedienteNum));
+  form.set('ctl00$ContentPlaceHolder1$tbxBuscaDescripcion', '');
+  form.set('ctl00$ContentPlaceHolder1$btnDescargaTexto', 'Descargar');
+
+  const { bytes, filename, contentType, setCookie } = await rawFetchBinary(
+    `${SIL_WEBFORMS_BASE}${PAGE_PATH}`,
+    {
+      method: 'POST',
+      headers: {
+        ...COMMON_HEADERS,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Cookie: session.cookies,
+        Origin: SIL_WEBFORMS_BASE,
+        Referer: `${SIL_WEBFORMS_BASE}${PAGE_PATH}`,
+      },
+      body: form.toString(),
+    },
+    `webforms:download_texto:${expedienteNum}`,
+  );
+
+  const cookies = mergeCookies(session.cookies, setCookie);
+  // The server may respond with HTML (the detail panel re-rendered) instead
+  // of a DOCX when the texto isn't available. Detect by magic bytes.
+  if (!isDocxMagic(bytes)) {
+    // Try to recover hidden state from the HTML response so the session is
+    // still usable for subsequent calls.
+    try {
+      const html = bytes.toString('utf8');
+      const hidden = parseHiddenFields(html);
+      return {
+        session: { ...hidden, cookies, lastHtml: html },
+        download: null,
+      };
+    } catch {
+      return { session, download: null };
+    }
+  }
+  // We got a binary; the in-memory session VIEWSTATE didn't refresh because
+  // the server didn't render HTML. Keep the current state — caller should
+  // do another GET/search round-trip if it needs more interactions.
+  return {
+    session,
+    download: {
+      bytes,
+      filename: filename ?? `expediente_${expedienteNum}_texto.docx`,
+      contentType,
+    },
+  };
+}
+
+/**
+ * Download the dictamen at index N (0-based) from the grvDictamenes grid.
+ * The detail panel for the expediente must be loaded first.
+ */
+export async function downloadDictamen(
+  session: WebFormsSession,
+  expedienteNum: number,
+  dictamenIndex: number,
+): Promise<{ session: WebFormsSession; download: DocxDownload | null }> {
+  return downloadFromGrid(session, expedienteNum, 'grvDictamenes', dictamenIndex, 'dictamen');
+}
+
+/**
+ * Download the informe técnico at index N (0-based) from grvTecnicos.
+ */
+export async function downloadInformeTecnico(
+  session: WebFormsSession,
+  expedienteNum: number,
+  tecIndex: number,
+): Promise<{ session: WebFormsSession; download: DocxDownload | null }> {
+  return downloadFromGrid(session, expedienteNum, 'grvTecnicos', tecIndex, 'tecnico');
+}
+
+async function downloadFromGrid(
+  session: WebFormsSession,
+  expedienteNum: number,
+  gridName: 'grvDictamenes' | 'grvTecnicos',
+  index: number,
+  labelPrefix: string,
+): Promise<{ session: WebFormsSession; download: DocxDownload | null }> {
+  const form = new URLSearchParams();
+  form.set('__EVENTTARGET', `ctl00$ContentPlaceHolder1$${gridName}`);
+  form.set('__EVENTARGUMENT', `Select$${index}`);
+  form.set('__VIEWSTATE', session.viewState);
+  form.set('__VIEWSTATEGENERATOR', session.viewStateGenerator);
+  form.set('__EVENTVALIDATION', session.eventValidation);
+  form.set('ctl00$ContentPlaceHolder1$tbxBuscaLey', String(expedienteNum));
+  form.set('ctl00$ContentPlaceHolder1$tbxBuscaDescripcion', '');
+
+  const { bytes, filename, contentType, setCookie } = await rawFetchBinary(
+    `${SIL_WEBFORMS_BASE}${PAGE_PATH}`,
+    {
+      method: 'POST',
+      headers: {
+        ...COMMON_HEADERS,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Cookie: session.cookies,
+        Origin: SIL_WEBFORMS_BASE,
+        Referer: `${SIL_WEBFORMS_BASE}${PAGE_PATH}`,
+      },
+      body: form.toString(),
+    },
+    `webforms:download_${labelPrefix}:${expedienteNum}:${index}`,
+  );
+
+  const cookies = mergeCookies(session.cookies, setCookie);
+  if (!isDocxMagic(bytes)) {
+    try {
+      const html = bytes.toString('utf8');
+      const hidden = parseHiddenFields(html);
+      return {
+        session: { ...hidden, cookies, lastHtml: html },
+        download: null,
+      };
+    } catch {
+      return { session, download: null };
+    }
+  }
+  return {
+    session,
+    download: {
+      bytes,
+      filename: filename ?? `expediente_${expedienteNum}_${labelPrefix}_${index}.docx`,
+      contentType,
+    },
+  };
+}
+
+/**
+ * Count the rows currently shown in a child grid (`grvDictamenes` /
+ * `grvTecnicos`) of the detail panel. Used by the bulk downloader to know
+ * how many Select$N postbacks to fire per expediente.
+ */
+export function countGridRows(html: string, gridName: 'grvDictamenes' | 'grvTecnicos'): number {
+  const $ = cheerio.load(html);
+  const rows = $(`[id$="${gridName}"] tr`).filter((_, el) => $(el).find('td').length > 1);
+  return rows.length;
 }
 
 function classifyDocByLabel(label: string | null): ExpedienteDoc['tipo'] {
