@@ -184,7 +184,12 @@ export function SesionViewPage({ sesionId }: Props) {
               onPlayStateChange={setIsPlaying}
             />
             <div className="mt-5">
-              <ResumenPanel resumen={detail?.resumen} onSendToLexa={sendToLexa} />
+              <ResumenPanel
+                resumen={detail?.resumen}
+                detail={detail}
+                transcript={transcript}
+                onSendToLexa={sendToLexa}
+              />
             </div>
           </section>
 
@@ -447,9 +452,18 @@ type ResumenVariant = 'ejecutivo' | 'puntos_clave' | 'acuerdos';
 
 function ResumenPanel({
   resumen,
+  detail,
+  transcript,
   onSendToLexa,
 }: {
   resumen?: SessionDetail['resumen'];
+  /** Whole session detail — feeds the ejecutivo's stats strip with
+   *  duration, etc. Optional so the panel still works during initial
+   *  load before the detail fetch lands. */
+  detail?: SessionDetail | null;
+  /** Transcript payload — contributes word/segment counts to the stats
+   *  strip. Optional; missing transcript just hides those tiles. */
+  transcript?: TranscriptPayload | null;
   /** When provided, each resumen card shows a small "Enviar a Lexa"
    *  affordance that pushes that card's body into the chat composer
    *  as draft context (see SesionViewPage.sendToLexa). */
@@ -502,9 +516,17 @@ function ResumenPanel({
               </button>
             )}
           </header>
-          {c.body
-            ? <ResumenBody variant={c.key} body={c.body} onSendToLexa={onSendToLexa} />
-            : <p className="text-xs text-gray-400 italic">Sin contenido para esta sección.</p>}
+          {c.key === 'ejecutivo' ? (
+            // Ejecutivo always renders — its stats + expedientes pills
+            // come from session metadata + transcript, not from the
+            // resumen body. Even when the legacy worker hasn't filled
+            // the executive paragraph yet, the strip carries weight.
+            <ExecutivoBody body={c.body} detail={detail} transcript={transcript} />
+          ) : c.body ? (
+            <ResumenBody variant={c.key} body={c.body} onSendToLexa={onSendToLexa} />
+          ) : (
+            <p className="text-xs text-gray-400 italic">Sin contenido para esta sección.</p>
+          )}
         </article>
       ))}
     </div>
@@ -559,35 +581,164 @@ function ResumenBody({
   return <AcuerdosList items={items} onSendToLexa={onSendToLexa} />;
 }
 
-function ExecutivoBody({ body }: { body: string }) {
-  // The legacy ejecutivo is one large paragraph. Keep markdown for any
-  // formatting that does come in, but apply editorial typography:
-  // generous leading, slightly larger first paragraph, tightened
-  // tracking, a soft drop cap.
+/**
+ * Executive summary body — three structural pieces, each fed from a
+ * different source so the card has rhythm even when one source is
+ * empty:
+ *
+ *   1. Stats strip (4 tiles)         ← session detail + transcript
+ *   2. Expedientes citados (pills)   ← regex over the body
+ *   3. Body paragraph                ← legacy resumen.ejecutivo
+ *
+ * Tile data, expediente pills, and body all arrive from independent
+ * sources, so the card never collapses to a single huge paragraph.
+ * If body is null, the strip + (empty pill row dropped) still hold
+ * the card together.
+ */
+function ExecutivoBody({
+  body,
+  detail,
+  transcript,
+}: {
+  body: string | null;
+  detail?: SessionDetail | null;
+  transcript?: TranscriptPayload | null;
+}) {
+  const expedientes = useMemo(() => extractExpedientes(body ?? ''), [body]);
+
+  // Stat tiles — only render the ones we actually have data for, so
+  // missing pieces don't show "—" placeholders. The grid auto-fits.
+  const tiles: Array<{ label: string; value: string; sub?: string }> = [];
+  if (detail?.duration_s) {
+    tiles.push({ label: 'Duración', value: fmtDuration(detail.duration_s) });
+  }
+  if (transcript?.word_count) {
+    tiles.push({
+      label: 'Palabras',
+      value: transcript.word_count.toLocaleString('es-CR'),
+      sub: transcript.duration_s
+        ? `${Math.round(transcript.word_count / Math.max(transcript.duration_s / 60, 1))} wpm`
+        : undefined,
+    });
+  }
+  if (transcript?.segment_count) {
+    tiles.push({ label: 'Segmentos', value: transcript.segment_count.toLocaleString('es-CR') });
+  }
+  if (expedientes.length > 0) {
+    tiles.push({ label: 'Expedientes', value: String(expedientes.length), sub: 'citados' });
+  }
+
   return (
-    <div
-      className={cn(
-        'text-[13.5px] leading-[1.65] text-[#0e1745]/85 dark:text-white/80',
-        'prose prose-sm dark:prose-invert max-w-none',
-        'prose-p:my-3 prose-p:leading-[1.65]',
-        // Drop cap on the first letter of the first paragraph. Newsreader
-        // serif provides editorial weight without flipping the whole
-        // body to serif. Coral tint keeps it on-brand.
-        '[&>div>p:first-of-type]:first-letter:font-display',
-        '[&>div>p:first-of-type]:first-letter:text-[2.4em]',
-        '[&>div>p:first-of-type]:first-letter:font-normal',
-        '[&>div>p:first-of-type]:first-letter:leading-[0.9]',
-        '[&>div>p:first-of-type]:first-letter:mr-[0.06em]',
-        '[&>div>p:first-of-type]:first-letter:float-left',
-        '[&>div>p:first-of-type]:first-letter:text-cl2-burgundy',
-        'dark:[&>div>p:first-of-type]:first-letter:text-cl2-accent-soft',
+    <div className="space-y-4">
+      {tiles.length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          {tiles.map((t) => (
+            <div
+              key={t.label}
+              className="rounded-lg border border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-[#0e1745]/[0.02] dark:bg-white/[0.02] px-3 py-2.5"
+            >
+              <div className="text-[9.5px] font-semibold uppercase tracking-[0.16em] text-[#0e1745]/50 dark:text-white/50">
+                {t.label}
+              </div>
+              <div className="mt-0.5 font-display text-[20px] font-normal leading-[1.05] tabular-nums text-[#0e1745] dark:text-white">
+                {t.value}
+              </div>
+              {t.sub && (
+                <div className="text-[10px] text-[#0e1745]/55 dark:text-white/55 mt-0.5">{t.sub}</div>
+              )}
+            </div>
+          ))}
+        </div>
       )}
-    >
-      <div>
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
-      </div>
+
+      {expedientes.length > 0 && (
+        <div>
+          <div className="text-[9.5px] font-semibold uppercase tracking-[0.16em] text-[#0e1745]/45 dark:text-white/45 mb-2">
+            Expedientes citados
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {expedientes.map((numero) => (
+              <a
+                key={numero}
+                href={`/expediente/${numero.replace(/\./g, '')}`}
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigate(`/expediente/${numero.replace(/\./g, '')}`);
+                }}
+                className={cn(
+                  'inline-flex items-center gap-1 px-2 py-1 rounded-full',
+                  'bg-cl2-burgundy/[0.08] dark:bg-cl2-accent/[0.10]',
+                  'border border-cl2-burgundy/20 dark:border-cl2-accent/30',
+                  'font-mono text-[11px] font-semibold text-cl2-burgundy dark:text-cl2-accent-soft',
+                  'hover:bg-cl2-burgundy/[0.14] dark:hover:bg-cl2-accent/[0.18] transition-colors',
+                )}
+              >
+                Exp. {numero}
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {body ? (
+        <div className="border-t border-[#0e1745]/[0.06] dark:border-white/[0.06] pt-3.5">
+          <div
+            className={cn(
+              'text-[13.5px] leading-[1.65] text-[#0e1745]/85 dark:text-white/80',
+              'prose prose-sm dark:prose-invert max-w-none',
+              'prose-p:my-3 prose-p:leading-[1.65] prose-p:first-of-type:mt-0',
+              // Subtle drop cap on the first paragraph — Newsreader,
+              // burgundy, float-left so the body wraps around it.
+              '[&>div>p:first-of-type]:first-letter:font-display',
+              '[&>div>p:first-of-type]:first-letter:text-[2.2em]',
+              '[&>div>p:first-of-type]:first-letter:font-normal',
+              '[&>div>p:first-of-type]:first-letter:leading-[0.9]',
+              '[&>div>p:first-of-type]:first-letter:mr-[0.08em]',
+              '[&>div>p:first-of-type]:first-letter:float-left',
+              '[&>div>p:first-of-type]:first-letter:text-cl2-burgundy',
+              'dark:[&>div>p:first-of-type]:first-letter:text-cl2-accent-soft',
+            )}
+          >
+            <div>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <p className="border-t border-[#0e1745]/[0.06] dark:border-white/[0.06] pt-3.5 text-[12px] text-[#0e1745]/45 dark:text-white/45 italic">
+          Resumen ejecutivo aún no procesado para esta sesión.
+        </p>
+      )}
     </div>
   );
+}
+
+/** Pull expediente numbers from a body string. Tolerates "expediente
+ *  24649", "Exp. 23.456", "exp 24.018". Dedupes preserving first-seen
+ *  order. Numbers are returned in their human format with the dot
+ *  separator when present. */
+function extractExpedientes(body: string): string[] {
+  if (!body) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  // Match: word "expediente" or "Exp." or "exp" followed by 1+ digits,
+  // optionally with a dot every 3 digits. We capture only the digits
+  // (dotted or not) and normalize to the legacy display format.
+  const rx = /\b(?:expedientes?|exp\.?)\s*(\d{1,2}(?:[.,]?\d{3})?)\b/gi;
+  let m: RegExpExecArray | null;
+  while ((m = rx.exec(body)) !== null) {
+    const raw = m[1]!.replace(/[,]/g, '.');
+    // Normalize "24649" → "24.649" for display consistency.
+    let display = raw;
+    if (!raw.includes('.') && raw.length === 5) {
+      display = `${raw.slice(0, 2)}.${raw.slice(2)}`;
+    }
+    if (!seen.has(display)) {
+      seen.add(display);
+      out.push(display);
+    }
+  }
+  return out;
 }
 
 function PuntosList({
