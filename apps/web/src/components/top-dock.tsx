@@ -12,12 +12,14 @@ interface TopDockProps {
 export function TopDock({ onOpenHistory, onToggleHistory, isHistoryOpen }: TopDockProps) {
   const { theme, toggleTheme } = useTheme();
   const path = useRoute();
-  const currentView: 'chat' | 'live' | 'admin' =
+  const currentView: 'chat' | 'live' | 'sil' | 'admin' =
     path.startsWith('/admin') ? 'admin'
+    : path.startsWith('/sil') ? 'sil'
     : path.startsWith('/sesiones') || path.startsWith('/expediente') ? 'live'
     : 'chat';
-  const handleNavigate = (view: 'chat' | 'live' | 'admin') => {
+  const handleNavigate = (view: 'chat' | 'live' | 'sil' | 'admin') => {
     if (view === 'admin') navigate('/admin/overview');
+    else if (view === 'sil') navigate('/sil');
     else navigate(view === 'live' ? '/sesiones' : '/');
   };
 

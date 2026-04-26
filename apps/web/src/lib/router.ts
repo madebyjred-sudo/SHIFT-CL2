@@ -50,6 +50,12 @@ export function matchExpedienteNumero(path: string): string | null {
   return m ? m[1] : null;
 }
 
+/** Match `/sil` (the manual browse surface). Boolean since there's
+ *  only one route — sub-views use ?query params. */
+export function isSilBrowse(path: string): boolean {
+  return /^\/sil\/?$/.test(path);
+}
+
 /** Match `/admin/punto-medio` (exact) — single page, no params. */
 export function isAdminPuntoMedio(path: string): boolean {
   return /^\/admin\/punto-medio\/?$/.test(path);

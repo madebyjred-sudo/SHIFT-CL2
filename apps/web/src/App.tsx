@@ -8,12 +8,13 @@ import { ErrorBoundary } from './components/error-boundary';
 import { SupabaseAuthView } from './components/SupabaseAuthView';
 import { AuthCallback } from './components/AuthCallback';
 import { useSupabaseStore } from './store/useSupabaseStore';
-import { useRoute, matchSesionId, matchExpedienteNumero, matchAdminSection } from './lib/router';
+import { useRoute, matchSesionId, matchExpedienteNumero, matchAdminSection, isSilBrowse } from './lib/router';
 import { SesionesListPage } from './pages/SesionesListPage';
 import { SesionViewPage } from './pages/SesionViewPage';
 import { SubirSesionPage } from './pages/SubirSesionPage';
 import { ExpedienteViewPage } from './pages/ExpedienteViewPage';
 import { AdminApp } from './pages/admin/AdminApp';
+import { SilBrowsePage } from './pages/SilBrowsePage';
 import { cn } from '@/lib/utils';
 
 export default function App() {
@@ -69,6 +70,8 @@ export default function App() {
             <ExpedienteViewPage numero={Number(expedienteNumero)} />
           ) : adminSection ? (
             <AdminApp section={adminSection} />
+          ) : isSilBrowse(path) ? (
+            <SilBrowsePage />
           ) : (
           <div className="h-screen flex flex-col bg-gray-50 dark:bg-mesh text-gray-900 dark:text-white font-sans relative overflow-hidden transition-colors duration-500">
             {/* Pixel dotted overlay — barely visible */}

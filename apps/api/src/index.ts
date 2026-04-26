@@ -23,6 +23,7 @@ import { uploadsRouter } from './routes/uploads.js';
 import { expedientesRouter } from './routes/expedientes.js';
 import { puntoMedioRouter } from './routes/puntoMedio.js';
 import { adminRouter } from './routes/admin.js';
+import { silRouter } from './routes/sil.js';
 import { requestContext } from './middleware/requestContext.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { logger } from './services/logger.js';
@@ -88,6 +89,13 @@ app.use(
   '/api/admin',
   rateLimit({ bucket: 'admin', max: 120, windowMs: 60_000 }),
   adminRouter,
+);
+app.use(
+  // SIL browse — list/filter the SIL catalog. Generous cap because the
+  // UI fires several reads on first paint (coverage + facets + page 1).
+  '/api/sil',
+  rateLimit({ bucket: 'sil', max: 240, windowMs: 60_000 }),
+  silRouter,
 );
 
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
