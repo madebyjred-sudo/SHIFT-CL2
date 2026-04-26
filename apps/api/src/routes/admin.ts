@@ -15,6 +15,7 @@ import { snapshotAll } from '../services/agentStats.js';
 import { getOverride, loadOverrides, setOverride } from '../services/agentOverrides.js';
 import { loadFlags, setFlag } from '../services/featureFlags.js';
 import { logger } from '../services/logger.js';
+import { listTranscripciones, type LegacyTranscripcion } from '../services/legacyCl2Client.js';
 
 const adminRouter = Router();
 
@@ -124,97 +125,329 @@ adminRouter.get('/alerts', async (_req, res) => {
   }
 });
 
-// ─── Transcripciones — DB rows + remaining mock queue ────────────────
+// ─── Transcripciones — legacy CL2 sessions × review state ────────────
 //
-// Until the legacy worker pushes real rows, the demo queue is the only
-// material the operator can interact with. Naïve approach was: show
-// mocks ONLY when DB is empty. That broke the moment the operator
-// approved their first item — the row landed in DB, isMock flipped
-// false, and the other six mock items vanished.
+// The queue is NOT a fake list. The legacy CL2 worker (running on the
+// VPS) transcribes plenarias automatically and stores the result in
+// MariaDB. This endpoint reads from there + cross-references with our
+// `transcripciones_review` table, which records the operator's
+// per-session approve/reject decision.
 //
-// Better: merge. Real DB rows are authoritative (their status is the
-// truth). Mock rows whose external_id is NOT yet in DB still surface
-// as `pending` so the operator can keep working through the demo
-// backlog. Approving a mock writes a new DB row → next refresh shows
-// it as approved, removes it from the mock-pending pool.
-adminRouter.get('/transcripciones', async (_req, res) => {
+// Status derivation (per legacy session):
+//
+//   review row exists → use its status (approved | rejected | pending)
+//   no review row     → status = 'pending'
+//
+// In other words: every transcribed session lands in the queue once,
+// the operator reviews it, and from then on it's tagged. There's a
+// configurable `since` window (default 30 days) to keep the list
+// manageable — older sessions are assumed already-audited and don't
+// clutter the moderation surface.
+//
+// When the legacy backend is unreachable we degrade to an empty list
+// with `degraded: true` rather than 500ing. The operator still sees
+// the section frame.
+
+// 60 days keeps the moderation queue meaningful: recent sessions land
+// here for review; anything older is assumed already-audited so we
+// don't blow the list past 100 rows. Tweak via the env var when the
+// transcription cadence changes.
+const REVIEW_WINDOW_DAYS = Number(process.env.ADMIN_TRANSCRIPCIONES_WINDOW_DAYS ?? 60);
+
+interface QueueRow {
+  external_id: string;
+  session_id: number | null;
+  sesion_label: string;
+  expediente: string | null;
+  date: string;
+  duration_seconds: number;
+  confidence: number;
+  flagged_segments: number;
+  status: 'pending' | 'in_progress' | 'approved' | 'rejected';
+  source: string;
+  speaker: string;
+  excerpt_text: string;
+  excerpt_ts: string;
+}
+
+function legacyToQueueRow(
+  legacy: LegacyTranscripcion,
+  reviewBySessionId: Map<string, { status: string; reviewer_note?: string | null }>,
+): QueueRow {
+  const sid = String(legacy.id);
+  const review = reviewBySessionId.get(sid);
+  // Legacy doesn't expose per-segment confidence, only the resumen
+  // markdown. Surface a "—" placeholder by using 100% so the UI doesn't
+  // panic, but mark flagged_segments=0 so the operator only sees real
+  // worker-flagged content (none today; future Whisper job will set it).
+  const confidence = 100;
+  const excerpt = (legacy.resumen ?? '').split('\n').find((l) => l.trim().length > 0)?.slice(0, 220) ?? '';
+  return {
+    external_id: sid,
+    session_id: legacy.id,
+    sesion_label: legacy.titulo,
+    expediente: null, // legacy doesn't link expediente; future enhancement
+    date: legacy.fecha,
+    duration_seconds: legacy.duration,
+    confidence,
+    flagged_segments: 0,
+    status: (review?.status as QueueRow['status']) ?? 'pending',
+    source: 'Legacy CL2 worker',
+    speaker: 'Plenaria',
+    excerpt_text: excerpt,
+    excerpt_ts: '0:00:00',
+  };
+}
+
+adminRouter.get('/transcripciones', async (req, res) => {
+  // Pull last N days from legacy. If legacy is down, surface a clear
+  // degraded payload so the UI shows an informational state.
+  const today = new Date();
+  const since = new Date(today);
+  since.setDate(today.getDate() - REVIEW_WINDOW_DAYS);
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+
+  let legacyRows: LegacyTranscripcion[] | null = null;
   try {
-    const s = supa();
-    const { data: dbItems } = await s
-      .from('transcripciones_review')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(200);
+    legacyRows = await listTranscripciones({
+      fecha_inicio: fmt(since),
+      fecha_fin: fmt(today),
+      limit: 200,
+    });
+  } catch (err) {
+    req.log?.warn('admin/transcripciones legacy read failed', {
+      error: (err as Error).message,
+    });
+    res.json({
+      ok: true,
+      mock: false,
+      degraded: true,
+      degraded_reason: (err as Error).message,
+      generated_at: new Date().toISOString(),
+      data: {
+        counts: { pending: 0, in_progress: 0, approved: 0, rejected: 0 },
+        items: [],
+      },
+    });
+    return;
+  }
 
-    const dbByExternal = new Map<string, Record<string, unknown>>();
-    for (const r of dbItems ?? []) {
-      const ext = (r as { external_id?: string }).external_id;
-      if (ext) dbByExternal.set(ext, r as Record<string, unknown>);
-    }
-
-    // Merged list: real DB rows first (newest first), then any mock
-    // whose external_id isn't already represented.
-    const merged: Array<Record<string, unknown>> = [];
-    for (const r of dbItems ?? []) merged.push(r as Record<string, unknown>);
-    for (const m of MOCK_QUEUE) {
-      if (!dbByExternal.has(m.external_id)) {
-        merged.push(m as unknown as Record<string, unknown>);
+  // Cross-reference with the review state table.
+  let reviewBySessionId = new Map<string, { status: string; reviewer_note?: string | null }>();
+  try {
+    const ids = legacyRows.map((r) => String(r.id));
+    if (ids.length > 0) {
+      const { data } = await supa()
+        .from('transcripciones_review')
+        .select('session_id, status, reviewer_note')
+        .in('session_id', ids);
+      for (const row of (data ?? []) as Array<{
+        session_id: string;
+        status: string;
+        reviewer_note: string | null;
+      }>) {
+        reviewBySessionId.set(row.session_id, { status: row.status, reviewer_note: row.reviewer_note });
       }
     }
-
-    const shaped = merged.map(shapeTransRow);
-    const counts = {
-      pending: shaped.filter((s) => s.status === 'pending').length,
-      in_progress: shaped.filter((s) => s.status === 'in_progress').length,
-      approved: shaped.filter((s) => s.status === 'approved').length,
-      rejected: shaped.filter((s) => s.status === 'rejected').length,
-    };
-
-    // mock=true while ANY mock is still in the merged set — the operator
-    // can read the badge and know not all rows are real upstream events
-    // yet. Flips false once every mock has been reviewed.
-    const stillHasMocks = MOCK_QUEUE.some((m) => !dbByExternal.has(m.external_id));
-    const envelope = stillHasMocks ? mocked : live;
-    res.json(envelope({ counts, items: shaped }));
   } catch (err) {
-    res.status(500).json({ ok: false, error: (err as Error).message });
+    req.log?.warn('admin/transcripciones review join failed', {
+      error: (err as Error).message,
+    });
+    reviewBySessionId = new Map();
   }
+
+  const items = legacyRows.map((l) => legacyToQueueRow(l, reviewBySessionId));
+  const counts = {
+    pending: items.filter((i) => i.status === 'pending').length,
+    in_progress: items.filter((i) => i.status === 'in_progress').length,
+    approved: items.filter((i) => i.status === 'approved').length,
+    rejected: items.filter((i) => i.status === 'rejected').length,
+  };
+
+  // Map QueueRow to the wire shape the UI already expects.
+  const wireItems = items.map((i) => ({
+    id: i.external_id,
+    session_id: i.session_id,
+    sesion_label: i.sesion_label,
+    expediente: i.expediente,
+    date: i.date,
+    duration_seconds: i.duration_seconds,
+    confidence: i.confidence,
+    flagged_segments: i.flagged_segments,
+    status: i.status,
+    source: i.source,
+    speaker: i.speaker,
+    excerpt: i.excerpt_text,
+    excerpt_ts: i.excerpt_ts,
+  }));
+
+  res.json(live({ counts, items: wireItems }));
 });
 
 adminRouter.get('/transcripciones/:id', async (req, res) => {
+  // The id here is the legacy session id (string of the integer).
+  const sessionId = String(req.params.id);
   try {
-    const { data, error } = await supa()
-      .from('transcripciones_review')
-      .select('*')
-      .eq('external_id', req.params.id)
-      .maybeSingle();
-    if (error) throw new Error(error.message);
-    if (!data) {
-      // Fall through to mock if id matches a demo one.
-      const mockItem = MOCK_QUEUE.find((q) => q.external_id === req.params.id);
-      if (mockItem) {
-        res.json(mocked(buildMockDetail(mockItem)));
-        return;
-      }
+    // 1) Find the legacy session — pull a wide window so we don't miss
+    //    older sessions the operator may want to re-review. Iterating
+    //    the whole list is fine because legacyCl2Client caps at 200.
+    const today = new Date();
+    const since = new Date(today);
+    since.setDate(today.getDate() - 365);
+    const fmt = (d: Date) => d.toISOString().slice(0, 10);
+    const legacyRows = await listTranscripciones({
+      fecha_inicio: fmt(since),
+      fecha_fin: fmt(today),
+      limit: 500,
+    });
+    const legacy = legacyRows.find((r) => String(r.id) === sessionId);
+    if (!legacy) {
       res.status(404).json({ ok: false, error: 'not_found' });
       return;
     }
-    const item = shapeTransRow(data);
-    const segments = (data.payload?.segments as Array<Record<string, unknown>> | undefined) ?? buildMockDetail(data).segments;
-    const diarization = (data.payload?.diarization as Array<Record<string, unknown>> | undefined) ?? buildMockDetail(data).diarization;
+
+    // 2) Pull the review row if any.
+    const { data: reviewRow } = await supa()
+      .from('transcripciones_review')
+      .select('status, reviewer_note, reviewed_at, payload')
+      .eq('session_id', sessionId)
+      .maybeSingle();
+
+    const review = (reviewRow ?? null) as {
+      status?: string;
+      reviewer_note?: string | null;
+      reviewed_at?: string | null;
+      payload?: { segments?: unknown[]; diarization?: unknown[]; total_segments?: number; total_words?: number };
+    } | null;
+
+    const item = legacyToQueueRow(legacy, new Map([[sessionId, { status: review?.status ?? 'pending' }]]));
+    const wireItem = {
+      id: item.external_id,
+      session_id: item.session_id,
+      sesion_label: item.sesion_label,
+      expediente: item.expediente,
+      date: item.date,
+      duration_seconds: item.duration_seconds,
+      confidence: item.confidence,
+      flagged_segments: item.flagged_segments,
+      status: item.status,
+      source: item.source,
+      speaker: item.speaker,
+      excerpt: item.excerpt_text,
+      excerpt_ts: item.excerpt_ts,
+    };
+
+    // 3) Fetch transcript segments from the legacy GCS URL when
+    //    available. Best-effort — if the JSON isn't accessible we
+    //    fall back to a single-row excerpt from the resumen.
+    let segments: Array<{ ts: string; speaker: string; text: string; confidence: number; flagged: boolean }> = [];
+    let totalSegments = 0;
+    let totalWords = 0;
+
+    if (legacy.transcripcion) {
+      try {
+        const r = await fetch(legacy.transcripcion);
+        if (r.ok) {
+          // Legacy GCS transcript shape: array with a single object
+          //   [{ ok: true, transcription: { text, words: [...], ... } }]
+          // `words` is per-token: { text, start, end, type, logprob }.
+          // `type === 'word'` are real tokens; `type === 'spacing'` are
+          // separators we can either keep as-is or filter — keeping
+          // them for natural reading flow.
+          const raw = (await r.json()) as Array<{
+            transcription?: {
+              text?: string;
+              words?: Array<{ text?: string; start?: number; end?: number; type?: string; logprob?: number }>;
+            };
+          }>;
+          const trans = raw[0]?.transcription ?? {};
+          const words = trans.words ?? [];
+          totalWords = words.filter((w) => w.type === 'word').length;
+
+          // Group words into pseudo-segments by silence gap (>1.2s) OR
+          // a hard cap of 35 words per segment. Each segment becomes
+          // a row in the moderation pane. Confidence is average of
+          // word logprobs converted to probability.
+          interface Group {
+            words: typeof words;
+            start: number;
+            end: number;
+          }
+          const groups: Group[] = [];
+          let current: Group | null = null;
+          for (const w of words) {
+            if (typeof w.start !== 'number' || typeof w.end !== 'number') continue;
+            const gap = current ? w.start - current.end : 0;
+            const tooMany = current && current.words.length >= 35;
+            if (!current || gap > 1.2 || tooMany) {
+              if (current) groups.push(current);
+              current = { words: [w], start: w.start, end: w.end };
+            } else {
+              current.words.push(w);
+              current.end = w.end;
+            }
+          }
+          if (current) groups.push(current);
+          totalSegments = groups.length;
+
+          // First 12 groups → segments for the pane. Logprob → confidence:
+          // probability = e^logprob; pct = probability * 100. We average
+          // across the group for a single confidence number.
+          segments = groups.slice(0, 12).map((g) => {
+            const text = g.words.map((w) => w.text ?? '').join('').trim();
+            const wordOnly = g.words.filter((w) => w.type === 'word' && typeof w.logprob === 'number');
+            const avgProb = wordOnly.length
+              ? wordOnly.reduce((acc, w) => acc + Math.exp(w.logprob ?? 0), 0) / wordOnly.length
+              : 1;
+            const conf = Math.round(avgProb * 100);
+            return {
+              ts: secondsToTs(g.start),
+              speaker: 'Plenaria',
+              text,
+              confidence: conf,
+              flagged: conf < 70,
+            };
+          });
+        }
+      } catch (err) {
+        req.log?.warn('admin/transcripciones detail: transcript fetch failed', {
+          error: (err as Error).message,
+          url: legacy.transcripcion,
+        });
+      }
+    }
+
+    if (segments.length === 0 && legacy.resumen) {
+      // Fallback: render the resumen as a single segment so the pane
+      // isn't empty.
+      segments = [
+        { ts: '0:00:00', speaker: 'Resumen ejecutivo', text: legacy.resumen.slice(0, 600), confidence: 100, flagged: false },
+      ];
+    }
+
     res.json(
       live({
-        item,
+        item: wireItem,
         segments,
-        diarization,
-        total_segments: (data.payload?.total_segments as number | undefined) ?? segments.length,
-        total_words: (data.payload?.total_words as number | undefined) ?? 0,
+        diarization: [], // legacy doesn't expose; future Whisper job will fill
+        total_segments: totalSegments || segments.length,
+        total_words: totalWords,
       }),
     );
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
 });
+
+function secondsToTs(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  return h > 0
+    ? `${h}:${m.toString().padStart(2, '0')}:${ss.toString().padStart(2, '0')}`
+    : `${m}:${ss.toString().padStart(2, '0')}`;
+}
 
 adminRouter.post('/transcripciones/:id/review', async (req, res) => {
   const action = req.body?.action;
@@ -223,57 +456,56 @@ adminRouter.post('/transcripciones/:id/review', async (req, res) => {
     res.status(400).json({ ok: false, error: 'action must be approve|reject' });
     return;
   }
+  // The id is the legacy session id (string of an int). The review row
+  // is keyed by session_id so each session gets exactly one decision.
+  const sessionId = String(req.params.id);
+
   try {
     const user = await getUserFromRequest(req);
-    const { data: existing } = await supa()
-      .from('transcripciones_review')
-      .select('id, external_id')
-      .eq('external_id', req.params.id)
-      .maybeSingle();
+    const status = action === 'approve' ? 'approved' : 'rejected';
 
-    if (existing) {
-      const { error } = await supa()
-        .from('transcripciones_review')
-        .update({
-          status: action === 'approve' ? 'approved' : 'rejected',
-          reviewed_by: user?.id ?? null,
-          reviewed_at: new Date().toISOString(),
-          reviewer_note: note,
-        })
-        .eq('id', existing.id);
-      if (error) throw new Error(error.message);
-    } else {
-      // Demo path: row is in mock queue, persist a stub so subsequent
-      // refreshes show it as approved/rejected.
-      const mock = MOCK_QUEUE.find((q) => q.external_id === req.params.id);
-      if (mock) {
-        await supa().from('transcripciones_review').insert({
-          external_id: mock.external_id,
-          session_id: mock.session_id ? String(mock.session_id) : null,
-          status: action === 'approve' ? 'approved' : 'rejected',
-          confidence: mock.confidence,
-          flagged_segments: mock.flagged_segments,
-          source: mock.source,
-          speaker: mock.speaker,
-          excerpt_text: mock.excerpt_text,
-          excerpt_ts: mock.excerpt_ts,
-          reviewed_by: user?.id ?? null,
-          reviewed_at: new Date().toISOString(),
-          reviewer_note: note,
-        });
-      }
-    }
+    // Upsert by session_id. If the operator changes their mind later,
+    // a second call with the opposite action overwrites the row — the
+    // audit log keeps both entries so the history is intact.
+    type ReviewUpsert = {
+      session_id: string;
+      external_id: string;
+      status: string;
+      reviewed_by: string | null;
+      reviewed_at: string;
+      reviewer_note: string | null;
+    };
+    const upsertClient = supa() as unknown as {
+      from: (t: string) => {
+        upsert: (
+          v: ReviewUpsert,
+          opts: { onConflict: string },
+        ) => Promise<{ error: { message: string } | null }>;
+      };
+    };
+    const { error } = await upsertClient.from('transcripciones_review').upsert(
+      {
+        session_id: sessionId,
+        external_id: sessionId, // unique constraint — keep mirrored
+        status,
+        reviewed_by: user?.id ?? null,
+        reviewed_at: new Date().toISOString(),
+        reviewer_note: note,
+      },
+      { onConflict: 'external_id' },
+    );
+    if (error) throw new Error(error.message);
 
     await auditFromReq(req, {
       verb: action === 'approve' ? 'aprobó' : 'rechazó',
-      resource: `transcripción ${req.params.id}`,
+      resource: `transcripción sesión #${sessionId}`,
       resource_kind: 'transcription',
-      resource_id: req.params.id,
+      resource_id: sessionId,
       result: 'ok',
       metadata: { note },
     });
 
-    res.json({ ok: true, id: req.params.id, action, ts: new Date().toISOString() });
+    res.json({ ok: true, id: sessionId, action, ts: new Date().toISOString() });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
@@ -708,97 +940,7 @@ adminRouter.get('/build', (_req, res) => {
   );
 });
 
-// ─── Helpers + mock fallbacks ────────────────────────────────────────
-
-interface MockTransRow {
-  external_id: string;
-  session_id: number | null;
-  sesion_label: string;
-  expediente: string | null;
-  date: string;
-  duration_seconds: number;
-  confidence: number;
-  flagged_segments: number;
-  status: 'pending' | 'in_progress' | 'approved' | 'rejected';
-  source: string;
-  speaker: string;
-  excerpt_text: string;
-  excerpt_ts: string;
-}
-
-const MOCK_QUEUE: MockTransRow[] = [
-  { external_id: 'tr-1287', session_id: 128, sesion_label: 'Plenaria N°128',          expediente: 'Exp. 23.456', date: '2026-04-22T00:00:00Z', duration_seconds: 8100,  confidence: 84, flagged_segments: 3,  status: 'pending', source: 'Whisper-large · v3', speaker: 'Dip. Calderón Castro', excerpt_text: 'El artículo catorce, en su redacción actual, deja un vacío que esta moción busca cerrar de manera permanente.', excerpt_ts: '1:57:26' },
-  { external_id: 'tr-1286', session_id: 0,   sesion_label: 'Comisión Hacendarios',     expediente: 'Exp. 24.018', date: '2026-04-19T00:00:00Z', duration_seconds: 10920, confidence: 71, flagged_segments: 11, status: 'pending', source: 'Whisper-large · v3', speaker: 'Dip. Mora Castillo',   excerpt_text: 'Solicito la suspensión del trámite hasta que se incorpore el dictamen afirmativo de minoría que presentamos el martes.', excerpt_ts: '0:48:11' },
-  { external_id: 'tr-1285', session_id: 127, sesion_label: 'Plenaria N°127',          expediente: 'Exp. 23.901', date: '2026-04-21T00:00:00Z', duration_seconds: 6480,  confidence: 92, flagged_segments: 1,  status: 'pending', source: 'Whisper-large · v3', speaker: 'Presidencia',          excerpt_text: 'Aprobado por unanimidad de los presentes. Se cierra la sesión a las dieciocho horas con cinco minutos.', excerpt_ts: '1:43:08' },
-  { external_id: 'tr-1284', session_id: 126, sesion_label: 'Plenaria N°126',          expediente: null,          date: '2026-04-20T00:00:00Z', duration_seconds: 2700,  confidence: 96, flagged_segments: 0,  status: 'pending', source: 'Whisper-large · v3', speaker: 'Presidencia',          excerpt_text: 'Iniciamos la sesión con la lectura del orden del día.', excerpt_ts: '0:00:24' },
-  { external_id: 'tr-1283', session_id: 125, sesion_label: 'Plenaria N°125',          expediente: null,          date: '2026-04-18T00:00:00Z', duration_seconds: 900,   confidence: 78, flagged_segments: 2,  status: 'pending', source: 'Whisper-large · v3', speaker: 'Secretaría',           excerpt_text: 'Por receso parlamentario, suspendemos hasta el lunes.', excerpt_ts: '0:12:01' },
-  { external_id: 'tr-1282', session_id: 124, sesion_label: 'Comisión Asuntos Sociales', expediente: 'Exp. 23.901', date: '2026-04-15T00:00:00Z', duration_seconds: 9000,  confidence: 88, flagged_segments: 4,  status: 'pending', source: 'Whisper-large · v3', speaker: 'Dip. Vargas Soto',     excerpt_text: 'Es necesario incluir un transitorio que proteja los derechos adquiridos antes de la entrada en vigencia.', excerpt_ts: '2:14:33' },
-  { external_id: 'tr-1281', session_id: 123, sesion_label: 'Comisión Jurídicos',       expediente: 'Exp. 22.811', date: '2026-04-12T00:00:00Z', duration_seconds: 4920,  confidence: 65, flagged_segments: 8,  status: 'pending', source: 'Whisper-large · v3', speaker: 'Sin atribuir',         excerpt_text: 'Inaudible — solapamiento con micrófono abierto.', excerpt_ts: '0:42:18' },
-];
-
-function shapeTransRow(row: Record<string, unknown>): {
-  id: string;
-  session_id: number | null;
-  sesion_label: string;
-  expediente: string | null;
-  date: string;
-  duration_seconds: number;
-  confidence: number;
-  flagged_segments: number;
-  status: 'pending' | 'in_progress' | 'approved' | 'rejected';
-  source: string;
-  speaker: string;
-  excerpt: string;
-  excerpt_ts: string;
-} {
-  // Accept either a real DB row or a mock row.
-  const externalId = (row.external_id as string | undefined) ?? '';
-  return {
-    id: externalId,
-    session_id:
-      typeof row.session_id === 'number'
-        ? (row.session_id as number)
-        : typeof row.session_id === 'string'
-          ? Number(row.session_id) || null
-          : null,
-    sesion_label: (row.sesion_label as string | undefined) ?? `Sesión ${row.session_id ?? 'N/A'}`,
-    expediente: (row.expediente as string | null | undefined) ?? null,
-    date: (row.date as string | undefined) ?? (row.created_at as string | undefined) ?? new Date().toISOString(),
-    duration_seconds: (row.duration_seconds as number | undefined) ?? 0,
-    confidence: Number(row.confidence ?? 0),
-    flagged_segments: Number(row.flagged_segments ?? 0),
-    status: (row.status as 'pending' | 'in_progress' | 'approved' | 'rejected' | undefined) ?? 'pending',
-    source: (row.source as string | undefined) ?? 'Whisper-large · v3',
-    speaker: (row.speaker as string | undefined) ?? '—',
-    excerpt: (row.excerpt_text as string | undefined) ?? '',
-    excerpt_ts: (row.excerpt_ts as string | undefined) ?? '0:00:00',
-  };
-}
-
-function buildMockDetail(item: MockTransRow | Record<string, unknown>): {
-  item: ReturnType<typeof shapeTransRow>;
-  segments: Array<{ ts: string; speaker: string; text: string; confidence: number; flagged: boolean; highlighted?: boolean }>;
-  diarization: Array<{ speaker: string; total_seconds: number; color: string }>;
-  total_segments: number;
-  total_words: number;
-} {
-  const shaped = shapeTransRow(item as Record<string, unknown>);
-  const segments = [
-    { ts: '1:55:42', speaker: 'Presidencia', text: 'Tiene la palabra el diputado Calderón Castro.', confidence: 98, flagged: false },
-    { ts: '1:57:26', speaker: 'Dip. Calderón', text: shaped.excerpt, confidence: shaped.confidence, flagged: false, highlighted: true },
-    { ts: '2:01:08', speaker: '⚠ Sin atribuir', text: 'Inaudible — solapamiento con micrófono abierto del fondo del recinto.', confidence: 42, flagged: true },
-    { ts: '2:05:14', speaker: 'Dip. Mora', text: 'Solicito moción de orden, señor Presidente.', confidence: 99, flagged: false },
-    { ts: '2:08:01', speaker: 'Presidencia', text: `Procedemos a la votación nominal del expediente ${shaped.expediente?.replace('Exp. ', '') ?? 'N/D'}.`, confidence: 99, flagged: false },
-    { ts: '2:11:33', speaker: 'Secretaría', text: '38 a favor, 7 en contra, 2 abstenciones. Aprobado.', confidence: 97, flagged: false },
-  ];
-  const diarization = [
-    { speaker: 'Presidencia', total_seconds: 862, color: '#7A3B47' },
-    { speaker: 'Dip. Calderón Castro', total_seconds: 2284, color: '#1534dc' },
-    { speaker: 'Dip. Mora Castillo', total_seconds: 767, color: '#10b981' },
-    { speaker: 'Secretaría', total_seconds: 318, color: '#f59e0b' },
-  ];
-  return { item: shaped, segments, diarization, total_segments: 1247, total_words: 18402 };
-}
+// ─── Helpers ─────────────────────────────────────────────────────────
 
 function initialsForEmail(email: string | null | undefined): string {
   if (!email) return '??';
