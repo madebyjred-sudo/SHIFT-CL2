@@ -24,6 +24,8 @@ import { expedientesRouter } from './routes/expedientes.js';
 import { puntoMedioRouter } from './routes/puntoMedio.js';
 import { adminRouter } from './routes/admin.js';
 import { silRouter } from './routes/sil.js';
+import { workspaceRouter } from './routes/workspace.js';
+import { publicDemoRouter } from './routes/publicDemo.js';
 import { requestContext } from './middleware/requestContext.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { logger } from './services/logger.js';
@@ -96,6 +98,22 @@ app.use(
   '/api/sil',
   rateLimit({ bucket: 'sil', max: 240, windowMs: 60_000 }),
   silRouter,
+);
+app.use(
+  // Workspace "Hojas" — canvas + node CRUD + export. Per-user data with
+  // RLS; cap is generous because auto-save patches fire every ~800ms.
+  '/api/workspace',
+  rateLimit({ bucket: 'workspace', max: 300, windowMs: 60_000 }),
+  workspaceRouter,
+);
+app.use(
+  // Public demo chat — anonymous traffic from /landing. Tight per-IP
+  // burst cap layered on top of the route's own 5-prompts-per-24h hard
+  // limit (defense in depth: this stops scripted bursts; the inner cap
+  // stops a returning visitor from exceeding their daily quota).
+  '/api/public',
+  rateLimit({ bucket: 'public', max: 30, windowMs: 60_000 }),
+  publicDemoRouter,
 );
 
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {

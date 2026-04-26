@@ -8,13 +8,16 @@ import { ErrorBoundary } from './components/error-boundary';
 import { SupabaseAuthView } from './components/SupabaseAuthView';
 import { AuthCallback } from './components/AuthCallback';
 import { useSupabaseStore } from './store/useSupabaseStore';
-import { useRoute, matchSesionId, matchExpedienteNumero, matchAdminSection, isSilBrowse } from './lib/router';
+import { useRoute, matchSesionId, matchExpedienteNumero, matchAdminSection, isSilBrowse, isLandingPage, isWorkspacesList, matchWorkspaceId } from './lib/router';
 import { SesionesListPage } from './pages/SesionesListPage';
 import { SesionViewPage } from './pages/SesionViewPage';
 import { SubirSesionPage } from './pages/SubirSesionPage';
 import { ExpedienteViewPage } from './pages/ExpedienteViewPage';
 import { AdminApp } from './pages/admin/AdminApp';
 import { SilBrowsePage } from './pages/SilBrowsePage';
+import { WorkspacesListPage } from './pages/WorkspacesListPage';
+import { WorkspaceCanvasPage } from './pages/WorkspaceCanvasPage';
+import { LandingPage } from './pages/LandingPage';
 import { cn } from '@/lib/utils';
 
 export default function App() {
@@ -33,6 +36,19 @@ export default function App() {
   }, [init]);
 
   if (path === '/auth/callback') return <AuthCallback />;
+
+  // /landing is the public marketing page — must render before the auth
+  // gate so prospects can visit without logging in. We still wrap it in
+  // ThemeProvider + ErrorBoundary so the theme toggle and dark mode work.
+  if (isLandingPage(path)) {
+    return (
+      <ErrorBoundary>
+        <ThemeProvider>
+          <LandingPage />
+        </ThemeProvider>
+      </ErrorBoundary>
+    );
+  }
 
   if (isAuthLoading) {
     return (
@@ -55,6 +71,7 @@ export default function App() {
   const sesionId = matchSesionId(path);
   const expedienteNumero = matchExpedienteNumero(path);
   const adminSection = matchAdminSection(path);
+  const workspaceId = matchWorkspaceId(path);
 
   return (
     <ErrorBoundary>
@@ -72,6 +89,10 @@ export default function App() {
             <AdminApp section={adminSection} />
           ) : isSilBrowse(path) ? (
             <SilBrowsePage />
+          ) : isWorkspacesList(path) ? (
+            <WorkspacesListPage />
+          ) : workspaceId ? (
+            <WorkspaceCanvasPage id={workspaceId} />
           ) : (
           <div className="h-screen flex flex-col bg-gray-50 dark:bg-mesh text-gray-900 dark:text-white font-sans relative overflow-hidden transition-colors duration-500">
             {/* Pixel dotted overlay — barely visible */}

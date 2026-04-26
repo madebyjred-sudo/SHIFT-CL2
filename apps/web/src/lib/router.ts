@@ -56,6 +56,16 @@ export function isSilBrowse(path: string): boolean {
   return /^\/sil\/?$/.test(path);
 }
 
+/**
+ * Match `/landing` — the public marketing landing. Public route: it has
+ * to render BEFORE the auth gate so prospects can visit without having
+ * to log in. Eventually the apex `agentescl2.com` will serve / 302 to
+ * this same content.
+ */
+export function isLandingPage(path: string): boolean {
+  return /^\/landing\/?$/.test(path);
+}
+
 /** Match `/admin/punto-medio` (exact) — single page, no params. */
 export function isAdminPuntoMedio(path: string): boolean {
   return /^\/admin\/punto-medio\/?$/.test(path);
@@ -109,4 +119,15 @@ export function matchAdminSection(path: string): AdminSection | null {
   if (ADMIN_SECTIONS.includes(slug as AdminSection)) return slug as AdminSection;
   if (slug in ADMIN_ALIASES) return ADMIN_ALIASES[slug]!;
   return null;
+}
+
+/** Match `/hojas` — workspaces list. */
+export function isWorkspacesList(path: string): boolean {
+  return /^\/hojas\/?$/.test(path);
+}
+
+/** Match `/hojas/:uuid` — single canvas. Returns uuid or null. */
+export function matchWorkspaceId(path: string): string | null {
+  const m = path.match(/^\/hojas\/([0-9a-f-]{36})\/?$/i);
+  return m ? m[1] : null;
 }
