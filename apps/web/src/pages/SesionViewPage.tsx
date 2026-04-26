@@ -443,6 +443,8 @@ function VideoPlayer({
 
 // --- Resumen ------------------------------------------------------------
 
+type ResumenVariant = 'ejecutivo' | 'puntos_clave' | 'acuerdos';
+
 function ResumenPanel({
   resumen,
   onSendToLexa,
@@ -463,9 +465,9 @@ function ResumenPanel({
     );
   }
 
-  const cards: Array<{ key: string; title: string; emoji: string; body: string | null }> = [
-    { key: 'ejecutivo',    title: 'Resumen ejecutivo', emoji: '🧾', body: resumen.ejecutivo },
-    { key: 'puntos_clave', title: 'Puntos clave',      emoji: '📌', body: resumen.puntos_clave },
+  const cards: Array<{ key: ResumenVariant; title: string; emoji: string; body: string | null }> = [
+    { key: 'ejecutivo',    title: 'Resumen ejecutivo',   emoji: '🧾', body: resumen.ejecutivo },
+    { key: 'puntos_clave', title: 'Puntos clave',         emoji: '📌', body: resumen.puntos_clave },
     { key: 'acuerdos',     title: 'Acuerdos y mociones', emoji: '⚖️', body: resumen.acuerdos },
   ];
 
@@ -476,9 +478,11 @@ function ResumenPanel({
           key={c.key}
           className="group/card relative rounded-xl border border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-white dark:bg-white/[0.025] shadow-[0_2px_10px_rgba(14,23,69,0.03)] dark:shadow-none p-4 sm:p-5"
         >
-          <header className="flex items-center gap-2 mb-2">
+          <header className="flex items-center gap-2 mb-3">
             <span className="text-base" aria-hidden>{c.emoji}</span>
-            <h3 className="text-sm font-semibold text-[#0e1745] dark:text-white flex-1">{c.title}</h3>
+            <h3 className="text-[10.5px] font-semibold uppercase tracking-[0.18em] text-[#0e1745]/55 dark:text-white/55 flex-1">
+              {c.title}
+            </h3>
             {onSendToLexa && c.body && (
               <button
                 type="button"
@@ -498,17 +502,258 @@ function ResumenPanel({
               </button>
             )}
           </header>
-          {c.body ? (
-            <div className="prose prose-sm dark:prose-invert max-w-none prose-p:leading-relaxed prose-li:my-0.5 text-[13.5px] leading-relaxed text-gray-700 dark:text-gray-300">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{c.body}</ReactMarkdown>
-            </div>
-          ) : (
-            <p className="text-xs text-gray-400 italic">Sin contenido para esta sección.</p>
-          )}
+          {c.body
+            ? <ResumenBody variant={c.key} body={c.body} onSendToLexa={onSendToLexa} />
+            : <p className="text-xs text-gray-400 italic">Sin contenido para esta sección.</p>}
         </article>
       ))}
     </div>
   );
+}
+
+/**
+ * Per-variant rendering of the resumen body. Each section gets its own
+ * voice instead of a generic markdown blob:
+ *
+ *  - ejecutivo:    editorial paragraph treatment with a soft drop cap
+ *                  on the first letter, generous leading, Newsreader
+ *                  feel without going full serif. Reads as a press
+ *                  briefing.
+ *  - puntos_clave: numbered cards. Each bullet becomes a row with a
+ *                  coral count chip + hover-only "send" affordance,
+ *                  so the operator can ship a single point to Lexa.
+ *  - acuerdos:     verdict-styled rows. We try to detect status verbs
+ *                  ("aprobó/aprobada", "rechazó/rechazada", "eligió",
+ *                  "pospuso") and stamp a colored pill at the start of
+ *                  each row. Falls back to a neutral pill when no
+ *                  verb is recognized — never inventing.
+ */
+function ResumenBody({
+  variant,
+  body,
+  onSendToLexa,
+}: {
+  variant: ResumenVariant;
+  body: string;
+  onSendToLexa?: (text: string) => void;
+}) {
+  if (variant === 'ejecutivo') {
+    return <ExecutivoBody body={body} />;
+  }
+  // Both puntos_clave and acuerdos are bulleted lists in legacy markdown.
+  // We extract the bullets ourselves so we can render each as a styled
+  // row with custom marker + per-item action button. Falls back to plain
+  // markdown when the body isn't a list (defensive — legacy formatting
+  // can drift).
+  const items = extractListItems(body);
+  if (items.length === 0) {
+    return (
+      <div className="prose prose-sm dark:prose-invert max-w-none prose-p:leading-relaxed prose-li:my-0.5 text-[13.5px] leading-relaxed text-gray-700 dark:text-gray-300">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+      </div>
+    );
+  }
+  if (variant === 'puntos_clave') {
+    return <PuntosList items={items} onSendToLexa={onSendToLexa} />;
+  }
+  return <AcuerdosList items={items} onSendToLexa={onSendToLexa} />;
+}
+
+function ExecutivoBody({ body }: { body: string }) {
+  // The legacy ejecutivo is one large paragraph. Keep markdown for any
+  // formatting that does come in, but apply editorial typography:
+  // generous leading, slightly larger first paragraph, tightened
+  // tracking, a soft drop cap.
+  return (
+    <div
+      className={cn(
+        'text-[13.5px] leading-[1.65] text-[#0e1745]/85 dark:text-white/80',
+        'prose prose-sm dark:prose-invert max-w-none',
+        'prose-p:my-3 prose-p:leading-[1.65]',
+        // Drop cap on the first letter of the first paragraph. Newsreader
+        // serif provides editorial weight without flipping the whole
+        // body to serif. Coral tint keeps it on-brand.
+        '[&>div>p:first-of-type]:first-letter:font-display',
+        '[&>div>p:first-of-type]:first-letter:text-[2.4em]',
+        '[&>div>p:first-of-type]:first-letter:font-normal',
+        '[&>div>p:first-of-type]:first-letter:leading-[0.9]',
+        '[&>div>p:first-of-type]:first-letter:mr-[0.06em]',
+        '[&>div>p:first-of-type]:first-letter:float-left',
+        '[&>div>p:first-of-type]:first-letter:text-cl2-burgundy',
+        'dark:[&>div>p:first-of-type]:first-letter:text-cl2-accent-soft',
+      )}
+    >
+      <div>
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+      </div>
+    </div>
+  );
+}
+
+function PuntosList({
+  items,
+  onSendToLexa,
+}: {
+  items: string[];
+  onSendToLexa?: (text: string) => void;
+}) {
+  return (
+    <ol className="space-y-2">
+      {items.map((text, i) => (
+        <li
+          key={i}
+          className="group/pt relative flex gap-3 rounded-lg border border-transparent px-2 py-2 transition-colors hover:border-[#0e1745]/[0.06] dark:hover:border-white/[0.06] hover:bg-[#0e1745]/[0.015] dark:hover:bg-white/[0.025]"
+        >
+          <span
+            className="shrink-0 mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-cl2-accent/10 dark:bg-cl2-accent/20 text-cl2-accent dark:text-cl2-accent-soft text-[10px] font-semibold tabular-nums"
+            aria-hidden
+          >
+            {i + 1}
+          </span>
+          <p className="flex-1 text-[13.5px] leading-relaxed text-[#0e1745]/85 dark:text-white/85">
+            {text}
+          </p>
+          {onSendToLexa && (
+            <button
+              type="button"
+              onClick={() => onSendToLexa(`Punto clave:\n${text}`)}
+              title="Enviar este punto a Lexa"
+              aria-label="Enviar este punto a Lexa"
+              className={cn(
+                'shrink-0 self-center inline-flex items-center justify-center h-6 w-6 rounded-md',
+                'text-[#0e1745]/55 dark:text-white/55',
+                'hover:bg-cl2-accent/[0.10] hover:text-cl2-accent',
+                'opacity-0 group-hover/pt:opacity-100 focus-visible:opacity-100 transition-opacity',
+              )}
+            >
+              <Sparkles size={11} strokeWidth={2} />
+            </button>
+          )}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+interface VerdictMatch {
+  label: string;
+  tone: 'success' | 'danger' | 'info' | 'warn' | 'neutral';
+}
+
+const VERDICT_RULES: Array<{ rx: RegExp; verdict: VerdictMatch }> = [
+  { rx: /\b(aprob(ó|ado|ada|aron)|admisibilidad|admiti)\b/i,         verdict: { label: 'Aprobado',  tone: 'success' } },
+  { rx: /\brechaz(ó|ado|ada|aron)\b/i,                                  verdict: { label: 'Rechazado', tone: 'danger'  } },
+  { rx: /\b(pospuso|pospuesta|pospuesto|posponer)\b/i,                  verdict: { label: 'Pospuesto', tone: 'warn'    } },
+  { rx: /\b(eligi(ó|eron)|nombr(ó|ado|ada))\b/i,                        verdict: { label: 'Designación', tone: 'info'  } },
+  { rx: /\b(ampli(ó|ación) de plazo|prórroga)\b/i,                      verdict: { label: 'Prórroga',  tone: 'info'    } },
+  { rx: /\b(dispens(ó|ada|ado)|trámite urgente)\b/i,                    verdict: { label: 'Dispensa',  tone: 'info'    } },
+];
+
+function classifyAcuerdo(text: string): VerdictMatch {
+  for (const rule of VERDICT_RULES) {
+    if (rule.rx.test(text)) return rule.verdict;
+  }
+  return { label: 'Acuerdo', tone: 'neutral' };
+}
+
+const VERDICT_TONE: Record<VerdictMatch['tone'], string> = {
+  success: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30',
+  danger:  'bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/30',
+  info:    'bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/30',
+  warn:    'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/30',
+  neutral: 'bg-[#0e1745]/[0.06] dark:bg-white/[0.06] text-[#0e1745]/70 dark:text-white/70 border-[#0e1745]/[0.10] dark:border-white/[0.12]',
+};
+
+const VERDICT_RAIL: Record<VerdictMatch['tone'], string> = {
+  success: 'bg-emerald-500',
+  danger:  'bg-rose-500',
+  info:    'bg-blue-500',
+  warn:    'bg-amber-500',
+  neutral: 'bg-[#0e1745]/15 dark:bg-white/20',
+};
+
+function AcuerdosList({
+  items,
+  onSendToLexa,
+}: {
+  items: string[];
+  onSendToLexa?: (text: string) => void;
+}) {
+  return (
+    <ul className="space-y-2">
+      {items.map((text, i) => {
+        const v = classifyAcuerdo(text);
+        return (
+          <li
+            key={i}
+            className="group/ac relative flex gap-3 rounded-lg border border-[#0e1745]/[0.05] dark:border-white/[0.05] bg-[#0e1745]/[0.015] dark:bg-white/[0.015] pl-3 pr-2 py-2.5 overflow-hidden"
+          >
+            {/* Status side rail — 2px stripe on the left edge that
+                anchors the row visually and signals the verdict at a
+                glance. */}
+            <span aria-hidden className={cn('absolute left-0 top-0 bottom-0 w-[3px]', VERDICT_RAIL[v.tone])} />
+            <div className="flex-1 min-w-0">
+              <span
+                className={cn(
+                  'inline-flex items-center mb-1 px-2 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-[0.08em]',
+                  VERDICT_TONE[v.tone],
+                )}
+              >
+                {v.label}
+              </span>
+              <p className="text-[13px] leading-relaxed text-[#0e1745]/85 dark:text-white/85">
+                {text}
+              </p>
+            </div>
+            {onSendToLexa && (
+              <button
+                type="button"
+                onClick={() => onSendToLexa(`Acuerdo (${v.label}):\n${text}`)}
+                title="Enviar este acuerdo a Lexa"
+                aria-label="Enviar este acuerdo a Lexa"
+                className={cn(
+                  'shrink-0 self-start inline-flex items-center justify-center h-6 w-6 rounded-md',
+                  'text-[#0e1745]/55 dark:text-white/55',
+                  'hover:bg-cl2-accent/[0.10] hover:text-cl2-accent',
+                  'opacity-0 group-hover/ac:opacity-100 focus-visible:opacity-100 transition-opacity',
+                )}
+              >
+                <Sparkles size={11} strokeWidth={2} />
+              </button>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/** Pull bullet items out of a markdown list. Tolerates both `-` and `*`
+ *  bullet markers + any depth of leading whitespace. Strips the marker
+ *  and trims. Returns [] if the input doesn't look like a list. */
+function extractListItems(md: string): string[] {
+  const lines = md.split('\n');
+  const items: string[] = [];
+  let buffer: string[] = [];
+  const flush = () => {
+    if (buffer.length === 0) return;
+    items.push(buffer.join(' ').trim());
+    buffer = [];
+  };
+  for (const line of lines) {
+    const m = line.match(/^\s*[-*]\s+(.*)$/);
+    if (m) {
+      flush();
+      buffer.push(m[1]!);
+    } else if (buffer.length > 0 && line.trim() !== '') {
+      // Continuation of the previous bullet (wrapped line).
+      buffer.push(line.trim());
+    } else if (line.trim() === '') {
+      flush();
+    }
+  }
+  flush();
+  return items;
 }
 
 // --- Transcript ---------------------------------------------------------
