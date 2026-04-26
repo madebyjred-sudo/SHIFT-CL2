@@ -103,9 +103,17 @@ interface AnimatedAiInputProps {
    * YouTube iframe seek.
    */
   onSeek?: (seconds: number) => void;
+  /**
+   * Optional prefill — the parent can stuff a draft message into the
+   * composer (e.g. "Send to Lexa" from the transcript or resumen
+   * panels). The `nonce` lets the parent re-fire even if the text is
+   * the same; we react to `nonce` changes, not to text. Same pattern
+   * as `seekToken` in SesionViewPage.
+   */
+  prefill?: { text: string; nonce: number } | null;
 }
 
-export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek }: AnimatedAiInputProps) {
+export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, prefill }: AnimatedAiInputProps) {
   const {
     currentMessages: messages,
     currentSessionId,
@@ -129,6 +137,33 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek }: A
   const [value, setValue] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   useAutoResizeTextarea(textareaRef, value);
+
+  // Prefill plumbing — react to nonce changes, not to text. The parent
+  // (SesionViewPage) bumps the nonce every time it wants to push a new
+  // draft into the composer (e.g. "Send to Lexa" from the transcript).
+  // We replace the existing draft on purpose: if the user already had
+  // typed something, sending a new selection trumps it. They'd usually
+  // be sending a fresh question with a fresh context anyway.
+  const lastPrefillNonceRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!prefill) return;
+    if (lastPrefillNonceRef.current === prefill.nonce) return;
+    lastPrefillNonceRef.current = prefill.nonce;
+    setValue(prefill.text);
+    // Move caret to the end after React paints. requestAnimationFrame
+    // ensures the textarea has rendered the new value before we touch
+    // selectionStart/End.
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      const end = el.value.length;
+      el.setSelectionRange(end, end);
+      // Scroll the caret into view in case the prefill is long.
+      el.scrollTop = el.scrollHeight;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefill?.nonce]);
 
   const [isAgentSelectorOpen, setIsAgentSelectorOpen] = useState(false);
   const [isUploading, setIsUploading] = useState(false);

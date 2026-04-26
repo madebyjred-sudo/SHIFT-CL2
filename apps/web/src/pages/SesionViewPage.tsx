@@ -17,7 +17,8 @@
  * load (e.g. CDN blocked). In normal operation playback never stops.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Calendar, Clock, Eye, EyeOff, FileSliders, MessageSquare, Search, Sparkles } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { ArrowLeft, Calendar, Check as CheckIcon, Clock, Eye, EyeOff, FileSliders, MessageSquare, Search, Sparkles, X } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -74,6 +75,18 @@ export function SesionViewPage({ sesionId }: Props) {
   // transcript focus-mode blur (we lift the blur on pause so the user
   // can read freely without toggling).
   const [isPlaying, setIsPlaying] = useState(false);
+  // Prefill state for AnimatedAiInput. Bumping `nonce` triggers the
+  // composer to swap its current draft for `text` and focus the
+  // textarea with the caret at the end. Used by "Enviar a Lexa" from
+  // both the transcript multi-select and the resumen cards.
+  const [chatPrefill, setChatPrefill] = useState<{ text: string; nonce: number } | null>(null);
+
+  const sendToLexa = (contextText: string) => {
+    const lead = detail ? `sesión #${detail.id}` : 'esta sesión';
+    const draft = `Sobre ${lead}:\n\n${contextText.trim()}\n\nMi pregunta: `;
+    setChatPrefill({ text: draft, nonce: Date.now() });
+    setTab('chat');
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -171,7 +184,7 @@ export function SesionViewPage({ sesionId }: Props) {
               onPlayStateChange={setIsPlaying}
             />
             <div className="mt-5">
-              <ResumenPanel resumen={detail?.resumen} />
+              <ResumenPanel resumen={detail?.resumen} onSendToLexa={sendToLexa} />
             </div>
           </section>
 
@@ -192,6 +205,7 @@ export function SesionViewPage({ sesionId }: Props) {
                   onSeek={handleSeek}
                   currentTime={currentTime}
                   isPlaying={isPlaying}
+                  onSendToLexa={sendToLexa}
                 />
               ) : (
                 <div className="h-full min-h-0">
@@ -207,6 +221,7 @@ export function SesionViewPage({ sesionId }: Props) {
                         : 'Preguntá sobre esta sesión…'
                     }
                     onSeek={handleSeek}
+                    prefill={chatPrefill}
                   />
                 </div>
               )}
@@ -428,7 +443,16 @@ function VideoPlayer({
 
 // --- Resumen ------------------------------------------------------------
 
-function ResumenPanel({ resumen }: { resumen?: SessionDetail['resumen'] }) {
+function ResumenPanel({
+  resumen,
+  onSendToLexa,
+}: {
+  resumen?: SessionDetail['resumen'];
+  /** When provided, each resumen card shows a small "Enviar a Lexa"
+   *  affordance that pushes that card's body into the chat composer
+   *  as draft context (see SesionViewPage.sendToLexa). */
+  onSendToLexa?: (text: string) => void;
+}) {
   if (!resumen) {
     return (
       <div className="space-y-3">
@@ -450,11 +474,29 @@ function ResumenPanel({ resumen }: { resumen?: SessionDetail['resumen'] }) {
       {cards.map((c) => (
         <article
           key={c.key}
-          className="rounded-xl border border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-white dark:bg-white/[0.025] shadow-[0_2px_10px_rgba(14,23,69,0.03)] dark:shadow-none p-4 sm:p-5"
+          className="group/card relative rounded-xl border border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-white dark:bg-white/[0.025] shadow-[0_2px_10px_rgba(14,23,69,0.03)] dark:shadow-none p-4 sm:p-5"
         >
           <header className="flex items-center gap-2 mb-2">
             <span className="text-base" aria-hidden>{c.emoji}</span>
-            <h3 className="text-sm font-semibold text-[#0e1745] dark:text-white">{c.title}</h3>
+            <h3 className="text-sm font-semibold text-[#0e1745] dark:text-white flex-1">{c.title}</h3>
+            {onSendToLexa && c.body && (
+              <button
+                type="button"
+                onClick={() => onSendToLexa(`${c.title}:\n${c.body}`)}
+                title="Enviar a Lexa como contexto"
+                className={cn(
+                  'inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-medium',
+                  'border border-[#0e1745]/[0.08] dark:border-white/[0.10]',
+                  'text-[#0e1745]/65 dark:text-white/65',
+                  'hover:bg-cl2-accent/[0.08] hover:text-cl2-accent hover:border-cl2-accent/30',
+                  'opacity-0 group-hover/card:opacity-100 focus-visible:opacity-100 transition-all',
+                )}
+                aria-label={`Enviar ${c.title} a Lexa`}
+              >
+                <Sparkles size={11} strokeWidth={2} />
+                <span>Enviar a Lexa</span>
+              </button>
+            )}
           </header>
           {c.body ? (
             <div className="prose prose-sm dark:prose-invert max-w-none prose-p:leading-relaxed prose-li:my-0.5 text-[13.5px] leading-relaxed text-gray-700 dark:text-gray-300">
@@ -472,7 +514,7 @@ function ResumenPanel({ resumen }: { resumen?: SessionDetail['resumen'] }) {
 // --- Transcript ---------------------------------------------------------
 
 function TranscriptPanel({
-  transcript, segments, search, setSearch, onSeek, currentTime, isPlaying,
+  transcript, segments, search, setSearch, onSeek, currentTime, isPlaying, onSendToLexa,
 }: {
   transcript: TranscriptPayload | null;
   segments: TranscriptSegment[];
@@ -484,6 +526,10 @@ function TranscriptPanel({
   /** True while YT player state === PLAYING. Drives the focus-mode
    *  blur (paused → blur lifts so the user can read freely). */
   isPlaying: boolean;
+  /** When provided, multi-select shows a floating action bar with an
+   *  "Enviar a Lexa" CTA that pushes the formatted selection into the
+   *  chat composer as draft context. */
+  onSendToLexa?: (text: string) => void;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
   const activeRef = useRef<HTMLLIElement>(null);
@@ -497,14 +543,100 @@ function TranscriptPanel({
   // store in localStorage so the preference survives refresh. The blur
   // only takes effect while the video is actually PLAYING — pause
   // lifts everything so the user can scan freely without un-toggling.
+  // Default ON — focus mode is the headline UX of the transcript pane.
+  // First-time visitors should see it active so the magic happens
+  // without a tutorial. Explicit user preference (set to '0' or '1')
+  // wins over the default.
   const [focusMode, setFocusMode] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    return localStorage.getItem('cl2.transcript.focusMode') === '1';
+    if (typeof window === 'undefined') return true;
+    const stored = localStorage.getItem('cl2.transcript.focusMode');
+    if (stored === '0') return false;
+    if (stored === '1') return true;
+    return true; // first-paint default
   });
   useEffect(() => {
     localStorage.setItem('cl2.transcript.focusMode', focusMode ? '1' : '0');
   }, [focusMode]);
   const focusActive = focusMode && isPlaying;
+
+  // Multi-select state: which segments has the user picked to ship to
+  // Lexa as context? Set keyed by segment.index. `lastClickedRef`
+  // anchors shift+click range selection (Finder-style).
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const lastClickedIndexRef = useRef<number | null>(null);
+
+  const toggleOne = (idx: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      return next;
+    });
+  };
+
+  const selectRange = (anchorIdx: number, headIdx: number) => {
+    // Find positions in the FULL ordered list so the range is stable
+    // even when the user filters with the search box (then shift+clicks).
+    const all = transcript?.segments ?? segments;
+    const anchorPos = all.findIndex((s) => s.index === anchorIdx);
+    const headPos = all.findIndex((s) => s.index === headIdx);
+    if (anchorPos < 0 || headPos < 0) return;
+    const lo = Math.min(anchorPos, headPos);
+    const hi = Math.max(anchorPos, headPos);
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (let i = lo; i <= hi; i++) {
+        const idx = all[i]?.index;
+        if (typeof idx === 'number') next.add(idx);
+      }
+      return next;
+    });
+  };
+
+  const handleSegmentClick = (
+    e: React.MouseEvent<HTMLButtonElement>,
+    seg: TranscriptSegment,
+  ) => {
+    // Cmd/Ctrl+Click → toggle this one in the selection (no seek).
+    if (e.metaKey || e.ctrlKey) {
+      e.preventDefault();
+      toggleOne(seg.index);
+      lastClickedIndexRef.current = seg.index;
+      return;
+    }
+    // Shift+Click → range from the last anchor to here. Falls back to
+    // toggling just this one if no anchor exists yet.
+    if (e.shiftKey) {
+      e.preventDefault();
+      const anchor = lastClickedIndexRef.current;
+      if (anchor != null && anchor !== seg.index) {
+        selectRange(anchor, seg.index);
+      } else {
+        toggleOne(seg.index);
+      }
+      lastClickedIndexRef.current = seg.index;
+      return;
+    }
+    // Plain click → seek (existing behavior). Drop any open selection
+    // so the user gets a clean state when they navigate away from
+    // multi-pick mode.
+    if (selected.size > 0) setSelected(new Set());
+    lastClickedIndexRef.current = seg.index;
+    onSeek(seg.start);
+  };
+
+  const sendSelectionToLexa = () => {
+    if (!onSendToLexa || selected.size === 0) return;
+    const all = transcript?.segments ?? segments;
+    const ordered = all
+      .filter((s) => selected.has(s.index))
+      .sort((a, b) => a.start - b.start);
+    const body = ordered
+      .map((s) => `[${fmtClock(s.start)}] ${s.text}`)
+      .join('\n');
+    onSendToLexa(body);
+    setSelected(new Set());
+  };
 
   // Active segment by binary-searching the playhead against segment.start.
   // `segments` may be filtered by the search box, but we want highlighting
@@ -568,7 +700,7 @@ function TranscriptPanel({
   }
 
   return (
-    <div className="h-full flex flex-col min-h-0">
+    <div className="relative h-full flex flex-col min-h-0">
       <div className="px-3 pt-2 pb-2 border-b border-[#0e1745]/[0.06] dark:border-white/[0.06]">
         <div className="flex items-center gap-2">
           <div className="relative flex-1">
@@ -638,13 +770,14 @@ function TranscriptPanel({
           >
             {segments.map((seg) => {
               const isActive = seg.index === activeSegmentIndex;
+              const isSelected = selected.has(seg.index);
               // Fade non-active rows when focus mode is engaged AND the
-              // video is playing. Each row also gets a soft scale shift
-              // — the active grows imperceptibly, the rest shrink — so
-              // the eye locks on the current line without conscious
-              // effort. Transitions are 380ms cubic-bezier — long
-              // enough to feel intentional, short enough to track speech.
-              const dim = focusActive && !isActive;
+              // video is playing. Selected rows opt out of the dim so
+              // the user can see what they picked. Each row also gets
+              // a soft scale shift — the active grows imperceptibly,
+              // the rest shrink — so the eye locks on the current
+              // line without conscious effort.
+              const dim = focusActive && !isActive && !isSelected;
               return (
                 <li
                   key={seg.index}
@@ -661,28 +794,39 @@ function TranscriptPanel({
                 >
                   <button
                     type="button"
-                    onClick={() => onSeek(seg.start)}
+                    onClick={(e) => handleSegmentClick(e, seg)}
                     className={cn(
                       'group w-full text-left px-3 py-2.5 transition-all duration-300',
-                      isActive
-                        ? 'bg-cl2-burgundy/[0.08] dark:bg-cl2-accent/[0.10] ring-1 ring-inset ring-cl2-burgundy/30 dark:ring-cl2-accent/30 shadow-[inset_2px_0_0_var(--color-cl2-accent)]'
-                        : 'hover:bg-cl2-accent/5',
+                      isSelected
+                        // Selected wins visually over active so the user
+                        // sees the picks they accumulated for context.
+                        ? 'bg-cl2-accent/[0.12] dark:bg-cl2-accent/[0.18] ring-1 ring-inset ring-cl2-accent/40'
+                        : isActive
+                          ? 'bg-cl2-burgundy/[0.08] dark:bg-cl2-accent/[0.10] ring-1 ring-inset ring-cl2-burgundy/30 dark:ring-cl2-accent/30 shadow-[inset_2px_0_0_var(--color-cl2-accent)]'
+                          : 'hover:bg-cl2-accent/5',
                     )}
+                    title={
+                      isSelected
+                        ? 'Clic normal: ir al segundo · cmd+clic: quitar · shift+clic: rango'
+                        : 'Clic: ir al segundo · cmd+clic: agregar · shift+clic: rango'
+                    }
                   >
                     <div className="flex items-start gap-3">
                       <span
                         className={cn(
                           'shrink-0 mt-0.5 text-[10px] font-mono tabular-nums transition-colors',
-                          isActive
+                          isSelected
                             ? 'text-cl2-accent font-semibold'
-                            : 'text-gray-400 group-hover:text-cl2-accent',
+                            : isActive
+                              ? 'text-cl2-accent font-semibold'
+                              : 'text-gray-400 group-hover:text-cl2-accent',
                         )}
                       >
                         {fmtClock(seg.start)}
                       </span>
                       <p
                         className={cn(
-                          'text-[13px] leading-snug transition-colors',
+                          'flex-1 text-[13px] leading-snug transition-colors',
                           isActive
                             ? 'text-[#0e1745] dark:text-white font-medium'
                             : 'text-gray-700 dark:text-gray-300',
@@ -690,6 +834,14 @@ function TranscriptPanel({
                       >
                         {seg.text}
                       </p>
+                      {isSelected && (
+                        <span
+                          aria-hidden
+                          className="shrink-0 mt-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full bg-cl2-accent text-white"
+                        >
+                          <CheckIcon size={9} strokeWidth={3} />
+                        </span>
+                      )}
                     </div>
                   </button>
                 </li>
@@ -698,6 +850,63 @@ function TranscriptPanel({
           </ul>
         )}
       </div>
+
+      {/*
+        Floating action bar — only renders when the user has picked
+        ≥1 segment via shift/cmd+click. Slides up from the bottom of
+        the transcript pane (not the viewport, so it stays scoped to
+        the section). Uses motion/react instead of tailwindcss-animate
+        because that plugin isn't in the build — motion is already a
+        dep elsewhere in the app.
+      */}
+      <AnimatePresence>
+        {selected.size > 0 && (
+          <motion.div
+            key="selection-bar"
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 12 }}
+            transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+            className={cn(
+              'absolute left-3 right-3 bottom-3 z-20',
+              'rounded-xl border border-cl2-accent/30 dark:border-cl2-accent/40',
+              'bg-white/90 dark:bg-[#231f1f]/95 backdrop-blur-md',
+              'shadow-[0_12px_30px_rgba(249,53,73,0.18)] dark:shadow-[0_12px_30px_rgba(0,0,0,0.45)]',
+              'flex items-center gap-2 px-3 py-2',
+            )}
+          >
+            <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-cl2-accent text-white text-[11px] font-semibold tabular-nums">
+              {selected.size}
+            </span>
+            <span className="text-[12px] text-[#0e1745] dark:text-white">
+              {selected.size === 1 ? 'segmento seleccionado' : 'segmentos seleccionados'}
+            </span>
+            <span className="flex-1" />
+            <button
+              type="button"
+              onClick={() => setSelected(new Set())}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-[11.5px] font-medium text-[#0e1745]/65 dark:text-white/65 hover:bg-[#0e1745]/[0.04] dark:hover:bg-white/[0.06] hover:text-[#0e1745] dark:hover:text-white transition-colors"
+            >
+              <X size={11} />
+              Limpiar
+            </button>
+            <button
+              type="button"
+              onClick={sendSelectionToLexa}
+              disabled={!onSendToLexa}
+              className={cn(
+                'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11.5px] font-semibold',
+                'bg-cl2-accent text-white shadow-[0_4px_15px_rgba(249,53,73,0.25)]',
+                'hover:bg-cl2-accent-hover',
+                'disabled:opacity-50 disabled:cursor-not-allowed transition-all',
+              )}
+            >
+              <Sparkles size={12} strokeWidth={2.5} />
+              Enviar a Lexa
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
