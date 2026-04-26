@@ -30,6 +30,19 @@ function anon(): SupabaseClient {
 }
 
 export async function getUserIdFromRequest(req: Request): Promise<string | null> {
+  const u = await getUserFromRequest(req);
+  return u?.id ?? null;
+}
+
+export interface AuthedUser {
+  id: string;
+  email: string | null;
+}
+
+/** Like getUserIdFromRequest but returns id + email. Useful for audit
+ *  log writes where we want a human-readable actor in the row.
+ *  Null when the token is missing, expired, or rejected. */
+export async function getUserFromRequest(req: Request): Promise<AuthedUser | null> {
   const header = req.headers.authorization ?? req.headers.Authorization;
   const raw = Array.isArray(header) ? header[0] : header;
   if (!raw || !raw.toLowerCase().startsWith('bearer ')) return null;
@@ -39,7 +52,7 @@ export async function getUserIdFromRequest(req: Request): Promise<string | null>
   try {
     const { data, error } = await anon().auth.getUser(token);
     if (error || !data?.user) return null;
-    return data.user.id;
+    return { id: data.user.id, email: data.user.email ?? null };
   } catch {
     return null;
   }

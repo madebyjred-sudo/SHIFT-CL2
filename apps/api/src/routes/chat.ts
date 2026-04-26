@@ -17,6 +17,8 @@ import {
 } from '../services/conversationStore.js';
 import { firePeajeIngest } from '../services/peajeClient.js';
 import { getApprovedRag } from '../services/puntoMedioClient.js';
+import { getOverride as getAgentOverride } from '../services/agentOverrides.js';
+import { recordAgentCall } from '../services/agentStats.js';
 
 /**
  * Convert an upstream/internal error into a user-friendly Spanish message
@@ -50,6 +52,20 @@ chatRouter.post('/stream', async (req, res) => {
   if (!body.agent_id || !body.query) {
     res.status(400).json({ ok: false, error: 'agent_id and query required' });
     return;
+  }
+
+  // Agent enable gate — operator can flip an agent off from /admin/agentes
+  // and that takes effect on the very next request. Soft 503 with a
+  // typed reason so the UI can show "Atlas está pausado por el operador"
+  // instead of a generic error.
+  try {
+    const override = await getAgentOverride(body.agent_id);
+    if (override && override.enabled === false) {
+      res.status(503).json({ ok: false, error: 'agent_disabled', agent_id: body.agent_id });
+      return;
+    }
+  } catch {
+    // override read failures are non-fatal — default to enabled.
   }
 
   res.setHeader('Content-Type', 'text/event-stream');
@@ -150,6 +166,8 @@ chatRouter.post('/stream', async (req, res) => {
   // --- Stream + accumulate ----------------------------------------------
   let assistantText = '';
   let citations: CitationRow[] = [];
+  const streamStart = Date.now();
+  let streamOk = true;
 
   try {
     await openRouterStream({
@@ -191,6 +209,7 @@ chatRouter.post('/stream', async (req, res) => {
         query: body.query.slice(0, 200),
         deep_insight: deepInsight,
         scope_legacy_session_id: scopeLegacySessionId,
+        ms: Date.now() - streamStart,
       });
     }
 
@@ -234,6 +253,7 @@ chatRouter.post('/stream', async (req, res) => {
       });
     }
   } catch (err) {
+    streamOk = false;
     req.log.error('stream_failed', {
       error: (err as Error)?.message,
       stack: (err as Error)?.stack,
@@ -259,6 +279,12 @@ chatRouter.post('/stream', async (req, res) => {
       }
     }
   } finally {
+    // Record the call for the live agent stats card. Always runs,
+    // including the error path, so latency tail / error rate stay
+    // honest. Tagged via the agent id from the request — the override
+    // gate above already vetoed disabled agents, so anything that
+    // reaches here is a real attempt.
+    recordAgentCall(body.agent_id ?? 'unknown', Date.now() - streamStart, streamOk);
     res.end();
   }
 });
