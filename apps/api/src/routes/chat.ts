@@ -171,6 +171,29 @@ chatRouter.post('/stream', async (req, res) => {
       },
     });
 
+    // --- Empty-completion guardrail ------------------------------------
+    // The upstream pipeline can produce zero token events (Pass 1
+    // returning no tool_call AND no content; Pass 2 streaming nothing
+    // because a tool returned no usable result and the model gave up).
+    // Without this guard the user sees an assistant card with the agent
+    // header but no body — silent failure with no log. Synthesize a
+    // graceful fallback and emit a structured warning so ops can trace
+    // WHY (LightRAG unreachable, tool empty hits, model refused, etc.).
+    if (assistantText.length === 0) {
+      const fallback =
+        'No encontré una respuesta concreta para esta consulta en el corpus disponible. ' +
+        'Probá reformularla con detalles específicos — por ejemplo, una fecha (DD/MM/AAAA), ' +
+        'un número de expediente o el nombre exacto de una comisión.';
+      send({ type: 'token', payload: fallback });
+      assistantText = fallback;
+      req.log.warn('empty_completion_fallback', {
+        agent: body.agent_id,
+        query: body.query.slice(0, 200),
+        deep_insight: deepInsight,
+        scope_legacy_session_id: scopeLegacySessionId,
+      });
+    }
+
     // --- Confidence post-process (per agent contract) ------------------
     // Emit only when the agent's response_contract opts in (e.g. Centinela).
     // Lexa/Atlas don't surface this to the user — fewer chrome elements,
