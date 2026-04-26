@@ -155,6 +155,16 @@ export function SesionesListPage() {
   return (
     <div className="min-h-screen flex flex-col bg-gray-50 dark:bg-mesh text-gray-900 dark:text-white font-sans relative transition-colors duration-500">
       <div className="pointer-events-none absolute inset-0 bg-pixel-dots opacity-60 z-0" />
+      {/*
+        Page-wide max-width container. Caps the readable column at
+        1320px so the topbar, hero, toolbar and main panel never
+        stretch across an ultrawide monitor edge-to-edge. Centered
+        with mx-auto. Keeps `flex-col flex-1` so the inner stack
+        still grows to fill vertical space; bg-mesh / pixel-dots stay
+        on the outer div so the side margins paint the brand color
+        (instead of going white) on huge screens.
+      */}
+      <div className="relative z-10 w-full max-w-[1320px] mx-auto flex flex-col flex-1">
       <TopDock />
 
       <AnimatePresence initial={false}>
@@ -262,6 +272,7 @@ export function SesionesListPage() {
           </div>
         </motion.div>
       </main>
+      </div>
 
       <CompareDock
         ids={selected}
