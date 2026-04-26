@@ -42,7 +42,7 @@ export const podcastsRouter = Router();
 const USER_DAILY_CAP = 5;
 const ALLOWED_DURATIONS = new Set([90, 180, 300]);
 const ALLOWED_STYLES = new Set(['informativo', 'conversacional']);
-const ALLOWED_SOURCES = new Set(['sesion', 'expediente', 'chat']);
+const ALLOWED_SOURCES = new Set(['sesion', 'expediente', 'chat', 'hoja_workspace', 'hoja_node']);
 
 // ─── Supabase service client ─────────────────────────────────────────
 
@@ -246,6 +246,41 @@ podcastsRouter.get('/:id/audio', async (req, res) => {
 });
 
 /**
+ * GET /api/podcasts/by-source?type=hoja_workspace&id=...
+ * Lists this user's podcasts attached to a specific source. Used by the
+ * workspace header strip to find the most recent ready audio for a
+ * board so we can show inline player + stale badge.
+ */
+podcastsRouter.get('/by-source', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+
+  const type = String(req.query.type ?? '');
+  const id = String(req.query.id ?? '');
+  if (!type || !id || !ALLOWED_SOURCES.has(type)) {
+    res.status(400).json({ ok: false, error: 'bad_query' });
+    return;
+  }
+
+  const { data, error } = await supa()
+    .from('podcasts')
+    .select(
+      'id, source_type, source_id, title, voice_id, duration_target_s, duration_actual_s, status, progress, created_at, finished_at',
+    )
+    .eq('user_id', userId)
+    .eq('source_type', type)
+    .eq('source_id', id)
+    .order('created_at', { ascending: false })
+    .limit(10);
+
+  if (error) {
+    res.status(500).json({ ok: false, error: error.message });
+    return;
+  }
+  res.json({ ok: true, items: data ?? [] });
+});
+
+/**
  * GET /api/podcasts/mine — user history.
  */
 podcastsRouter.get('/mine', async (req, res) => {
@@ -285,7 +320,7 @@ async function runWorker(podcastId: string, userId: string): Promise<void> {
       .single();
     if (rowErr || !row) throw new Error('row_missing');
     const r = row as {
-      source_type: 'sesion' | 'expediente' | 'chat';
+      source_type: 'sesion' | 'expediente' | 'chat' | 'hoja_workspace' | 'hoja_node';
       source_id: string;
       voice_id: string;
       duration_target_s: number;
@@ -394,7 +429,7 @@ function estimateDurationSeconds(script: PodcastScript): number {
 // 12k chars internally, but we want the most relevant slice on top.
 
 async function loadSource(
-  type: 'sesion' | 'expediente' | 'chat',
+  type: 'sesion' | 'expediente' | 'chat' | 'hoja_workspace' | 'hoja_node',
   id: string,
 ): Promise<{ source_text: string; source_label: string }> {
   if (type === 'sesion') {
@@ -431,6 +466,74 @@ async function loadSource(
     return {
       source_text: parts.join('\n').slice(0, 12_000),
       source_label: `expediente ${exp.numero}`,
+    };
+  }
+
+  // hoja_workspace: pull all nodes for the board, sort by z_index then
+  // y/x for top-down + left-right reading order, concat title + body.
+  // Prefix with a first-person framing override so the script feels
+  // like the despacho's OWN briefing, not Lexa-as-research-assistant.
+  if (type === 'hoja_workspace') {
+    const ws = await supa()
+      .from('workspaces')
+      .select('id, title, description')
+      .eq('id', id)
+      .single();
+    if (ws.error || !ws.data) throw new Error('workspace_not_found');
+    const wsRow = ws.data as { id: string; title: string; description: string };
+    const { data: nodeRows, error: nodeErr } = await supa()
+      .from('workspace_nodes')
+      .select('id, type, title, subtitle, content, z_index, x, y')
+      .eq('workspace_id', id)
+      .order('z_index', { ascending: false })
+      .order('y', { ascending: true })
+      .order('x', { ascending: true });
+    if (nodeErr) throw new Error(`hoja_load: ${nodeErr.message}`);
+    const nodes = (nodeRows ?? []) as Array<{
+      title: string;
+      subtitle: string;
+      content: { md?: string } | null;
+    }>;
+    const parts: string[] = [];
+    parts.push(
+      'NOTA EDITORIAL: este material es trabajo de investigación del propio despacho.',
+      'Hablá en primera persona plural ("lo que encontramos", "la línea que vimos").',
+      'No introduzcas datos nuevos: tu trabajo es ordenar lo que el despacho ya pensó.',
+      '',
+    );
+    parts.push(`Board: ${wsRow.title}`);
+    if (wsRow.description) parts.push(`Descripción: ${wsRow.description}`);
+    parts.push('');
+    for (const n of nodes) {
+      if (n.title) parts.push(`## ${n.title}`);
+      if (n.subtitle) parts.push(`*${n.subtitle}*`);
+      const md = n.content?.md ?? '';
+      if (md.trim()) parts.push(md.trim());
+      parts.push('');
+    }
+    return {
+      source_text: parts.join('\n').slice(0, 12_000),
+      source_label: `board "${wsRow.title}"`,
+    };
+  }
+
+  // hoja_node: single node body. Useful for "explicame esta hoja"
+  // standalone listening.
+  if (type === 'hoja_node') {
+    const { data, error } = await supa()
+      .from('workspace_nodes')
+      .select('title, subtitle, content')
+      .eq('id', id)
+      .single();
+    if (error || !data) throw new Error('node_not_found');
+    const n = data as { title: string; subtitle: string; content: { md?: string } | null };
+    const parts: string[] = [];
+    if (n.title) parts.push(`Título: ${n.title}`);
+    if (n.subtitle) parts.push(`Subtítulo: ${n.subtitle}`);
+    if (n.content?.md) parts.push(`\n${n.content.md}`);
+    return {
+      source_text: parts.join('\n').slice(0, 12_000),
+      source_label: `nota "${n.title || 'sin título'}"`,
     };
   }
 

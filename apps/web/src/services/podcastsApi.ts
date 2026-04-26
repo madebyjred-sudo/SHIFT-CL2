@@ -41,7 +41,12 @@ export type PodcastStatus =
   | 'failed'
   | 'cancelled';
 
-export type PodcastSourceType = 'sesion' | 'expediente' | 'chat';
+export type PodcastSourceType =
+  | 'sesion'
+  | 'expediente'
+  | 'chat'
+  | 'hoja_workspace'
+  | 'hoja_node';
 /**
  * 'informativo' = single host narrating a briefing. Compact, factual.
  * 'conversacional' = host + analyst dialogue. More dynamic, slightly
@@ -103,6 +108,19 @@ export async function getPodcast(id: string): Promise<PodcastRow> {
 
 export async function listMyPodcasts(): Promise<PodcastRow[]> {
   const r = await get<{ ok: true; items: PodcastRow[] }>('/mine');
+  return r.items;
+}
+
+/**
+ * Podcasts attached to a specific source (e.g. all audio for a Hojas
+ * workspace). Used to surface the most recent ready audio inline.
+ */
+export async function listPodcastsBySource(
+  type: PodcastSourceType,
+  id: string,
+): Promise<PodcastRow[]> {
+  const sp = new URLSearchParams({ type, id });
+  const r = await get<{ ok: true; items: PodcastRow[] }>(`/by-source?${sp.toString()}`);
   return r.items;
 }
 

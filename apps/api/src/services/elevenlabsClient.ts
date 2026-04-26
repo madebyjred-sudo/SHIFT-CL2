@@ -227,7 +227,12 @@ export async function transcribeAudio(audio: Buffer, mimeType: string): Promise<
   // ElevenLabs accepts webm/ogg/mp3/m4a/wav — pass through whatever
   // MediaRecorder gave us. Filename is cosmetic on their side but the
   // mime in the Blob is what they sniff for codec.
-  const blob = new Blob([audio], { type: mimeType || 'audio/webm' });
+  // Buffer<ArrayBufferLike> doesn't satisfy BlobPart since it can be
+  // backed by SharedArrayBuffer. Copy into a fresh ArrayBuffer-backed
+  // Uint8Array so the type narrows definitively.
+  const dst = new ArrayBuffer(audio.byteLength);
+  new Uint8Array(dst).set(audio);
+  const blob = new Blob([dst], { type: mimeType || 'audio/webm' });
   const ext = mimeType.includes('webm') ? 'webm'
     : mimeType.includes('ogg') ? 'ogg'
     : mimeType.includes('mp3') ? 'mp3'
