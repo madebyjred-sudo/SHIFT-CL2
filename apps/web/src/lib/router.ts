@@ -66,6 +66,11 @@ export function isLandingPage(path: string): boolean {
   return /^\/landing\/?$/.test(path);
 }
 
+/** Match `/audios` — podcast history page. */
+export function isAudiosPage(path: string): boolean {
+  return /^\/audios\/?$/.test(path);
+}
+
 /** Match `/admin/punto-medio` (exact) — single page, no params. */
 export function isAdminPuntoMedio(path: string): boolean {
   return /^\/admin\/punto-medio\/?$/.test(path);

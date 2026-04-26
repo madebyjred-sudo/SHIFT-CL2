@@ -20,6 +20,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ArrowLeft, Calendar, Check as CheckIcon, Clock, Eye, EyeOff, FileSliders, Headphones, MessageSquare, Search, Sparkles, X } from 'lucide-react';
 import { PodcastModal } from '@/components/podcasts/PodcastModal';
+import { PodcastStrip } from '@/components/podcasts/PodcastStrip';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -82,6 +83,7 @@ export function SesionViewPage({ sesionId }: Props) {
   // both the transcript multi-select and the resumen cards.
   const [chatPrefill, setChatPrefill] = useState<{ text: string; nonce: number } | null>(null);
   const [podcastOpen, setPodcastOpen] = useState(false);
+  const [podcastBump, setPodcastBump] = useState(0);
 
   const sendToLexa = (contextText: string) => {
     const lead = detail ? `sesión #${detail.id}` : 'esta sesión';
@@ -171,6 +173,20 @@ export function SesionViewPage({ sesionId }: Props) {
             <FileSliders size={13} />
             Generar PPTX
           </button>
+          {/* Persistent podcast strip — slot for the most-recent audio
+              for this session. Renders nothing if user never generated
+              one; otherwise plays inline so the user can replay later. */}
+          <div className="hidden md:block flex-1 min-w-0 max-w-[400px]">
+            <PodcastStrip
+              sourceType="sesion"
+              sourceId={String(sesionId)}
+              sourceUpdatedAt={detail?.fecha}
+              onRequestRegenerate={() => setPodcastOpen(true)}
+              emptyLabel="Audio de la sesión"
+              refreshKey={podcastBump}
+            />
+          </div>
+
           <button
             type="button"
             onClick={() => setPodcastOpen(true)}
@@ -184,7 +200,10 @@ export function SesionViewPage({ sesionId }: Props) {
       </div>
       <PodcastModal
         open={podcastOpen}
-        onClose={() => setPodcastOpen(false)}
+        onClose={() => {
+          setPodcastOpen(false);
+          setPodcastBump((n) => n + 1);
+        }}
         source_type="sesion"
         source_id={String(sesionId)}
         source_title={detail?.titulo}

@@ -281,6 +281,29 @@ podcastsRouter.get('/by-source', async (req, res) => {
 });
 
 /**
+ * DELETE /api/podcasts/:id — owner-only delete. Removes the row +
+ * orphans the audio in GCS (lifecycle rule will purge it eventually).
+ * We don't hard-delete the GCS object here on purpose: keeping the
+ * delete cheap means an accidental click is a "row gone, audio still
+ * recoverable for 90 days" rather than a hard nuke.
+ */
+podcastsRouter.delete('/:id', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const id = String(req.params.id);
+  const { error } = await supa()
+    .from('podcasts')
+    .delete()
+    .eq('id', id)
+    .eq('user_id', userId);
+  if (error) {
+    res.status(500).json({ ok: false, error: error.message });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+/**
  * GET /api/podcasts/mine — user history.
  */
 podcastsRouter.get('/mine', async (req, res) => {

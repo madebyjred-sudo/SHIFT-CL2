@@ -124,6 +124,17 @@ export async function listPodcastsBySource(
   return r.items;
 }
 
+export async function deletePodcast(id: string): Promise<void> {
+  const res = await fetch(`${BASE}/${id}`, {
+    method: 'DELETE',
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
+}
+
 /**
  * Resolve the audio URL for a ready podcast. Same pattern as expediente
  * docs: server returns the signed URL as JSON so the browser can play

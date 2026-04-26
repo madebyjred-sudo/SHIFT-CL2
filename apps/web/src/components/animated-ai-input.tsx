@@ -10,8 +10,10 @@ import {
   Paperclip,
   X,
   FileText,
+  Headphones,
   Loader2,
 } from 'lucide-react';
+import { PodcastModal } from '@/components/podcasts/PodcastModal';
 
 import { cn } from '@/lib/utils';
 import { TextLoop } from '@/components/ui/text-loop';
@@ -135,8 +137,17 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
   } = useChat();
 
   const [value, setValue] = useState('');
+  const [podcastOpen, setPodcastOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   useAutoResizeTextarea(textareaRef, value);
+
+  // The chat-podcast button is only meaningful once the conversation
+  // has at least one assistant turn with content — otherwise there's
+  // nothing to script. Computed locally to avoid useless re-renders
+  // each token append.
+  const hasAssistantContent = messages.some(
+    (m) => m.role === 'assistant' && m.content.trim().length > 0,
+  );
 
   // Prefill plumbing — react to nonce changes, not to text. The parent
   // (SesionViewPage) bumps the nonce every time it wants to push a new
@@ -381,16 +392,36 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
           </div>
         </div>
 
-        {onOpenHistory && (
-          <button
-            onClick={onOpenHistory}
-            className="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors lg:hidden"
-            aria-label="Historial"
-          >
-            <Info className="w-4 h-4 text-[#0e1745]/50 dark:text-white/50" />
-          </button>
-        )}
+        <div className="flex items-center gap-1">
+          {hasAssistantContent && currentSessionId && (
+            <button
+              type="button"
+              onClick={() => setPodcastOpen(true)}
+              title="Convertir esta conversación en podcast"
+              aria-label="Generar podcast de esta conversación"
+              className="p-2 rounded-lg text-cl2-burgundy dark:text-cl2-accent-soft hover:bg-cl2-burgundy/[0.06] dark:hover:bg-cl2-accent/[0.10] transition-colors"
+            >
+              <Headphones className="w-4 h-4" />
+            </button>
+          )}
+          {onOpenHistory && (
+            <button
+              onClick={onOpenHistory}
+              className="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors lg:hidden"
+              aria-label="Historial"
+            >
+              <Info className="w-4 h-4 text-[#0e1745]/50 dark:text-white/50" />
+            </button>
+          )}
+        </div>
       </div>
+      <PodcastModal
+        open={podcastOpen}
+        onClose={() => setPodcastOpen(false)}
+        source_type="chat"
+        source_id={currentSessionId ?? ''}
+        source_title="Conversación con Lexa"
+      />
 
       {/* Hero intro — morphing text */}
       <AnimatePresence>
@@ -668,7 +699,10 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
                   </AnimatePresence>
                 </div>
 
-                {/* Deep Insight toggle — ShinyButton (21st.dev) */}
+                {/* Deep Insight — premium tier toggle.
+                    Activates LightRAG graph traversal + Opus 4.7 synthesis.
+                    Subtle by design: same button as before, only the title
+                    tooltip surfaces the cost trade-off. */}
                 <ShinyButton
                   active={deepInsight}
                   onClick={(e) => {
@@ -676,6 +710,7 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
                     setDeepInsight(!deepInsight);
                   }}
                   ariaLabel="Deep Insight"
+                  title="Búsqueda avanzada, análisis multifrente. Consume más."
                 >
                   <Sparkles className="w-3 h-3" />
                   Deep Insight
@@ -700,17 +735,41 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
                   )}
                 </button>
 
-                {/* Voice note — placeholder (21st.dev VoiceInput) */}
-                <VoiceInput accent={agentInfo.color} />
+                {/* Voice → prompt (ElevenLabs Scribe via /api/voice/transcribe).
+                    Append to existing draft instead of replacing — lets the
+                    user dictate multiple sentences across separate clicks. */}
+                <VoiceInput
+                  accent={agentInfo.color}
+                  disabled={isLoading}
+                  onTranscript={(text) => {
+                    setValue((prev) => {
+                      const trimmed = prev.trim();
+                      if (!trimmed) return text;
+                      // Glue with a space if the previous fragment didn't
+                      // end in punctuation, otherwise just join.
+                      const sep = /[.!?…]\s*$/.test(trimmed) ? ' ' : ' ';
+                      return `${trimmed}${sep}${text}`;
+                    });
+                    // Re-focus the textarea so the user can keep editing
+                    requestAnimationFrame(() => textareaRef.current?.focus());
+                  }}
+                />
               </div>
               <button
                 onClick={handleSubmit}
                 className={cn(
                   'p-2.5 rounded-pill transition-all duration-base shrink-0',
                   value.trim() || isLoading
-                    ? 'bg-shift-primary text-white hover:scale-105 shadow-raised'
+                    ? 'text-white hover:scale-105 shadow-raised'
                     : 'bg-gray-200 dark:bg-white/10 text-gray-400 dark:text-white/30 cursor-not-allowed',
                 )}
+                // Active state uses the selected agent's accent so the send
+                // CTA matches the agent identity (was hardcoded shift-primary
+                // electric blue — replaced 2026-04-26 to keep the chrome
+                // visually coherent with the agent rail).
+                style={value.trim() || isLoading
+                  ? { backgroundColor: agentInfo.color }
+                  : undefined}
                 disabled={!value.trim() && !isLoading}
                 aria-label={isLoading ? 'Detener' : 'Enviar'}
               >

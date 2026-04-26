@@ -17,6 +17,7 @@
 import { useEffect, useState, type MouseEvent } from 'react';
 import { ArrowLeft, Download, ExternalLink, FileText, Gavel, Calendar, Headphones, Users, Building2, Scale } from 'lucide-react';
 import { PodcastModal } from '@/components/podcasts/PodcastModal';
+import { PodcastStrip } from '@/components/podcasts/PodcastStrip';
 import { TopDock } from '@/components/top-dock';
 import { navigate } from '@/lib/router';
 import { fetchExpediente, resolveDocUrl, type Expediente, type ExpedienteDoc } from '@/services/expedientesApi';
@@ -51,6 +52,7 @@ export function ExpedienteViewPage({ numero }: Props) {
   const [exp, setExp] = useState<Expediente | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [podcastOpen, setPodcastOpen] = useState(false);
+  const [podcastBump, setPodcastBump] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -107,6 +109,19 @@ export function ExpedienteViewPage({ numero }: Props) {
               {exp?.titulo ?? 'Cargando…'}
             </h1>
           </div>
+          {/* Persistent podcast strip — appears when audio exists. */}
+          {exp && (
+            <div className="hidden md:block flex-1 min-w-0 max-w-[400px]">
+              <PodcastStrip
+                sourceType="expediente"
+                sourceId={String(exp.id)}
+                onRequestRegenerate={() => setPodcastOpen(true)}
+                emptyLabel="Audio del expediente"
+                refreshKey={podcastBump}
+              />
+            </div>
+          )}
+
           <button
             type="button"
             onClick={() => setPodcastOpen(true)}
@@ -133,7 +148,10 @@ export function ExpedienteViewPage({ numero }: Props) {
       {exp && (
         <PodcastModal
           open={podcastOpen}
-          onClose={() => setPodcastOpen(false)}
+          onClose={() => {
+            setPodcastOpen(false);
+            setPodcastBump((n) => n + 1);
+          }}
           source_type="expediente"
           source_id={String(exp.id)}
           source_title={`Exp. ${exp.numero}${exp.titulo ? ' — ' + exp.titulo : ''}`}

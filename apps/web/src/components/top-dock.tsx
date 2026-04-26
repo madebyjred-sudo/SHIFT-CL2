@@ -1,7 +1,8 @@
-import { Clock, PanelLeftClose, PanelLeftOpen, Sun, Moon } from 'lucide-react';
+import { BookOpen, Clock, PanelLeftClose, PanelLeftOpen, Sun, Moon } from 'lucide-react';
 import { useTheme } from '@/lib/theme-context';
 import { UserNavMenu } from './UserNavMenu';
 import { useRoute, navigate } from '@/lib/router';
+import { cn } from '@/lib/utils';
 
 interface TopDockProps {
   onOpenHistory?: () => void;
@@ -12,14 +13,18 @@ interface TopDockProps {
 export function TopDock({ onOpenHistory, onToggleHistory, isHistoryOpen }: TopDockProps) {
   const { theme, toggleTheme } = useTheme();
   const path = useRoute();
-  const currentView: 'chat' | 'live' | 'sil' | 'admin' =
+  const currentView: 'chat' | 'live' | 'sil' | 'audios' | 'admin' | 'hojas' =
     path.startsWith('/admin') ? 'admin'
     : path.startsWith('/sil') ? 'sil'
+    : path.startsWith('/audios') ? 'audios'
+    : path.startsWith('/hojas') ? 'hojas'
     : path.startsWith('/sesiones') || path.startsWith('/expediente') ? 'live'
     : 'chat';
-  const handleNavigate = (view: 'chat' | 'live' | 'sil' | 'admin') => {
+  const handleNavigate = (view: 'chat' | 'live' | 'sil' | 'audios' | 'admin' | 'hojas') => {
     if (view === 'admin') navigate('/admin/overview');
     else if (view === 'sil') navigate('/sil');
+    else if (view === 'audios') navigate('/audios');
+    else if (view === 'hojas') navigate('/hojas');
     else navigate(view === 'live' ? '/sesiones' : '/');
   };
 
