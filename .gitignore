@@ -31,6 +31,7 @@ yarn-debug.log*
 !.yarn/versions
 playwright-report/
 test-results/
+apps/web/playwright/.cache/
 .supabase/
 
 # Secrets — never commit SA JSONs, keys, certs
