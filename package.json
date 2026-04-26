@@ -21,7 +21,8 @@
     "process:sil:docs": "tsx -r dotenv/config scripts/process-sil-docs.ts dotenv_config_path=.env.local",
     "index:reglamento": "tsx -r dotenv/config scripts/index-reglamento.ts dotenv_config_path=.env.local",
     "enrich:sil": "tsx -r dotenv/config scripts/enrich-sil-expedientes.ts dotenv_config_path=.env.local",
-    "download:sil:bulk": "tsx -r dotenv/config scripts/download-sil-bulk.ts dotenv_config_path=.env.local"
+    "download:sil:bulk": "tsx -r dotenv/config scripts/download-sil-bulk.ts dotenv_config_path=.env.local",
+    "seed:lightrag": "tsx -r dotenv/config scripts/seed-lightrag.ts dotenv_config_path=.env.local"
   },
   "devDependencies": {
     "@supabase/supabase-js": "^2.46.0",

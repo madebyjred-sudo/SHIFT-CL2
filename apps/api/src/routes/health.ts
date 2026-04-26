@@ -12,6 +12,7 @@ import { Router } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import { listTranscripciones } from '../services/legacyCl2Client.js';
 import { sessionContextCacheStats } from '../services/sessionContextLoader.js';
+import { lightragHealth } from '../services/lightragClient.js';
 import { withTimeout } from '../services/resilience.js';
 
 export const healthRouter = Router();
@@ -147,6 +148,33 @@ async function checkOpenRouter(): Promise<SubsystemResult> {
   return { ok: true, latency_ms: ms, detail: { label: result?.data?.label } };
 }
 
+async function checkLightrag(): Promise<SubsystemResult> {
+  // Informational — when LightRAG isn't deployed yet, the upstream returns
+  // installed=false and the BFF degrades gracefully (the agent tool falls
+  // back to corpus search). So a missing graph never blocks /health/deep
+  // critical readiness.
+  const t0 = Date.now();
+  try {
+    const h = await lightragHealth();
+    if (!h) return { ok: false, latency_ms: Date.now() - t0, error: 'unreachable' };
+    return {
+      ok: true,
+      latency_ms: Date.now() - t0,
+      detail: {
+        installed: h.installed,
+        working_dir_mb: h.working_dir_mb,
+        entities: h.entity_count,
+        relations: h.relation_count,
+        chunks: h.chunk_count ?? null,
+        build_model: h.build_model,
+        query_model: h.query_model,
+      },
+    };
+  } catch (err) {
+    return { ok: false, latency_ms: Date.now() - t0, error: (err as Error).message };
+  }
+}
+
 async function checkVertex(): Promise<SubsystemResult> {
   // Cheap import-time probe: verify GCP env vars exist + service account file
   // is loadable. A real predict() call would burn quota — use /health/embed
@@ -169,15 +197,16 @@ async function checkVertex(): Promise<SubsystemResult> {
 }
 
 healthRouter.get('/deep', async (req, res) => {
-  const [supabase, openrouter, vertex, legacy, puntoMedio] = await Promise.all([
+  const [supabase, openrouter, vertex, legacy, puntoMedio, lightrag] = await Promise.all([
     checkSupabase(),
     checkOpenRouter(),
     checkVertex(),
     checkLegacy(),
     checkPuntoMedio(),
+    checkLightrag(),
   ]);
 
-  // puntoMedio is informational, not gating: chat works without it.
+  // puntoMedio + lightrag are informational, not gating: chat works without them.
   const criticalOk = supabase.ok && openrouter.ok && vertex.ok && legacy.ok;
   if (!criticalOk) {
     req.log?.warn('health_deep_degraded', {
@@ -186,12 +215,13 @@ healthRouter.get('/deep', async (req, res) => {
       vertex: vertex.ok,
       legacy: legacy.ok,
       punto_medio: puntoMedio.ok,
+      lightrag: lightrag.ok,
     });
   }
   res.status(criticalOk ? 200 : 503).json({
     ok: criticalOk,
     timestamp: new Date().toISOString(),
-    subsystems: { supabase, openrouter, vertex, legacy, punto_medio: puntoMedio },
+    subsystems: { supabase, openrouter, vertex, legacy, punto_medio: puntoMedio, lightrag },
     caches: {
       session_context: sessionContextCacheStats(),
     },

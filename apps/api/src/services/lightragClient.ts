@@ -124,6 +124,7 @@ export interface LightragHealth {
   working_dir_mb: number;
   entity_count: number | null;
   relation_count: number | null;
+  chunk_count?: number | null;
   build_model: string;
   query_model: string;
 }
