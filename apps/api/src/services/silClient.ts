@@ -16,6 +16,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { withRetry, withTimeout } from './resilience.js';
 import { embedQuery } from './embeddings.js';
+import { rerankItems } from './rerankClient.js';
 
 let _supa: SupabaseClient | null = null;
 function supa(): SupabaseClient {
@@ -170,46 +171,93 @@ export async function getExpedienteById(numero: number): Promise<SilExpedienteFu
 // ─── Semantic RAG over the SIL corpus ─────────────────────────────────
 
 /**
- * Embedding-based retrieval. Used when the user's question is open-ended
- * ("how has Costa Rica handled X?", "what was decided about Y?") and a
- * keyword title match wouldn't catch the right expediente.
+ * Embedding-based retrieval over the SIL corpus + Reglamento + plenarias.
  *
- * Strategy: pull top 2*K from match_chunks then filter to SIL sources only
- * (until match_chunks gains a source_type filter param in 0006).
+ * Calls match_chunks_hybrid (migration 0009) which does Reciprocal Rank
+ * Fusion of pgvector dense similarity AND Postgres ts_rank_cd over a
+ * Spanish tsvector — captures both semantic queries ("traslado de
+ * riesgos") and queries with rare tokens that don't survive embedding
+ * ("Ley 6727", "Exp. 22.290", "ÁREA VIII", "CCSS").
+ *
+ * Falls back gracefully to match_chunks_v2 dense-only when 0009 isn't
+ * applied yet (function-not-found error 42883). Final fallback to []
+ * when the original match_chunks (v1) is the only one available.
  */
 export async function searchSilCorpus(args: {
   query: string;
   k?: number;
 }): Promise<SilChunkHit[]> {
   const k = Math.min(Math.max(args.k ?? 6, 1), 20);
+  // Over-fetch for the reranker — give the cross-encoder N*5 candidates
+  // (capped at 30) so it has material to re-order. The final returned
+  // top-K is k.
+  const overFetch = Math.min(30, Math.max(k * 5, 12));
   const queryEmbedding = await embedQuery(args.query);
 
-  return withRetry(
+  const candidates = await withRetry(
     () =>
       withTimeout(
         async (signal) => {
+          // Path A: hybrid (0009 applied).
           const { data, error } = await supa()
-            .rpc('match_chunks', {
+            .rpc('match_chunks_hybrid', {
               query_embedding: queryEmbedding,
-              match_count: k * 2,
+              query_text: args.query,
+              match_count: overFetch,
               filter_session_id: null,
-              filter_comision: null,
-              filter_fecha_from: null,
-              filter_fecha_to: null,
+              filter_source_type: null,
+              filter_source_ref_prefix: null,
+              rrf_k: 60,
             })
             .abortSignal(signal);
-          if (error) throw new Error(`match_chunks: ${error.message}`);
+          if (error) {
+            // 42883 = function does not exist. Caller may not have applied 0009.
+            if (error.code === '42883' || error.message.includes('match_chunks_hybrid')) {
+              return await fallbackDenseOnly(queryEmbedding, overFetch, signal);
+            }
+            throw new Error(`match_chunks_hybrid: ${error.message}`);
+          }
           const hits = (data ?? []) as Array<SilChunkHit & { source_type?: string }>;
-          // Until 0006 adds the source_type filter to the RPC, drop non-SIL
-          // hits in memory. Over-fetched 2x to compensate.
-          return hits
-            .filter((h) => typeof h.source_type === 'string' && h.source_type.startsWith('sil_'))
-            .slice(0, k);
+          return hits.filter((h) => typeof h.source_type === 'string' && h.source_type.startsWith('sil_'));
         },
         { ms: 8_000, label: 'sil:search_corpus' },
       ),
     { attempts: 2, baseDelayMs: 300, label: 'sil:search_corpus' },
   );
+
+  // Cross-encoder rerank — falls through to identity (top-K untouched)
+  // when VOYAGE_API_KEY is missing, so this is safe to leave on by
+  // default. Demo with the key set wins; demo without it doesn't break.
+  if (candidates.length <= 1) return candidates.slice(0, k);
+  return rerankItems(args.query, candidates, k);
+}
+
+async function fallbackDenseOnly(
+  queryEmbedding: number[],
+  k: number,
+  signal: AbortSignal,
+): Promise<SilChunkHit[]> {
+  console.warn('[searchSilCorpus] 0009 not applied — falling back to dense-only via match_chunks_v2');
+  const { data, error } = await supa()
+    .rpc('match_chunks_v2', {
+      query_embedding: queryEmbedding,
+      match_count: k * 3,
+      filter_session_id: null,
+      filter_source_type: null,
+      filter_source_ref_prefix: null,
+    })
+    .abortSignal(signal);
+  if (error) {
+    if (error.code === '42883' || error.message.includes('match_chunks_v2')) {
+      console.warn('[searchSilCorpus] match_chunks_v2 also missing — apply migration 0007. Returning empty.');
+      return [];
+    }
+    throw new Error(`match_chunks_v2 fallback: ${error.message}`);
+  }
+  const hits = (data ?? []) as Array<SilChunkHit & { source_type?: string }>;
+  return hits
+    .filter((h) => typeof h.source_type === 'string' && h.source_type.startsWith('sil_'))
+    .slice(0, k);
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────
@@ -242,40 +290,72 @@ export async function searchReglamento(args: {
   k?: number;
 }): Promise<ReglamentoHit[]> {
   const k = Math.min(Math.max(args.k ?? 5, 1), 15);
+  const overFetch = Math.min(20, Math.max(k * 4, 10));
   const queryEmbedding = await embedQuery(args.query);
 
-  return withRetry(
+  const candidates = await withRetry(
     () =>
       withTimeout(
         async (signal) => {
-          const { data, error } = await supa()
-            .rpc('match_chunks_v2', {
+          // Path A: hybrid (preferred — handles "Art. 113", "moción 240"
+          // exact matches better than dense alone).
+          let data: unknown[] | null = null;
+          let usedFallback = false;
+
+          const hybrid = await supa()
+            .rpc('match_chunks_hybrid', {
               query_embedding: queryEmbedding,
-              match_count: k * 2, // overfetch slightly to allow ref filtering
+              query_text: args.query,
+              match_count: overFetch,
               filter_session_id: null,
-              filter_source_type: null, // accept either 'reglamento' or 'metadata'
+              filter_source_type: null,
               filter_source_ref_prefix: 'Reglamento Asamblea',
+              rrf_k: 60,
             })
             .abortSignal(signal);
-          if (error) {
-            // Graceful fallback: if migration 0007 isn't applied yet the
-            // v2 function is missing. Don't crash the chat — return empty
-            // and warn-log. Operator sees this in /health/deep eventually.
-            if (error.message.includes('match_chunks_v2') || error.code === '42883') {
-              console.warn('[searchReglamento] match_chunks_v2 not found — apply migration 0007. Returning empty.');
-              return [] as ReglamentoHit[];
+
+          if (hybrid.error) {
+            if (hybrid.error.code === '42883' || hybrid.error.message.includes('match_chunks_hybrid')) {
+              usedFallback = true;
+            } else {
+              throw new Error(`match_chunks_hybrid: ${hybrid.error.message}`);
             }
-            throw new Error(`match_chunks_v2: ${error.message}`);
+          } else {
+            data = hybrid.data as unknown[];
           }
+
+          // Path B: dense-only fallback when 0009 isn't applied yet.
+          if (usedFallback) {
+            const v2 = await supa()
+              .rpc('match_chunks_v2', {
+                query_embedding: queryEmbedding,
+                match_count: overFetch,
+                filter_session_id: null,
+                filter_source_type: null,
+                filter_source_ref_prefix: 'Reglamento Asamblea',
+              })
+              .abortSignal(signal);
+            if (v2.error) {
+              if (v2.error.code === '42883' || v2.error.message.includes('match_chunks_v2')) {
+                console.warn('[searchReglamento] neither hybrid nor v2 RPC found — apply migrations 0007/0009. Returning empty.');
+                return [] as ReglamentoHit[];
+              }
+              throw new Error(`match_chunks_v2: ${v2.error.message}`);
+            }
+            data = v2.data as unknown[];
+          }
+
           const hits = (data ?? []) as Array<{
             chunk_id: string;
             source_type?: string;
             source_ref?: string;
             content: string;
-            similarity: number;
+            similarity?: number;       // v2 path
+            dense_similarity?: number; // hybrid path
+            rrf_score?: number;        // hybrid path
             metadata?: Record<string, unknown> | null;
           }>;
-          return hits.slice(0, k).map((h) => {
+          return hits.map((h) => {
             const md = (h.metadata ?? {}) as Record<string, unknown>;
             return {
               chunk_id: h.chunk_id,
@@ -286,7 +366,7 @@ export async function searchReglamento(args: {
                   ? md.articulo_full_title
                   : (h.source_ref ?? 'Reglamento'),
               content: h.content,
-              similarity: h.similarity,
+              similarity: h.dense_similarity ?? h.similarity ?? 0,
               url: typeof md.url === 'string' ? md.url : null,
             };
           });
@@ -295,6 +375,9 @@ export async function searchReglamento(args: {
       ),
     { attempts: 2, baseDelayMs: 250, label: 'reglamento:search' },
   );
+
+  if (candidates.length <= 1) return candidates.slice(0, k);
+  return rerankItems(args.query, candidates, k);
 }
 
 export function renderReglamentoForLlm(hits: ReglamentoHit[]): string {
