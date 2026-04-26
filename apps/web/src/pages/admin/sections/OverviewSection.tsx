@@ -67,6 +67,9 @@ interface QueueRow {
 const VERB_ICON: Record<string, LucideIcon> = {
   aprobó: CheckCircle2,
   rechazó: AlertTriangle,
+  publicó: CheckCircle2,
+  archivó: AlertTriangle,
+  'generó borradores': Sparkles,
   ingestó: Radio,
   detectó: Sparkles,
   invitó: UserPlus,
@@ -118,22 +121,22 @@ export function OverviewSection(): React.ReactElement {
       href: '/admin/transcripciones',
     },
     {
-      tab: 'Punto Medio · consolidaciones',
+      tab: 'Curaduría · borradores',
       n: puntoMedioPending?.cons ?? 0,
-      pill: 'Cerebro',
+      pill: 'Editorial',
       pillKind: 'neutral',
       icon: Activity,
-      delta: puntoMedioPending?.cons === 0 ? 'Cola al día' : `${puntoMedioPending?.cons ?? 0} sin revisar`,
-      href: '/admin/punto-medio',
+      delta: puntoMedioPending?.cons === 0 ? 'Sin borradores pendientes' : `${puntoMedioPending?.cons ?? 0} por revisar`,
+      href: '/admin/curaduria',
     },
     {
-      tab: 'Punto Medio · patrones',
+      tab: 'Curaduría · tendencias',
       n: puntoMedioPending?.pat ?? 0,
-      pill: 'Cerebro',
+      pill: 'Editorial',
       pillKind: 'neutral',
       icon: Sparkles,
-      delta: puntoMedioPending?.pat === 0 ? 'Cola al día' : `${puntoMedioPending?.pat ?? 0} sin revisar`,
-      href: '/admin/punto-medio',
+      delta: puntoMedioPending?.pat === 0 ? 'Sin tendencias pendientes' : `${puntoMedioPending?.pat ?? 0} por revisar`,
+      href: '/admin/curaduria',
     },
   ];
 
@@ -164,8 +167,8 @@ export function OverviewSection(): React.ReactElement {
       ['sesiones', String(summary.data?.sessions ?? 0)].join(','),
       ['expedientes_sil', String(summary.data?.expedientes ?? 0)].join(','),
       ['transcripciones_pendientes', String(summary.data?.pending_transcripciones ?? 0)].join(','),
-      ['punto_medio_consolidaciones', String(puntoMedioPending?.cons ?? 0)].join(','),
-      ['punto_medio_patrones', String(puntoMedioPending?.pat ?? 0)].join(','),
+      ['curaduria_borradores', String(puntoMedioPending?.cons ?? 0)].join(','),
+      ['curaduria_tendencias', String(puntoMedioPending?.pat ?? 0)].join(','),
     ].join('\n');
     const blob = new Blob([lines], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);

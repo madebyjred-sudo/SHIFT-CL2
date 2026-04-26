@@ -18,6 +18,7 @@ import {
   reviewItem,
   invalidateRagCache,
 } from '../services/puntoMedioClient.js';
+import { auditFromReq } from '../services/auditLog.js';
 
 export const puntoMedioRouter = Router();
 
@@ -90,9 +91,35 @@ puntoMedioRouter.post('/review/:id', async (req, res) => {
     });
     invalidateRagCache();
     req.log.info('punto_medio_reviewed', { id, action, itemType, userId });
+
+    // Audit log uses editorial verbs ("publicó / archivó lineamiento")
+    // — the underlying tables stay called consolidations/patterns but
+    // the operator-facing log mirrors the curaduría narrative.
+    await auditFromReq(req, {
+      verb: action === 'approve' ? 'publicó' : 'archivó',
+      resource: `lineamiento #${id}`,
+      resource_kind: 'editorial_guideline',
+      resource_id: String(id),
+      result: 'ok',
+      metadata: {
+        // Keep the engineering shape in the metadata blob for ops
+        // forensics, but it's never surfaced in the Auditoría UI.
+        item_kind: itemType,
+        backing: 'punto_medio',
+      },
+    });
+
     res.json({ ok: true, ...result });
   } catch (err) {
     req.log.error('punto_medio_review_failed', { error: (err as Error).message, id, action });
+    await auditFromReq(req, {
+      verb: action === 'approve' ? 'publicó' : 'archivó',
+      resource: `lineamiento #${id}`,
+      resource_kind: 'editorial_guideline',
+      resource_id: String(id),
+      result: 'error',
+      metadata: { error: (err as Error).message },
+    });
     res.status(502).json({
       ok: false,
       error: 'cerebro_unavailable',

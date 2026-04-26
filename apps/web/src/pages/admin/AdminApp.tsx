@@ -46,7 +46,7 @@ export function AdminApp({ section }: AdminAppProps): React.ReactElement {
           next.transcripciones = trans.value.data.counts.pending;
         }
         if (punto.status === 'fulfilled') {
-          next['punto-medio'] =
+          next['curaduria'] =
             punto.value.pending_consolidations_count + punto.value.pending_patterns_count;
         }
         setBadges(next);
@@ -62,7 +62,7 @@ export function AdminApp({ section }: AdminAppProps): React.ReactElement {
         {section === 'overview' && <OverviewSection />}
         {section === 'transcripciones' && <TranscripcionesSection />}
         {section === 'agentes' && <AgentesSection />}
-        {section === 'punto-medio' && <PuntoMedioSection />}
+        {section === 'curaduria' && <PuntoMedioSection />}
         {section === 'sesiones' && <SesionesSection />}
         {section === 'expedientes' && <ExpedientesSection />}
         {section === 'usuarios' && <UsuariosSection />}

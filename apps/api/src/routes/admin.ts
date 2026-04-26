@@ -603,18 +603,18 @@ adminRouter.post('/punto-medio/consolidate', async (req, res) => {
     const body = await upstream.text();
     if (!upstream.ok) throw new Error(`upstream ${upstream.status}: ${body.slice(0, 200)}`);
     await auditFromReq(req, {
-      verb: 'forzó consolidación',
-      resource: `tenant ${tenant}`,
-      resource_kind: 'punto_medio',
+      verb: 'generó borradores',
+      resource: `editorial · ${tenant}`,
+      resource_kind: 'editorial_guideline',
       result: 'ok',
     });
     res.setHeader('Content-Type', 'application/json');
     res.send(body);
   } catch (err) {
     await auditFromReq(req, {
-      verb: 'forzó consolidación',
-      resource: `tenant ${tenant}`,
-      resource_kind: 'punto_medio',
+      verb: 'generó borradores',
+      resource: `editorial · ${tenant}`,
+      resource_kind: 'editorial_guideline',
       result: 'error',
       metadata: { error: (err as Error).message },
     });

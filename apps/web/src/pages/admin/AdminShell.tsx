@@ -46,7 +46,7 @@ const NAV: ReadonlyArray<NavItem> = [
   { id: 'overview',        label: 'Vista general',       icon: LayoutDashboard, group: 'Operación' },
   { id: 'transcripciones', label: 'Transcripciones',     icon: FileAudio,       group: 'Operación' },
   { id: 'agentes',         label: 'Agentes',             icon: Bot,             group: 'Operación' },
-  { id: 'punto-medio',     label: 'Punto Medio',         icon: ShieldCheck,     group: 'Operación' },
+  { id: 'curaduria',       label: 'Curaduría',           icon: ShieldCheck,     group: 'Operación' },
   { id: 'sesiones',        label: 'Sesiones plenarias',  icon: Radio,           group: 'Contenido' },
   { id: 'expedientes',     label: 'Expedientes SIL',     icon: Folder,          group: 'Contenido' },
   { id: 'usuarios',        label: 'Usuarios',            icon: Users,           group: 'Acceso & sistema' },

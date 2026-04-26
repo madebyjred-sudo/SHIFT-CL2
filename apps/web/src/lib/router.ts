@@ -65,7 +65,7 @@ export type AdminSection =
   | 'overview'
   | 'transcripciones'
   | 'agentes'
-  | 'punto-medio'
+  | 'curaduria'
   | 'sesiones'
   | 'expedientes'
   | 'usuarios'
@@ -76,7 +76,7 @@ const ADMIN_SECTIONS: ReadonlyArray<AdminSection> = [
   'overview',
   'transcripciones',
   'agentes',
-  'punto-medio',
+  'curaduria',
   'sesiones',
   'expedientes',
   'usuarios',
@@ -84,9 +84,23 @@ const ADMIN_SECTIONS: ReadonlyArray<AdminSection> = [
   'config',
 ];
 
+/**
+ * Legacy path aliases — redirected to their canonical section by the
+ * router. We keep them mapping in here (not in App.tsx) so the
+ * sidebar/topdock can always read a canonical section id via
+ * matchAdminSection regardless of which URL the user typed.
+ */
+const ADMIN_ALIASES: Record<string, AdminSection> = {
+  // Legacy "Punto Medio" branding still resolves — bookmarks survive.
+  'punto-medio': 'curaduria',
+};
+
 export function matchAdminSection(path: string): AdminSection | null {
   if (/^\/admin\/?$/.test(path)) return 'overview';
   const m = path.match(/^\/admin\/([a-z-]+)\/?$/);
   if (!m) return null;
-  return ADMIN_SECTIONS.includes(m[1] as AdminSection) ? (m[1] as AdminSection) : null;
+  const slug = m[1] as string;
+  if (ADMIN_SECTIONS.includes(slug as AdminSection)) return slug as AdminSection;
+  if (slug in ADMIN_ALIASES) return ADMIN_ALIASES[slug]!;
+  return null;
 }

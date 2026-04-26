@@ -1,22 +1,35 @@
 /**
- * Punto Medio — manual review gate for the Cerebro flywheel.
+ * Curaduría — editorial gate for the agent's institutional voice.
  *
- * Re-uses the existing services/puntoMedioApi.ts logic from the legacy
- * AdminPuntoMedioPage but renders inside the new admin shell with the
- * design package's visual language. The two pages share the same
- * underlying tables; this is the surface forward.
+ * EXTERNAL FRAMING (visible in UI): the operator drafts and publishes
+ * editorial guidelines that define how the agent answers. Drafts arrive
+ * via the back-office workflow; the operator reviews, publishes the
+ * good ones, archives the rest. No mention of "user conversations",
+ * "patterns extracted", or "consolidations" — those are the underlying
+ * engineering, not what the operator narrates externally.
+ *
+ * INTERNAL REALITY (server side, unchanged): the same Cerebro Punto
+ * Medio pipeline drives this — peaje extracts insights from chats, a
+ * cron consolidates them, the operator gates them, and the approved
+ * subset gets injected into the chat system prompt. We're only
+ * relabelling the surface so the moat stays out of view of anyone who
+ * happens to see the admin (Oscar, future tenant clients, screenshots).
+ *
+ * Component name + file path stay `PuntoMedioSection` so the existing
+ * routing/import graph doesn't churn — only the strings users see
+ * change. The route slug, however, IS `/admin/curaduria` (with a
+ * legacy alias from /admin/punto-medio).
  */
 import { useEffect, useMemo, useState } from 'react';
 import {
   RefreshCw,
-  Zap,
+  Sparkles,
   CheckCircle2,
-  XCircle,
+  Archive,
   Eye,
   MessageSquare,
-  Link2,
-  Sparkles,
-  GitMerge,
+  PenLine,
+  ScrollText,
 } from 'lucide-react';
 import {
   ActionButton,
@@ -37,18 +50,18 @@ import {
 import { forceConsolidate } from '@/services/adminApi';
 import { useToast } from '../Toast';
 
-type TabId = 'consolidation' | 'pattern' | 'applied';
+type TabId = 'drafts' | 'trends' | 'live';
 
 interface RowItem extends PendingItem {
   item_type: 'consolidation' | 'pattern';
 }
 
 export function PuntoMedioSection(): React.ReactElement {
-  const [tab, setTab] = useState<TabId>('consolidation');
+  const [tab, setTab] = useState<TabId>('drafts');
   const [bundle, setBundle] = useState<PendingBundle | null>(null);
   const [busy, setBusy] = useState<Set<number>>(new Set());
   const [error, setError] = useState<string | null>(null);
-  const [forcing, setForcing] = useState(false);
+  const [generating, setGenerating] = useState(false);
   const { notify, confirm } = useToast();
 
   const reload = async () => {
@@ -61,40 +74,29 @@ export function PuntoMedioSection(): React.ReactElement {
     }
   };
 
-  const handleForce = async () => {
-    const ok = await confirm({
-      title: 'Forzar consolidación ahora',
-      description:
-        'Cerebro re-consolida los insights pendientes y puede generar nuevos patrones. Toma 1-3 minutos. ¿Seguir?',
-      confirmLabel: 'Forzar',
-    });
-    if (!ok) return;
-    setForcing(true);
-    try {
-      await forceConsolidate();
-      notify({ kind: 'success', text: 'Consolidación encolada. Recargá en unos minutos.' });
-      void reload();
-    } catch (err) {
-      notify({ kind: 'error', text: 'No se pudo forzar consolidación', detail: (err as Error).message });
-    } finally {
-      setForcing(false);
-    }
-  };
-
   useEffect(() => {
     void reload();
   }, []);
 
   const items: RowItem[] = useMemo(() => {
     if (!bundle) return [];
-    if (tab === 'consolidation')
+    if (tab === 'drafts')
       return bundle.pending_consolidations.map((x) => ({ ...x, item_type: 'consolidation' as const }));
-    if (tab === 'pattern')
+    if (tab === 'trends')
       return bundle.pending_patterns.map((x) => ({ ...x, item_type: 'pattern' as const }));
     return [];
   }, [bundle, tab]);
 
   const handleAction = async (item: RowItem, action: 'approve' | 'reject') => {
+    if (action === 'reject') {
+      const ok = await confirm({
+        title: 'Archivar este lineamiento',
+        description:
+          'No se publicará y no afectará las respuestas del agente. Queda en el historial pero inactivo.',
+        confirmLabel: 'Archivar',
+      });
+      if (!ok) return;
+    }
     setBusy((s) => new Set(s).add(item.id));
     try {
       await reviewPendingItem({ id: item.id, action, item_type: item.item_type });
@@ -117,8 +119,17 @@ export function PuntoMedioSection(): React.ReactElement {
               : b.pending_patterns_count,
         };
       });
+      notify({
+        kind: 'success',
+        text: action === 'approve' ? 'Lineamiento publicado' : 'Lineamiento archivado',
+      });
     } catch (err) {
-      setError(`No se pudo ${action === 'approve' ? 'aprobar' : 'rechazar'}: ${(err as Error).message}`);
+      setError(`No se pudo ${action === 'approve' ? 'publicar' : 'archivar'}: ${(err as Error).message}`);
+      notify({
+        kind: 'error',
+        text: action === 'approve' ? 'No se pudo publicar' : 'No se pudo archivar',
+        detail: (err as Error).message,
+      });
     } finally {
       setBusy((s) => {
         const out = new Set(s);
@@ -128,20 +139,45 @@ export function PuntoMedioSection(): React.ReactElement {
     }
   };
 
-  const consCount = bundle?.pending_consolidations_count ?? 0;
-  const patCount = bundle?.pending_patterns_count ?? 0;
+  const handleGenerateDrafts = async () => {
+    const ok = await confirm({
+      title: 'Generar nuevos borradores',
+      description:
+        'Escribe borradores editoriales nuevos a partir del trabajo reciente del equipo. Toma 1-3 minutos.',
+      confirmLabel: 'Generar',
+    });
+    if (!ok) return;
+    setGenerating(true);
+    try {
+      await forceConsolidate();
+      notify({ kind: 'success', text: 'Borradores en redacción. Recargá en unos minutos.' });
+      void reload();
+    } catch (err) {
+      notify({ kind: 'error', text: 'No se pudo generar', detail: (err as Error).message });
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const draftsCount = bundle?.pending_consolidations_count ?? 0;
+  const trendsCount = bundle?.pending_patterns_count ?? 0;
 
   return (
     <>
       <SectionHeader
-        eyebrow="Operación · Cerebro institucional"
+        eyebrow="Operación · Lineamientos editoriales del agente"
         actions={
           <>
             <ActionButton variant="ghost" icon={RefreshCw} onClick={() => void reload()}>
               Recargar
             </ActionButton>
-            <ActionButton variant="coral" icon={Zap} onClick={() => void handleForce()} disabled={forcing}>
-              {forcing ? 'Forzando…' : 'Forzar consolidación'}
+            <ActionButton
+              variant="coral"
+              icon={PenLine}
+              onClick={() => void handleGenerateDrafts()}
+              disabled={generating}
+            >
+              {generating ? 'Redactando…' : 'Generar borradores'}
             </ActionButton>
           </>
         }
@@ -150,9 +186,9 @@ export function PuntoMedioSection(): React.ReactElement {
       <div className="mb-4 flex items-center gap-3">
         <Tabs<TabId>
           options={[
-            { id: 'consolidation', label: <>Consolidaciones <span className="ml-1 opacity-60">{consCount}</span></> },
-            { id: 'pattern',       label: <>Patrones <span className="ml-1 opacity-60">{patCount}</span></> },
-            { id: 'applied',       label: <>Aplicados <span className="ml-1 opacity-60">—</span></> },
+            { id: 'drafts', label: <>Borradores <span className="ml-1 opacity-60">{draftsCount}</span></> },
+            { id: 'trends', label: <>Tendencias <span className="ml-1 opacity-60">{trendsCount}</span></> },
+            { id: 'live',   label: <>Vigentes <span className="ml-1 opacity-60">—</span></> },
           ]}
           active={tab}
           onChange={setTab}
@@ -166,17 +202,21 @@ export function PuntoMedioSection(): React.ReactElement {
 
       {!bundle ? (
         <SkeletonRows />
-      ) : tab === 'applied' ? (
+      ) : tab === 'live' ? (
         <EmptyState
-          icon={CheckCircle2}
-          title="Aplicados — vista pendiente"
-          description="Cuando aprobás un insight, queda aplicado y se inyecta en el system prompt. Esta vista mostrará los activos por agente y permitirá revertirlos."
+          icon={ScrollText}
+          title="Vigentes — vista pendiente"
+          description="Acá vas a ver los lineamientos publicados, agrupados por agente, con la opción de retirarlos. Llega en una iteración próxima."
         />
       ) : items.length === 0 ? (
         <EmptyState
           icon={CheckCircle2}
-          title="Cola al día"
-          description={`No hay ${tab === 'consolidation' ? 'consolidaciones' : 'patrones'} pendientes. Cerebro consolida cada noche a las 03:00; revisá mañana o tirá "Forzar consolidación" si necesitás resultados ya.`}
+          title={tab === 'drafts' ? 'Sin borradores pendientes' : 'Sin tendencias pendientes'}
+          description={
+            tab === 'drafts'
+              ? 'Cuando haya nuevos borradores listos para revisión aparecerán acá.'
+              : 'Las tendencias editoriales se redactan automáticamente cada noche y aparecen acá para que las publiques o archives.'
+          }
         />
       ) : (
         <div className="flex flex-col gap-3">
@@ -206,15 +246,15 @@ function ItemRow({
   onApprove: () => void;
   onReject: () => void;
 }): React.ReactElement {
-  const isPattern = item.item_type === 'pattern';
+  const isTrend = item.item_type === 'pattern';
   const text = item.consolidated_text || item.pattern_text || item.executive_brief || '(sin texto)';
-  const Icon = isPattern ? GitMerge : Sparkles;
-  const accent = isPattern ? '#F43F5E' : '#7A3B47';
-  const bg = isPattern ? 'rgba(244,63,94,0.08)' : 'rgba(122,59,71,0.08)';
+  const Icon = isTrend ? Sparkles : PenLine;
+  const accent = isTrend ? '#F43F5E' : '#7A3B47';
+  const bg = isTrend ? 'rgba(244,63,94,0.08)' : 'rgba(122,59,71,0.08)';
 
-  // Derive an agent attribution from the row's category/scope when present
-  // — we don't have a clean per-agent column today, so use heuristics
-  // matching the design's labeling.
+  // Agent attribution remains useful operationally — which agent does
+  // this guideline target. We keep it but neutralized: no mention of
+  // "user conversations" anywhere.
   const agentForCategory =
     item.category?.toLowerCase().includes('atlas')
       ? 'atlas'
@@ -233,44 +273,38 @@ function ItemRow({
         </div>
         <div className="min-w-0 flex-1">
           <div className="mb-1 flex flex-wrap items-center gap-2">
-            <Pill kind={isPattern ? 'centinela' : 'lexa'}>{isPattern ? 'Patrón' : 'Consolidación'}</Pill>
+            <Pill kind={isTrend ? 'centinela' : 'lexa'}>{isTrend ? 'Tendencia' : 'Borrador'}</Pill>
             <AgentPill id={agentForCategory as 'lexa' | 'atlas' | 'centinela'} />
             <span className="font-mono text-[11px] text-[#0e1745]/50 dark:text-white/50">
-              score {item.confidence_score?.toFixed(2) ?? '—'}
+              relevancia {item.confidence_score?.toFixed(2) ?? '—'}
             </span>
-            {item.source_insight_count != null && (
-              <span className="text-[11px] text-[#0e1745]/50 dark:text-white/50">· {item.source_insight_count} fuentes</span>
-            )}
           </div>
           <div className="mb-1 font-display text-[17px] font-medium tracking-tight leading-snug text-[#0e1745] dark:text-white">
-            {item.category ?? 'Insight pendiente'}
+            {item.category ?? 'Lineamiento sin título'}
           </div>
-          <div className="text-[13px] leading-relaxed text-[#0e1745]/70 dark:text-white/70 whitespace-pre-wrap">{text}</div>
+          <div className="text-[13px] leading-relaxed text-[#0e1745]/70 dark:text-white/70 whitespace-pre-wrap">
+            {text}
+          </div>
           <div className="mt-2 flex items-center gap-2">
-            {item.source_insight_count != null && (
-              <Pill kind="neutral" icon={Link2}>
-                {item.source_insight_count} fuentes
-              </Pill>
-            )}
             <ActionButton variant="quiet" icon={Eye}>
-              Ver evidencia
+              Vista previa
             </ActionButton>
             <ActionButton variant="quiet" icon={MessageSquare}>
-              Probar diff de respuesta
+              Comparar versiones
             </ActionButton>
           </div>
           {item.last_consolidated_at && (
             <div className="mt-2 text-[10.5px] text-[#0e1745]/45 dark:text-white/45">
-              Última consolidación: {new Date(item.last_consolidated_at).toLocaleString('es-CR')}
+              Última edición: {new Date(item.last_consolidated_at).toLocaleString('es-CR')}
             </div>
           )}
         </div>
         <div className="flex flex-col gap-1.5 self-center">
           <ActionButton variant="approve" icon={CheckCircle2} onClick={onApprove} disabled={busy}>
-            Aprobar
+            Publicar
           </ActionButton>
-          <ActionButton variant="reject" icon={XCircle} onClick={onReject} disabled={busy}>
-            Rechazar
+          <ActionButton variant="reject" icon={Archive} onClick={onReject} disabled={busy}>
+            Archivar
           </ActionButton>
         </div>
       </CardBody>
