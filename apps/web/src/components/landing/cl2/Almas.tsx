@@ -213,8 +213,68 @@ export const Almas = () => {
         </div>
       </Reveal>
 
-      {/* Orbit composition */}
-      <div ref={containerRef} className="relative mx-auto w-full max-w-[900px] aspect-square overflow-hidden touch-none select-none">
+      {/* Mobile: stacked cards — the orbit composition needs ~700px to
+          breathe; below md the satellites collide with the nucleus and
+          each other. Same data, vertical stack. */}
+      <div className="md:hidden flex flex-col gap-10 items-stretch px-1">
+        {/* Núcleo first — establishes the metaphor */}
+        <div className="self-center w-full max-w-[280px] py-6 px-5 rounded-2xl bg-cl2-paper border border-cl2-ink/15 text-center" style={{ boxShadow: "0 12px 40px hsl(var(--cl2-ink) / 0.10)" }}>
+          <div className="font-mono text-[9.5px] uppercase tracking-widest text-cl2-ink/45 mb-1">
+            Núcleo
+          </div>
+          <div className="serif text-[20px] leading-tight text-cl2-ink" style={{ fontWeight: 500, letterSpacing: "-0.015em" }}>
+            Archivo legislativo
+          </div>
+          <div className="mt-2 font-mono text-[10px] uppercase tracking-widest" style={{ color: "hsl(var(--cl2-burgundy))" }}>
+            SIL · Reglamento · Plenarias
+          </div>
+        </div>
+
+        {/* Three satellites stacked */}
+        {almas.map((alma) => (
+          <div key={alma.name} className="relative pt-7 pb-5 px-5 rounded-2xl bg-cl2-paper border border-cl2-ink/10" style={{ boxShadow: "0 4px 14px hsl(var(--cl2-ink) / 0.05)" }}>
+            <div
+              className="absolute -top-5 left-1/2 -translate-x-1/2 w-10 h-10 rounded-full flex items-center justify-center text-[18px]"
+              style={{
+                background: `hsl(var(${alma.toneVar}))`,
+                color: "hsl(var(--cl2-paper))",
+                boxShadow: `0 6px 18px hsl(var(${alma.toneVar}) / 0.4)`,
+              }}
+              aria-hidden
+            >
+              {alma.glyph}
+            </div>
+            <div className="text-center">
+              <h3
+                className="serif text-[26px] leading-none mb-1"
+                style={{
+                  color: `hsl(var(${alma.toneVar}))`,
+                  fontStyle: "italic",
+                  fontWeight: 400,
+                  letterSpacing: "-0.018em",
+                }}
+              >
+                {alma.name}
+              </h3>
+              <div className="font-mono text-[10px] uppercase tracking-widest text-cl2-ink/50 mb-3">
+                {alma.role}
+              </div>
+              <p
+                className="serif text-[14px] leading-snug italic"
+                style={{ color: `hsl(var(${alma.toneVar}) / 0.92)`, fontWeight: 400 }}
+              >
+                "{alma.rule}"
+              </p>
+              <div className="mt-3 pt-3 border-t border-dashed border-cl2-ink/10 font-mono text-[10px] uppercase tracking-wider text-cl2-ink/55">
+                {alma.signal}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Orbit composition — desktop only (md+) */}
+      <div ref={containerRef} className="hidden md:block relative mx-auto w-full max-w-[900px] aspect-square overflow-hidden touch-none select-none">
         {/* SVG: orbit ring + connection lines */}
         <svg
           className="absolute inset-0 w-full h-full"

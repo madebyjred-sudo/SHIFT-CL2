@@ -59,9 +59,59 @@ export const Comparison = () => {
         </div>
       </Reveal>
 
+      {/* Mobile: stacked rows — one block per aspect with the four
+          column values listed. The full table needs ~760px and would
+          force horizontal scroll, which kills comparison legibility. */}
+      <Reveal delay={120}>
+        <div className="md:hidden space-y-3">
+          {rows.map((r, i) => (
+            <div
+              key={i}
+              className="rounded-xl bg-white border border-cl2-ink/[0.08] overflow-hidden"
+              style={{ boxShadow: "var(--shadow-ink-subtle)" }}
+            >
+              <div className="px-4 py-2.5 border-b border-cl2-ink/[0.06] bg-cl2-ink/[0.015] font-mono text-[10.5px] uppercase tracking-widest text-cl2-ink/65">
+                {r[0]}
+              </div>
+              <div className="divide-y divide-cl2-ink/[0.05]">
+                {(r.slice(1) as Cell[]).map((v, j) => (
+                  <div
+                    key={j}
+                    className="flex items-start justify-between gap-3 px-4 py-2.5"
+                    style={{
+                      background: cols[j].ours ? "hsl(var(--cl2-burgundy) / 0.04)" : "transparent",
+                    }}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div
+                        className="serif text-[14px] leading-tight"
+                        style={{
+                          color: cols[j].ours ? "hsl(var(--cl2-burgundy))" : "hsl(var(--cl2-ink))",
+                          fontWeight: 500,
+                          fontStyle: cols[j].ours ? "italic" : "normal",
+                        }}
+                      >
+                        {cols[j].name}
+                      </div>
+                      <div className="text-[10px] text-cl2-ink/45 mt-0.5 uppercase tracking-wider font-mono">
+                        {cols[j].hint}
+                      </div>
+                    </div>
+                    <div className="flex-shrink-0 self-center text-right max-w-[55%]">
+                      {renderCell(v, cols[j].ours)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Reveal>
+
+      {/* Desktop: original table — md+ */}
       <Reveal delay={120}>
         <div
-          className="overflow-x-auto rounded-2xl bg-white border border-cl2-ink/[0.08] transition-shadow duration-300"
+          className="hidden md:block overflow-x-auto rounded-2xl bg-white border border-cl2-ink/[0.08] transition-shadow duration-300"
           style={{
             boxShadow: hoverOursCol
               ? "0 20px 50px hsl(var(--cl2-burgundy) / 0.12), 0 4px 16px hsl(var(--cl2-burgundy) / 0.08)"
