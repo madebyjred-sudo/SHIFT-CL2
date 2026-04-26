@@ -34,11 +34,14 @@ export function SesionesToolbar({
     <div
       className={cn(
         'sticky top-0 z-10 border-b border-[#0e1745]/[0.06] dark:border-white/[0.06]',
-        'bg-gray-50/90 dark:bg-mesh/90 backdrop-blur-md',
-        'px-4 sm:px-6 md:px-8 py-3',
+        // Tailwind v4 doesn't accept opacity modifiers on @utility classes
+        // (bg-mesh would silently fall through). Use the literal hex with
+        // alpha so dark mode actually paints the toolbar.
+        'bg-gray-50/90 dark:bg-[#231f1f]/90 backdrop-blur-md',
+        'px-4 sm:px-5 md:px-6 py-3',
       )}
     >
-      <div className="max-w-[1320px] mx-auto flex flex-wrap items-center gap-2.5">
+      <div className="w-full flex flex-wrap items-center gap-2.5">
         {/* Search */}
         <div className="relative flex-1 min-w-[220px] max-w-[480px]">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#0e1745]/40 dark:text-white/40" />
@@ -74,8 +77,8 @@ export function SesionesToolbar({
                   'inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-medium border transition-all',
                   'whitespace-nowrap',
                   active && !isCoral && 'bg-[#3D1820] text-white border-[#3D1820] hover:bg-[#2E1218]',
-                  active && isCoral && 'bg-cl2-accent/[0.08] text-cl2-accent-hover border-cl2-accent/[0.18]',
-                  !active && 'bg-white dark:bg-white/[0.05] text-[#0e1745]/70 dark:text-white/70 border-[#0e1745]/[0.10] dark:border-white/[0.10] hover:border-[#0e1745]/[0.20] dark:hover:border-white/[0.20]',
+                  active && isCoral && 'bg-cl2-accent/[0.10] text-cl2-accent-hover border-cl2-accent/[0.20] dark:bg-cl2-accent/[0.18] dark:text-cl2-accent-soft dark:border-cl2-accent/[0.40]',
+                  !active && 'bg-white dark:bg-white/[0.06] text-[#0e1745]/70 dark:text-white/75 border-[#0e1745]/[0.10] dark:border-white/[0.12] hover:border-[#0e1745]/[0.20] dark:hover:border-white/[0.25] dark:hover:bg-white/[0.10]',
                 )}
               >
                 {opt.label}

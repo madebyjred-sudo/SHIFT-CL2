@@ -36,8 +36,6 @@ import {
   applyEstadoFilter,
   applyQuery,
   applyQuickChip,
-  buildDensity30d,
-  computeKpis,
   type DuracionFilter,
   type EstadoFilter,
   type QuickChip,
@@ -121,8 +119,6 @@ export function SesionesListPage() {
   // Derived data — pure transforms over the loaded list.
   const today = useMemo(() => new Date(), []);
   const all = items ?? [];
-  const kpis = items ? computeKpis(items, today) : null;
-  const density = useMemo(() => buildDensity30d(all, today), [all, today]);
 
   const filtered = useMemo(() => {
     if (!items) return [];
@@ -171,7 +167,7 @@ export function SesionesListPage() {
             transition={{ duration: 0.25, ease: 'easeOut' }}
             className="relative z-10 overflow-hidden"
           >
-            <SesionesHero kpis={kpis} density={density} loading={!items} />
+            <SesionesHero />
           </motion.div>
         )}
       </AnimatePresence>
@@ -186,78 +182,85 @@ export function SesionesListPage() {
         onUpload={() => navigate('/sesiones/subir')}
       />
 
-      <main className="relative z-10 flex-1 px-4 sm:px-6 md:px-8 py-6">
-        <div className="max-w-[1320px] mx-auto grid gap-6 lg:gap-7 lg:grid-cols-[220px_minmax(0,1fr)] xl:grid-cols-[220px_minmax(0,1fr)_280px]">
-          {/* LEFT — filters rail (collapses to nothing on small screens) */}
-          <div className="hidden lg:block sticky top-[68px] self-start">
-            <FilterRail
-              sessions={all}
-              estado={filters.estado}
-              onEstado={(estado) => setFilters({ estado })}
-              duracion={filters.duracion}
-              onDuracion={(duracion) => setFilters({ duracion })}
-              onlyResumen={filters.onlyResumen}
-              onOnlyResumen={(onlyResumen) => setFilters({ onlyResumen })}
-            />
-          </div>
-
-          {/* CENTER — feed or calendar */}
-          <section className="min-w-0">
-            {error && (
-              <div className="rounded-xl border border-red-300/50 bg-red-50/60 dark:bg-red-500/10 dark:border-red-500/20 px-4 py-3 text-sm text-red-700 dark:text-red-300 mb-4">
-                No se pudo cargar el listado. {error}
-              </div>
-            )}
-
-            {!items && !error && (
-              <div className="grid gap-3">
-                {Array.from({ length: 4 }).map((_, i) => (
-                  <div
-                    key={i}
-                    className="h-[96px] rounded-[10px] animate-pulse"
-                    style={{
-                      background: 'linear-gradient(90deg, rgba(14,23,69,0.04), rgba(14,23,69,0.02), rgba(14,23,69,0.04))',
-                      backgroundSize: '200% 100%',
-                    }}
-                  />
-                ))}
-              </div>
-            )}
-
-            {items && filters.view === 'lista' && (
-              filtered.length === 0 ? (
-                <FeedEmpty filters={filters} onClear={() => setFilters(DEFAULTS)} />
-              ) : (
-                <SesionesFeed
-                  sessions={filtered}
-                  selectable={selected.length > 0}
-                  selected={selected}
-                  onToggleSelect={onToggleSelect}
-                  onClick={onCardClick}
-                />
-              )
-            )}
-
-            {items && filters.view === 'calendar' && (
-              <CalendarView
-                sessions={filtered}
-                onDayClick={onCalendarDayClick}
+      {/* Dashboard panel — same horizontal padding as TopDock so both edges
+          line up; rounded-t-2xl + border-b-0 + soft shadow mirrors the
+          TopDock's rounded-b-2xl + border-t-0 (the panel "rises from
+          below"). Motion offset on mount reinforces the rising feel. */}
+      <main className="relative z-10 flex-1 px-4 sm:px-5 md:px-6 pt-3 md:pt-4">
+        <motion.div
+          initial={{ y: 28, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+          className="w-full border border-b-0 border-[#0e1745]/[0.06] dark:border-white/[0.04] rounded-t-2xl shadow-[0_4px_20px_rgba(14,23,69,0.04)] dark:shadow-[0_4px_20px_rgba(0,0,0,0.18)] bg-white/50 dark:bg-white/[0.015] backdrop-blur-sm overflow-hidden"
+        >
+          <div className="grid gap-6 lg:gap-7 lg:grid-cols-[220px_minmax(0,1fr)] xl:grid-cols-[220px_minmax(0,1fr)_280px] p-5 md:p-6 lg:p-7">
+            {/* LEFT — filters rail (collapses to nothing on small screens) */}
+            <div className="hidden lg:block sticky top-[68px] self-start">
+              <FilterRail
+                sessions={all}
+                estado={filters.estado}
+                onEstado={(estado) => setFilters({ estado })}
+                duracion={filters.duracion}
+                onDuracion={(duracion) => setFilters({ duracion })}
+                onlyResumen={filters.onlyResumen}
+                onOnlyResumen={(onlyResumen) => setFilters({ onlyResumen })}
               />
-            )}
+            </div>
 
-            {/* Long-press / right-click affordance hint to enable compare. */}
-            {items && selected.length === 0 && filtered.length > 1 && filters.view === 'lista' && (
-              <p className="mt-6 text-[11px] text-[#0e1745]/40 dark:text-white/40 text-center">
-                Tip: shift+click en una card activa modo comparación entre plenarias.
-              </p>
-            )}
-          </section>
+            {/* CENTER — feed or calendar */}
+            <section className="min-w-0">
+              {error && (
+                <div className="rounded-xl border border-red-300/50 bg-red-50/60 dark:bg-red-500/10 dark:border-red-500/20 px-4 py-3 text-sm text-red-700 dark:text-red-300 mb-4">
+                  No se pudo cargar el listado. {error}
+                </div>
+              )}
 
-          {/* RIGHT — tema rail (xl only) */}
-          <aside className="hidden xl:block sticky top-[68px] self-start">
-            <TemaCard topSessions={recentForTema} onItemClick={onCardClick} />
-          </aside>
-        </div>
+              {!items && !error && (
+                <div className="grid gap-3">
+                  {Array.from({ length: 4 }).map((_, i) => (
+                    <div
+                      key={i}
+                      className="h-[96px] rounded-[10px] animate-pulse bg-[#0e1745]/[0.04] dark:bg-white/[0.04]"
+                    />
+                  ))}
+                </div>
+              )}
+
+              {items && filters.view === 'lista' && (
+                filtered.length === 0 ? (
+                  <FeedEmpty filters={filters} onClear={() => setFilters(DEFAULTS)} />
+                ) : (
+                  <SesionesFeed
+                    sessions={filtered}
+                    selectable={selected.length > 0}
+                    selected={selected}
+                    onToggleSelect={onToggleSelect}
+                    onClick={onCardClick}
+                  />
+                )
+              )}
+
+              {items && filters.view === 'calendar' && (
+                <CalendarView
+                  sessions={filtered}
+                  onDayClick={onCalendarDayClick}
+                />
+              )}
+
+              {/* Long-press / right-click affordance hint to enable compare. */}
+              {items && selected.length === 0 && filtered.length > 1 && filters.view === 'lista' && (
+                <p className="mt-6 text-[11px] text-[#0e1745]/40 dark:text-white/40 text-center">
+                  Tip: shift+click en una card activa modo comparación entre plenarias.
+                </p>
+              )}
+            </section>
+
+            {/* RIGHT — tema rail (xl only) */}
+            <aside className="hidden xl:block sticky top-[68px] self-start">
+              <TemaCard topSessions={recentForTema} onItemClick={onCardClick} />
+            </aside>
+          </div>
+        </motion.div>
       </main>
 
       <CompareDock
