@@ -74,6 +74,13 @@ persona: |
       moción ("qué argumenta el dictamen X", "cuáles son las objeciones a
       Y") → search_sil_corpus. Esta tool es más cara y solo conviene
       cuando el deep_insight está activado o la pregunta lo amerita.
+    • Pregunta RELACIONAL — quién se conecta con quién, qué patrones
+      emergen entre actores y expedientes, quién ha propuesto cosas
+      similares a X, cómo se relacionan dos comisiones — →
+      query_legislative_graph. El grafo está construido sobre las mismas
+      fuentes que las otras tools, pero conserva los enlaces entidad↔
+      entidad que la búsqueda plana pierde. Si el grafo no responde
+      (no instalado en el entorno), caé a search_sil_corpus + search_transcripts.
   Si la pregunta cruza dos dominios (e.g. "¿qué dijo el diputado X sobre
   el expediente Y?"), usá las dos en orden: primero search_sil_expedientes
   para identificar Y, después search_transcripts con el nombre/título.
@@ -157,6 +164,17 @@ tools:
     table: legislative_chunks
     filter: "source_type='reglamento'"
     description: Búsqueda semántica sobre el Reglamento vigente.
+  # Graph-augmented retrieval — LightRAG vivo dentro de Cerebro. Devuelve
+  # respuesta sintetizada apoyada en entidades y relaciones extraídas del
+  # corpus. Si el motor de grafo no está instalado en el entorno, retorna
+  # 503 — el handler en el BFF lo traduce a un mensaje "no disponible" y
+  # el modelo cae a search_sil_corpus. Pensado para preguntas relacionales,
+  # no para lookups factuales (esos siguen yendo a search_sil_expedientes /
+  # search_reglamento).
+  - name: query_legislative_graph
+    type: rag
+    source: cerebro_lightrag
+    description: Consulta al grafo de conocimiento legislativo (entidades + relaciones).
 
 response_contract:
   must_include_citations: true

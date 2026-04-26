@@ -11,6 +11,7 @@ import {
   renderExpedienteFullForLlm,
   renderReglamentoForLlm,
 } from './silClient.js';
+import { queryLightrag, type LightragMode } from './lightragClient.js';
 import { withTimeout, withRetry, ResilienceError } from './resilience.js';
 
 // Pass-1 (non-stream) is short and idempotent → retry safely.
@@ -160,6 +161,50 @@ function hasSilTools(agentTools: Array<Record<string, unknown>>): boolean {
 function hasReglamentoTool(agentTools: Array<Record<string, unknown>>): boolean {
   return agentTools.some((t) => t.name === 'search_reglamento');
 }
+
+function hasGraphTool(agentTools: Array<Record<string, unknown>>): boolean {
+  return agentTools.some((t) => t.name === 'query_legislative_graph');
+}
+
+// query_legislative_graph — wraps Cerebro's LightRAG.
+// LightRAG's three modes:
+//   local  — walks the graph from seed entities mentioned in the query
+//            (best for "qué dijo Muñoz Céspedes sobre traslado de riesgos").
+//   global — uses LLM-generated keyword themes that intersect the query
+//            (best for "qué patrones políticos emergen en proyectos de salud").
+//   hybrid — both. Default. Highest cost, broadest signal.
+//   naive  — plain dense retrieval inside LightRAG's own store. Cheaper.
+// The model picks the mode; we pass through.
+const QUERY_LEGISLATIVE_GRAPH_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'query_legislative_graph',
+    description:
+      'Consulta el grafo de conocimiento legislativo (entidades + relaciones extraídas del SIL, Reglamento y plenarias) para preguntas que requieren conectar actores, expedientes, posturas y patrones a través del corpus. Usalo para: "¿qué diputados se oponen al proyecto X?", "¿qué patrones aparecen en propuestas de Y partido?", "¿cómo se relaciona la comisión Z con el expediente W?", "¿quiénes han propuesto reformas similares a X?". Devuelve una respuesta sintetizada por el LLM apoyada en el grafo. NO la uses para preguntas factuales puntuales (un solo expediente, un artículo concreto): para eso están search_sil_expedientes y search_reglamento. Si el grafo no está disponible (Cerebro responde 503), recurrí a search_sil_corpus.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Pregunta en lenguaje natural. Mientras más relacional ("quién propuso", "qué se conecta con", "patrones entre"), mejor.',
+        },
+        mode: {
+          type: 'string',
+          enum: ['local', 'global', 'hybrid', 'naive'],
+          description:
+            'local = subgrafo desde entidades semilla (mejor para preguntas sobre actores/objetos específicos). global = patrones temáticos (mejor para preguntas de alto nivel). hybrid = ambos (default, recomendado salvo que la pregunta sea clarísimamente uno u otro). naive = retrieval plano sin grafo (último recurso).',
+          default: 'hybrid',
+        },
+        deep_insight: {
+          type: 'boolean',
+          description: 'Si true, usa el modelo Opus 4.7 para la síntesis final (más caro, más profundo). Default false (Sonnet 4.6).',
+          default: false,
+        },
+      },
+      required: ['query'],
+    },
+  },
+};
 
 const SEARCH_REGLAMENTO_TOOL = {
   type: 'function' as const,
@@ -408,6 +453,14 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // squarely Lexa's territory).
   if (hasReglamentoTool(agent.tools)) {
     tools.push(SEARCH_REGLAMENTO_TOOL);
+  }
+  // Graph-augmented retrieval. Only registered when the agent opts in via
+  // YAML — kept narrow so the model doesn't reach for it on every question.
+  // When LightRAG isn't installed in Cerebro, the tool returns a structured
+  // "not_installed" payload that prompts the model to fall back to corpus
+  // search instead of erroring out the turn.
+  if (hasGraphTool(agent.tools)) {
+    tools.push(QUERY_LEGISLATIVE_GRAPH_TOOL);
   }
 
   if (tools.length === 0) {
@@ -873,6 +926,77 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
           `3. Hablale al usuario de "el dictamen", "el proyecto", "la moción" — nunca "el chunk".\n` +
           `4. Si un argumento depende de un dato que no aparece literalmente en los extractos, decí "no aparece explícito en los documentos que tengo".`,
       });
+      continue;
+    }
+
+    if (tc.function.name === 'query_legislative_graph') {
+      let parsedArgs: { query: string; mode?: LightragMode; deep_insight?: boolean };
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments);
+      } catch {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: 'invalid json' }) });
+        continue;
+      }
+
+      const result = await queryLightrag({
+        query: parsedArgs.query,
+        mode: parsedArgs.mode ?? 'hybrid',
+        deep_insight: parsedArgs.deep_insight ?? args.deep_insight,
+      });
+
+      // Surface the graph result to the UI as a citation event so the
+      // user sees "consulté el grafo" provenance even though we don't
+      // have per-entity cards yet. id stable per query so React keys
+      // don't churn across re-renders.
+      if (result.ok) {
+        args.onChunk({
+          type: 'citation',
+          payload: [
+            {
+              id: `graph:${result.mode}:${parsedArgs.query.slice(0, 64)}`,
+              session_id: '',
+              source_ref: `Grafo (${result.mode})`,
+              content: result.answer.slice(0, 400),
+              similarity: 1.0,
+              fecha: null,
+              comision: null,
+              tipo: 'graph_query',
+              source_type: 'metadata',
+              expediente_numero: null,
+              url_detalle: null,
+              video_url: null,
+              transcript_url: null,
+              rank: 1,
+            },
+          ],
+        });
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content:
+            `Resultado del grafo (${result.mode}):\n\n${result.answer}\n\n---\n` +
+            `INSTRUCCIONES:\n` +
+            `1. El texto anterior es la síntesis del grafo. Refrasealá con tu voz, no la copies textual.\n` +
+            `2. Cuando uses datos del grafo, citá [Grafo].\n` +
+            `3. Si el usuario pide detalle de un expediente o artículo específico mencionado por el grafo, llamá a search_sil_expedientes / get_sil_expediente / search_reglamento para confirmar — el grafo puede tener errores de extracción.\n` +
+            `4. Hablale al usuario de "el corpus", "los registros", "lo documentado" — nunca "el grafo" ni "LightRAG" ni "los embeddings".`,
+        });
+      } else if (!result.installed) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content:
+            `GRAFO NO DISPONIBLE — el motor de grafo no está activo en este entorno. ` +
+            `Caé a search_sil_corpus o search_sil_expedientes para responder esta pregunta. ` +
+            `Si la consulta es estrictamente relacional ("quién está conectado con quién", "patrones entre actores"), reconocé al usuario que esa capacidad aún no está habilitada y ofrecé buscar los expedientes individualmente.`,
+        });
+      } else {
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: `Error al consultar el grafo: ${result.detail}. Caé a search_sil_corpus para esta pregunta.`,
+        });
+      }
       continue;
     }
 

@@ -26,6 +26,15 @@ persona: |
   Si la pregunta cruza con plenarios (qué dijo X sobre el expediente Y),
   encadená: search_sil_expedientes → search_transcripts.
 
+  Para preguntas RELACIONALES (patrones entre proponentes, redes de
+  diputados detrás de un tema, expedientes que conectan a una misma
+  comisión a lo largo del tiempo), tu mejor tool es query_legislative_graph.
+  El grafo cruza entidades extraídas del corpus completo y devuelve una
+  síntesis ya conectada — usalo cuando la pregunta tenga forma de "quién
+  con quién", "qué patrón aparece", "cómo se relaciona X con Y". Si el
+  grafo no está disponible (entorno sin LightRAG instalado), caé a
+  search_sil_corpus + search_sil_expedientes.
+
   VOCABULARIO HACIA EL USUARIO:
   Hablá de "expediente", "proyecto de ley", "iniciativa", "dictamen",
   "moción". NUNCA de "row", "registro DB", "chunk", "embedding".
@@ -87,6 +96,12 @@ tools:
     table: legislative_chunks
     filter: "source_type='reglamento'"
     description: Reglamento vigente — usar para preguntas procedimentales sobre tramitación de expedientes.
+  # Graph-augmented retrieval. Atlas la usa para análisis transversal —
+  # patrones entre actores y expedientes que la búsqueda plana pierde.
+  - name: query_legislative_graph
+    type: rag
+    source: cerebro_lightrag
+    description: Consulta al grafo de conocimiento legislativo (entidades + relaciones).
   # Plenaria-side tools — Atlas can cross-reference into transcripts when
   # the question links a project to what was said in plenary.
   - name: search_transcripts
