@@ -17,6 +17,11 @@
     "@shift-cl2/shared-types": "*",
     "@shift-cl2/ui-kit": "*",
     "@supabase/supabase-js": "^2.46.0",
+    "@tiptap/pm": "^3.22.4",
+    "@tiptap/react": "^3.22.4",
+    "@tiptap/starter-kit": "^3.22.4",
+    "@types/three": "^0.184.0",
+    "@xyflow/react": "^12.10.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "dompurify": "^3.3.3",
@@ -29,6 +34,7 @@
     "react-textarea-autosize": "^8.5.9",
     "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.5.0",
+    "three": "^0.184.0",
     "zustand": "^5.0.1"
   },
   "devDependencies": {

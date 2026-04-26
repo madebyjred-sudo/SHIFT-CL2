@@ -25,7 +25,11 @@
     --color-cl2-accent-soft: #FF6877;     /* coral gradient end */
     --color-cl2-burgundy: #7A3B47;        /* Lexa pill / institutional */
     --color-cl2-burgundy-soft: #7A3B4712; /* Lexa pill bg (transparent) */
+    --color-cl2-burgundy-deep: #2C0E14;   /* manifesto dark bg */
     --color-cl2-ink: #0e1745;             /* deep navy ink (headings) */
+    --color-cl2-paper: #fafaf7;           /* warm off-white (landing surface) */
+    --color-cl2-rose: #F43F5E;            /* Centinela */
+    --color-cl2-ochre: #8B6E54;           /* Atlas */
 
     --color-shift-primary: #1534dc;
     --color-shift-primaryHover: #1028b8;
