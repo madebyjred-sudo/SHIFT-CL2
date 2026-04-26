@@ -212,23 +212,36 @@ function DocRow({ doc }: { doc: ExpedienteDoc }) {
   const [error, setError] = useState<string | null>(null);
 
   // Click handler that resolves the auth-gated view_url to a signed URL
-  // (or source_url fallback) and opens it in a new tab. We pre-open the
-  // tab with `about:blank` BEFORE awaiting so popup blockers count this
-  // as a user-initiated open; once the URL resolves we point the tab at
-  // it. If the resolution fails, we close the placeholder tab and show
-  // an inline error.
+  // (or source_url fallback) and opens it in a new tab.
+  //
+  // Two subtleties:
+  //   1. We pre-open a placeholder tab BEFORE the await so popup blockers
+  //      treat it as user-initiated — async window.open after a fetch
+  //      gets blocked.
+  //   2. We CANNOT pass 'noopener' to that placeholder open: with noopener,
+  //      window.open returns null and we lose the handle, so we can't
+  //      redirect it. Acceptable because we control the resolved URL
+  //      (our own GCS signed URL or the asamblea.go.cr source) — opener
+  //      reachback isn't a real risk here. We do scrub `window.opener`
+  //      from the placeholder side just in case.
   const handleOpen = async (e: MouseEvent) => {
     e.preventDefault();
     if (opening) return;
     setOpening(true);
     setError(null);
-    const placeholder = window.open('', '_blank', 'noopener');
+    const placeholder = window.open('about:blank', '_blank');
+    if (placeholder) {
+      try { placeholder.opener = null; } catch { /* cross-origin lock-down ok */ }
+    }
     try {
       const url = await resolveDocUrl(doc.view_url);
-      if (placeholder) placeholder.location.href = url;
-      else window.open(url, '_blank', 'noopener');
+      if (placeholder && !placeholder.closed) {
+        placeholder.location.href = url;
+      } else {
+        window.open(url, '_blank', 'noopener');
+      }
     } catch (err) {
-      if (placeholder) placeholder.close();
+      if (placeholder && !placeholder.closed) placeholder.close();
       setError((err as Error).message);
     } finally {
       setOpening(false);
