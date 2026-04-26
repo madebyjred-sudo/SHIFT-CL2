@@ -262,13 +262,19 @@ export function TranscripcionesSection(): React.ReactElement {
                       <span className="flex-1 text-[13px] font-semibold text-[#0e1745] dark:text-white">
                         {it.sesion_label}
                       </span>
-                      <Pill
-                        kind={
-                          it.confidence > 90 ? 'success' : it.confidence > 80 ? 'info' : 'warn'
-                        }
-                      >
-                        {it.confidence}%
-                      </Pill>
+                      {it.status === 'approved' ? (
+                        <Pill kind="success">Aprobada</Pill>
+                      ) : it.status === 'rejected' ? (
+                        <Pill kind="danger">Rechazada</Pill>
+                      ) : (
+                        <Pill
+                          kind={
+                            it.confidence > 90 ? 'success' : it.confidence > 80 ? 'info' : 'warn'
+                          }
+                        >
+                          {it.confidence}%
+                        </Pill>
+                      )}
                     </div>
                     <div className="flex items-center gap-2 text-[11.5px] text-[#0e1745]/55 dark:text-white/55">
                       <span className="font-mono">{it.expediente ?? '—'}</span>
@@ -339,7 +345,11 @@ function DetailPane({ detail, isBusy, onApprove, onReject }: DetailPaneProps): R
                 {item.sesion_label} · {item.expediente ?? '—'}
               </span>
               <span className="font-display text-[18px] font-normal tracking-tight">
-                Revisión de transcripción{' '}
+                {item.status === 'approved'
+                  ? 'Transcripción publicada'
+                  : item.status === 'rejected'
+                    ? 'Transcripción descartada'
+                    : 'Revisión de transcripción'}{' '}
                 <span className="font-mono text-[12px] font-normal text-[#0e1745]/50 dark:text-white/50">
                   #{item.id}
                 </span>
@@ -349,9 +359,21 @@ function DetailPane({ detail, isBusy, onApprove, onReject }: DetailPaneProps): R
           meta={
             <span className="flex items-center gap-1.5">
               <Pill kind="lexa">⚖️ Lexa</Pill>
-              <Pill kind={item.confidence > 90 ? 'success' : 'warn'} icon={ShieldCheck}>
-                Confianza {item.confidence}%
-              </Pill>
+              {item.status === 'approved' && (
+                <Pill kind="success" icon={CheckCircle2}>
+                  Aprobada — visible
+                </Pill>
+              )}
+              {item.status === 'rejected' && (
+                <Pill kind="danger" icon={XCircle}>
+                  Rechazada
+                </Pill>
+              )}
+              {item.status === 'pending' && (
+                <Pill kind={item.confidence > 90 ? 'success' : 'warn'} icon={ShieldCheck}>
+                  Confianza {item.confidence}%
+                </Pill>
+              )}
             </span>
           }
         />
@@ -369,8 +391,22 @@ function DetailPane({ detail, isBusy, onApprove, onReject }: DetailPaneProps): R
                 {item.excerpt_ts} / {formatDuration(item.duration_seconds)}
               </div>
               <div className="absolute right-2.5 top-2.5 inline-flex items-center gap-1 rounded-full bg-black/55 px-2 py-0.5 text-[10px] text-white">
-                <span className="inline-block h-[7px] w-[7px] rounded-full bg-[#ef4444] shadow-[0_0_0_3px_rgba(239,68,68,0.14)]" />{' '}
-                En revisión
+                {item.status === 'approved' ? (
+                  <>
+                    <span className="inline-block h-[7px] w-[7px] rounded-full bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.20)]" />
+                    Publicada
+                  </>
+                ) : item.status === 'rejected' ? (
+                  <>
+                    <span className="inline-block h-[7px] w-[7px] rounded-full bg-rose-500 shadow-[0_0_0_3px_rgba(239,68,68,0.20)]" />
+                    Descartada
+                  </>
+                ) : (
+                  <>
+                    <span className="inline-block h-[7px] w-[7px] rounded-full bg-amber-500 shadow-[0_0_0_3px_rgba(245,158,11,0.20)]" />
+                    En revisión
+                  </>
+                )}
               </div>
             </div>
             <div className="mt-2.5 flex justify-between text-[11.5px] text-[#0e1745]/55 dark:text-white/55">
@@ -473,40 +509,79 @@ function DetailPane({ detail, isBusy, onApprove, onReject }: DetailPaneProps): R
         </CardBody>
 
         {/* Footer actions */}
-        <div className="flex items-center gap-2.5 rounded-b-xl border-t border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-[#0e1745]/[0.012] dark:bg-white/[0.02] px-[18px] py-3">
-          <ActionButton
-            variant="quiet"
-            icon={MessageSquareWarning}
-            onClick={() =>
-              notify({
-                kind: 'info',
-                text: 'Mandando ping al canal #cl2-transcripts',
-                detail: 'En el demo el canal no está conectado; en prod va por Slack.',
-              })
-            }
-          >
-            Pedir corrección a equipo
-          </ActionButton>
-          <ActionButton
-            variant="quiet"
-            icon={Pencil}
-            onClick={() =>
-              notify({
-                kind: 'info',
-                text: 'Re-transcripción en cola',
-                detail: `${detail.item.id} marcado para re-correr Whisper en la próxima ventana.`,
-              })
-            }
-          >
-            Editar y volver a transcribir
-          </ActionButton>
-          <span className="flex-1" />
-          <ActionButton variant="reject" icon={XCircle} onClick={onReject} disabled={isBusy}>
-            Rechazar — no publicar
-          </ActionButton>
-          <ActionButton variant="approve" icon={CheckCircle2} onClick={onApprove} disabled={isBusy}>
-            Aprobar — visible al usuario
-          </ActionButton>
+        <div className="flex flex-wrap items-center gap-2.5 rounded-b-xl border-t border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-[#0e1745]/[0.012] dark:bg-white/[0.02] px-[18px] py-3">
+          {item.status === 'pending' ? (
+            <>
+              <ActionButton
+                variant="quiet"
+                icon={MessageSquareWarning}
+                onClick={() =>
+                  notify({
+                    kind: 'info',
+                    text: 'Mandando ping al canal #cl2-transcripts',
+                    detail: 'En el demo el canal no está conectado; en prod va por Slack.',
+                  })
+                }
+              >
+                Pedir corrección a equipo
+              </ActionButton>
+              <ActionButton
+                variant="quiet"
+                icon={Pencil}
+                onClick={() =>
+                  notify({
+                    kind: 'info',
+                    text: 'Re-transcripción en cola',
+                    detail: `${detail.item.id} marcado para re-correr Whisper en la próxima ventana.`,
+                  })
+                }
+              >
+                Editar y volver a transcribir
+              </ActionButton>
+              <span className="flex-1" />
+              <ActionButton variant="reject" icon={XCircle} onClick={onReject} disabled={isBusy}>
+                Rechazar — no publicar
+              </ActionButton>
+              <ActionButton variant="approve" icon={CheckCircle2} onClick={onApprove} disabled={isBusy}>
+                Aprobar — visible al usuario
+              </ActionButton>
+            </>
+          ) : (
+            <>
+              <div
+                className={`flex items-center gap-2 text-[12.5px] font-semibold ${
+                  item.status === 'approved'
+                    ? 'text-emerald-700 dark:text-emerald-300'
+                    : 'text-rose-700 dark:text-rose-300'
+                }`}
+              >
+                {item.status === 'approved' ? (
+                  <>
+                    <CheckCircle2 size={14} strokeWidth={2} />
+                    Aprobada y visible al usuario.
+                  </>
+                ) : (
+                  <>
+                    <XCircle size={14} strokeWidth={2} />
+                    Descartada — no se publicó.
+                  </>
+                )}
+              </div>
+              <span className="flex-1" />
+              <ActionButton
+                variant="ghost"
+                onClick={() =>
+                  notify({
+                    kind: 'info',
+                    text: item.status === 'approved' ? 'Reabrir revisión' : 'Re-encolar',
+                    detail: 'La acción de revertir decisión llega en una iteración próxima.',
+                  })
+                }
+              >
+                {item.status === 'approved' ? 'Reabrir revisión' : 'Volver a la cola'}
+              </ActionButton>
+            </>
+          )}
         </div>
       </Card>
 
@@ -515,10 +590,21 @@ function DetailPane({ detail, isBusy, onApprove, onReject }: DetailPaneProps): R
         <CardHeader
           title={
             <span className="inline-flex items-center gap-1.5">
-              <Eye size={13} /> Vista previa al aprobar
+              <Eye size={13} />{' '}
+              {item.status === 'approved'
+                ? 'Cómo se publicó'
+                : item.status === 'rejected'
+                  ? 'Cómo se hubiera publicado'
+                  : 'Vista previa al aprobar'}
             </span>
           }
-          meta="Visible en el viewer de la sesión y como fuente citable de Lexa"
+          meta={
+            item.status === 'approved'
+              ? 'Visible en el viewer de la sesión y citable por Lexa'
+              : item.status === 'rejected'
+                ? 'Sin publicar. Lexa no la cita.'
+                : 'Visible en el viewer de la sesión y citable por Lexa al aprobar'
+          }
         />
         <CardBody className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
           <div className="rounded-[10px] border border-[rgba(122,59,71,0.16)] bg-[rgba(122,59,71,0.05)] p-3">
@@ -535,9 +621,9 @@ function DetailPane({ detail, isBusy, onApprove, onReject }: DetailPaneProps): R
               "{item.excerpt}"
             </div>
           </div>
-          <div className="rounded-[10px] border border-[#0e1745]/[0.08] p-3 text-[12px] text-[#0e1745]/70 dark:text-white/70">
+          <div className="rounded-[10px] border border-[#0e1745]/[0.08] dark:border-white/[0.10] p-3 text-[12px] text-[#0e1745]/70 dark:text-white/70">
             <div className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-[#0e1745]/50 dark:text-white/50">
-              Al aprobar
+              {item.status === 'approved' ? 'Lo que se publicó' : item.status === 'rejected' ? 'Lo que se hubiera publicado' : 'Al aprobar'}
             </div>
             <ul className="m-0 list-disc pl-4 leading-7">
               <li>

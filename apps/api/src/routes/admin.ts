@@ -124,47 +124,58 @@ adminRouter.get('/alerts', async (_req, res) => {
   }
 });
 
-// ─── Transcripciones — real DB-backed queue ──────────────────────────
+// ─── Transcripciones — DB rows + remaining mock queue ────────────────
+//
+// Until the legacy worker pushes real rows, the demo queue is the only
+// material the operator can interact with. Naïve approach was: show
+// mocks ONLY when DB is empty. That broke the moment the operator
+// approved their first item — the row landed in DB, isMock flipped
+// false, and the other six mock items vanished.
+//
+// Better: merge. Real DB rows are authoritative (their status is the
+// truth). Mock rows whose external_id is NOT yet in DB still surface
+// as `pending` so the operator can keep working through the demo
+// backlog. Approving a mock writes a new DB row → next refresh shows
+// it as approved, removes it from the mock-pending pool.
 adminRouter.get('/transcripciones', async (_req, res) => {
   try {
     const s = supa();
-    const [{ data: items }, counts] = await Promise.all([
-      s.from('transcripciones_review')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(50),
-      Promise.all([
-        s.from('transcripciones_review').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
-        s.from('transcripciones_review').select('id', { count: 'exact', head: true }).eq('status', 'in_progress'),
-        s.from('transcripciones_review').select('id', { count: 'exact', head: true }).eq('status', 'approved'),
-        s.from('transcripciones_review').select('id', { count: 'exact', head: true }).eq('status', 'rejected'),
-      ]),
-    ]);
+    const { data: dbItems } = await s
+      .from('transcripciones_review')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(200);
 
-    const [pendingC, inProgC, apprC, rejC] = counts;
-    const isMock = (items?.length ?? 0) === 0;
-    const payload = {
-      counts: {
-        pending: pendingC.count ?? 0,
-        in_progress: inProgC.count ?? 0,
-        approved: apprC.count ?? 0,
-        rejected: rejC.count ?? 0,
-      },
-      items: (items ?? []).map(shapeTransRow),
-    };
-    if (isMock) {
-      // Until the legacy worker pushes real rows, surface the demo queue
-      // so the operator can click around — but flag it.
-      const mockItems = MOCK_QUEUE.map((m) => shapeTransRow(m as unknown as Record<string, unknown>));
-      res.json(
-        mocked({
-          counts: { pending: mockItems.length, in_progress: 2, approved: 148, rejected: 6 },
-          items: mockItems,
-        }),
-      );
-      return;
+    const dbByExternal = new Map<string, Record<string, unknown>>();
+    for (const r of dbItems ?? []) {
+      const ext = (r as { external_id?: string }).external_id;
+      if (ext) dbByExternal.set(ext, r as Record<string, unknown>);
     }
-    res.json(live(payload));
+
+    // Merged list: real DB rows first (newest first), then any mock
+    // whose external_id isn't already represented.
+    const merged: Array<Record<string, unknown>> = [];
+    for (const r of dbItems ?? []) merged.push(r as Record<string, unknown>);
+    for (const m of MOCK_QUEUE) {
+      if (!dbByExternal.has(m.external_id)) {
+        merged.push(m as unknown as Record<string, unknown>);
+      }
+    }
+
+    const shaped = merged.map(shapeTransRow);
+    const counts = {
+      pending: shaped.filter((s) => s.status === 'pending').length,
+      in_progress: shaped.filter((s) => s.status === 'in_progress').length,
+      approved: shaped.filter((s) => s.status === 'approved').length,
+      rejected: shaped.filter((s) => s.status === 'rejected').length,
+    };
+
+    // mock=true while ANY mock is still in the merged set — the operator
+    // can read the badge and know not all rows are real upstream events
+    // yet. Flips false once every mock has been reviewed.
+    const stillHasMocks = MOCK_QUEUE.some((m) => !dbByExternal.has(m.external_id));
+    const envelope = stillHasMocks ? mocked : live;
+    res.json(envelope({ counts, items: shaped }));
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
