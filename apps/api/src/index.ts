@@ -22,6 +22,7 @@ import { sessionsRouter } from './routes/sessions.js';
 import { uploadsRouter } from './routes/uploads.js';
 import { expedientesRouter } from './routes/expedientes.js';
 import { puntoMedioRouter } from './routes/puntoMedio.js';
+import { adminRouter } from './routes/admin.js';
 import { requestContext } from './middleware/requestContext.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { logger } from './services/logger.js';
@@ -80,6 +81,13 @@ app.use(
   '/api/punto-medio',
   rateLimit({ bucket: 'punto_medio', max: 60, windowMs: 60_000 }),
   puntoMedioRouter,
+);
+app.use(
+  // Admin console (read-only summaries + mocked queues for the demo).
+  // Tight cap because every section paint hits one of these.
+  '/api/admin',
+  rateLimit({ bucket: 'admin', max: 120, windowMs: 60_000 }),
+  adminRouter,
 );
 
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
