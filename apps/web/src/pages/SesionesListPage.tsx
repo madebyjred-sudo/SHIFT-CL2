@@ -48,6 +48,9 @@ interface FilterState {
   duracion: DuracionFilter;
   onlyResumen: boolean;
   view: ViewMode;
+  /** ISO date YYYY-MM-DD when the user clicked a day in the calendar.
+   *  Narrows the feed to that exact day. Null means "no day filter". */
+  day: string | null;
 }
 
 const DEFAULTS: FilterState = {
@@ -57,12 +60,14 @@ const DEFAULTS: FilterState = {
   duracion: 'todas',
   onlyResumen: false,
   view: 'lista',
+  day: null,
 };
 
 function readFiltersFromUrl(): FilterState {
   if (typeof window === 'undefined') return DEFAULTS;
   const sp = new URLSearchParams(window.location.search);
   const view = sp.get('view');
+  const dayRaw = sp.get('day');
   return {
     q: sp.get('q') ?? '',
     quickChip: (sp.get('chip') as QuickChip) ?? 'todas',
@@ -70,6 +75,7 @@ function readFiltersFromUrl(): FilterState {
     duracion: (sp.get('dur') as DuracionFilter) ?? 'todas',
     onlyResumen: sp.get('resumen') === '1',
     view: view === 'calendar' ? 'calendar' : 'lista',
+    day: dayRaw && /^\d{4}-\d{2}-\d{2}$/.test(dayRaw) ? dayRaw : null,
   };
 }
 
@@ -82,6 +88,7 @@ function writeFiltersToUrl(f: FilterState) {
   if (f.duracion !== 'todas') sp.set('dur', f.duracion);
   if (f.onlyResumen) sp.set('resumen', '1');
   if (f.view !== 'lista') sp.set('view', f.view);
+  if (f.day) sp.set('day', f.day);
   const qs = sp.toString();
   const next = `/sesiones${qs ? `?${qs}` : ''}`;
   if (next !== window.location.pathname + window.location.search) {
@@ -128,6 +135,12 @@ export function SesionesListPage() {
     xs = applyEstadoFilter(xs, filters.estado);
     xs = applyDuracionFilter(xs, filters.duracion);
     if (filters.onlyResumen) xs = xs.filter((s) => s.has_resumen);
+    if (filters.day) {
+      // Narrow to the picked day. Sessions store fecha as ISO with
+      // timezone — we compare the date portion (first 10 chars) so
+      // "2026-03-25T20:48:40Z" matches "2026-03-25" regardless of TZ.
+      xs = xs.filter((s) => s.fecha.slice(0, 10) === filters.day);
+    }
     return xs;
   }, [items, filters, today]);
 
@@ -144,12 +157,33 @@ export function SesionesListPage() {
     setSelected((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
   };
   const onCalendarDayClick = (date: Date) => {
-    // Filter to that exact day by switching back to list and narrowing query
-    // window. The current BFF doesn't yet support `from`/`to` filters, so we
-    // approximate by switching to list view + leaving filters untouched —
-    // user can pick the card visually in the feed.
-    setFilters({ view: 'lista' });
-    // Future: setFilters({ view: 'lista', from: iso, to: iso }) once BFF is updated.
+    // Use local date components (not toISOString) — the calendar
+    // renders days in local TZ, but toISOString shifts to UTC and can
+    // bump the date by ±1 across timezones. Building the YYYY-MM-DD
+    // from local fields keeps the click→filter mapping intuitive.
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    const iso = `${y}-${m}-${d}`;
+    const matches = all.filter((s) => s.fecha.slice(0, 10) === iso);
+
+    // Empty day → no-op. The calendar already shows day density via
+    // dots, so an empty click means the user explored a day they can
+    // see has nothing. Better to ignore than to navigate to an empty
+    // list view with the user wondering what just happened.
+    if (matches.length === 0) return;
+
+    // Single session → take them straight there. Saves a click.
+    if (matches.length === 1) {
+      navigate(`/sesiones/${matches[0]!.id}`);
+      return;
+    }
+
+    // Multiple sessions → narrow the feed to that day and switch to
+    // list view so the user picks visually. The active day chip
+    // (rendered above the feed) makes the filter discoverable + a
+    // one-click clear path back to the full month.
+    setFilters({ view: 'lista', day: iso });
   };
 
   return (
@@ -237,17 +271,37 @@ export function SesionesListPage() {
               )}
 
               {items && filters.view === 'lista' && (
-                filtered.length === 0 ? (
-                  <FeedEmpty filters={filters} onClear={() => setFilters(DEFAULTS)} />
-                ) : (
-                  <SesionesFeed
-                    sessions={filtered}
-                    selectable={selected.length > 0}
-                    selected={selected}
-                    onToggleSelect={onToggleSelect}
-                    onClick={onCardClick}
-                  />
-                )
+                <>
+                  {filters.day && (
+                    <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-cl2-accent/30 dark:border-cl2-accent/40 bg-cl2-accent/[0.06] dark:bg-cl2-accent/[0.10] pl-3 pr-1.5 py-1 text-[12px] text-cl2-accent-hover dark:text-cl2-accent-soft">
+                      <span className="font-semibold">
+                        Sesiones del {fmtFriendlyDay(filters.day)}
+                      </span>
+                      <span className="text-[#0e1745]/55 dark:text-white/55 tabular-nums">
+                        ({filtered.length})
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setFilters({ day: null })}
+                        aria-label="Quitar filtro de fecha"
+                        className="ml-1 inline-flex items-center justify-center h-5 w-5 rounded-full hover:bg-cl2-accent/[0.18] dark:hover:bg-cl2-accent/[0.25] transition-colors"
+                      >
+                        <span className="text-[14px] leading-none">×</span>
+                      </button>
+                    </div>
+                  )}
+                  {filtered.length === 0 ? (
+                    <FeedEmpty filters={filters} onClear={() => setFilters(DEFAULTS)} />
+                  ) : (
+                    <SesionesFeed
+                      sessions={filtered}
+                      selectable={selected.length > 0}
+                      selected={selected}
+                      onToggleSelect={onToggleSelect}
+                      onClick={onCardClick}
+                    />
+                  )}
+                </>
               )}
 
               {items && filters.view === 'calendar' && (
@@ -289,13 +343,22 @@ export function SesionesListPage() {
   );
 }
 
+function fmtFriendlyDay(iso: string): string {
+  // iso is YYYY-MM-DD. Build a Date in local TZ at noon to avoid
+  // off-by-one rendering when the device is in a TZ behind UTC.
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(Number(y), Number(m) - 1, Number(d), 12, 0, 0);
+  return dt.toLocaleDateString('es-CR', { day: 'numeric', month: 'long', year: 'numeric' });
+}
+
 function FeedEmpty({ filters, onClear }: { filters: FilterState; onClear: () => void }) {
   const hasAny =
     filters.q.length > 0 ||
     filters.quickChip !== 'todas' ||
     filters.estado !== 'todas' ||
     filters.duracion !== 'todas' ||
-    filters.onlyResumen;
+    filters.onlyResumen ||
+    filters.day !== null;
   return (
     <div className="text-center py-16 text-[#0e1745]/55 dark:text-white/55">
       <p className="text-sm">
