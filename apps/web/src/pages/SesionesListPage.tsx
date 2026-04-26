@@ -1,34 +1,114 @@
 /**
- * Sessions index — premium list of plenarias from the legacy CL2 archive.
+ * /sesiones v2 — diseño editorial + descubrimiento.
  *
- * Defaults to the last 90 days (BFF default). Each card → /sesiones/:id.
- * Mobile-friendly: cards stack on narrow viewports.
+ * Reemplaza la lista vertical plana del v1 por un sistema en tres capas:
+ *
+ *   1. Hero editorial con título Newsreader, KPIs y densidad heatmap
+ *      de los últimos 30 días.
+ *   2. Toolbar sticky con search + quick chips temporales + toggle de
+ *      vista (lista/calendario).
+ *   3. Layout de 3 columnas en desktop:
+ *      - rail izquierdo de filtros (estado / duración / con resumen)
+ *      - feed central agrupado por bucket temporal (Esta semana, Marzo…)
+ *      - rail derecho con "Tema del momento" (fallback "Más recientes"
+ *        hasta que el endpoint /api/sessions/topics exista).
+ *
+ * Estado de la query vive en URL search params para que los links sean
+ * compartibles. Compare-mode prepara la selección; el modal de diff se
+ * difiere a post-demo (ver CompareDock).
+ *
+ * Diseño base: shift-cl2-design-system/ui_kits/web/sesiones-v2/.
  */
-import { useEffect, useState } from 'react';
-import { Calendar, Clock, FileText, Plus, Radio, Search } from 'lucide-react';
+import { useEffect, useMemo, useState, useCallback } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
 import { fetchSessions, type SessionListItem } from '@/services/sessionsApi';
-import { navigate } from '@/lib/router';
+import { navigate, useRoute } from '@/lib/router';
 import { TopDock } from '@/components/top-dock';
-import { cn } from '@/lib/utils';
+import { SesionesHero } from '@/components/sesiones/SesionesHero';
+import { SesionesToolbar, type ViewMode } from '@/components/sesiones/SesionesToolbar';
+import { FilterRail } from '@/components/sesiones/FilterRail';
+import { SesionesFeed } from '@/components/sesiones/SesionesFeed';
+import { CalendarView } from '@/components/sesiones/CalendarView';
+import { TemaCard } from '@/components/sesiones/TemaCard';
+import { CompareDock } from '@/components/sesiones/CompareDock';
+import {
+  applyDuracionFilter,
+  applyEstadoFilter,
+  applyQuery,
+  applyQuickChip,
+  buildDensity30d,
+  computeKpis,
+  type DuracionFilter,
+  type EstadoFilter,
+  type QuickChip,
+} from '@/lib/sesiones-grouping';
 
-function fmtDate(iso: string): string {
-  try {
-    return new Date(iso).toLocaleDateString('es-CR', {
-      day: 'numeric', month: 'long', year: 'numeric',
-    });
-  } catch { return iso.slice(0, 10); }
+interface FilterState {
+  q: string;
+  quickChip: QuickChip;
+  estado: EstadoFilter;
+  duracion: DuracionFilter;
+  onlyResumen: boolean;
+  view: ViewMode;
 }
 
-function fmtDuration(seconds: number): string {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+const DEFAULTS: FilterState = {
+  q: '',
+  quickChip: 'todas',
+  estado: 'todas',
+  duracion: 'todas',
+  onlyResumen: false,
+  view: 'lista',
+};
+
+function readFiltersFromUrl(): FilterState {
+  if (typeof window === 'undefined') return DEFAULTS;
+  const sp = new URLSearchParams(window.location.search);
+  const view = sp.get('view');
+  return {
+    q: sp.get('q') ?? '',
+    quickChip: (sp.get('chip') as QuickChip) ?? 'todas',
+    estado: (sp.get('estado') as EstadoFilter) ?? 'todas',
+    duracion: (sp.get('dur') as DuracionFilter) ?? 'todas',
+    onlyResumen: sp.get('resumen') === '1',
+    view: view === 'calendar' ? 'calendar' : 'lista',
+  };
+}
+
+function writeFiltersToUrl(f: FilterState) {
+  if (typeof window === 'undefined') return;
+  const sp = new URLSearchParams();
+  if (f.q) sp.set('q', f.q);
+  if (f.quickChip !== 'todas') sp.set('chip', f.quickChip);
+  if (f.estado !== 'todas') sp.set('estado', f.estado);
+  if (f.duracion !== 'todas') sp.set('dur', f.duracion);
+  if (f.onlyResumen) sp.set('resumen', '1');
+  if (f.view !== 'lista') sp.set('view', f.view);
+  const qs = sp.toString();
+  const next = `/sesiones${qs ? `?${qs}` : ''}`;
+  if (next !== window.location.pathname + window.location.search) {
+    window.history.replaceState({}, '', next);
+  }
 }
 
 export function SesionesListPage() {
+  // Re-read filters when the route changes (back/forward).
+  const route = useRoute();
+  const [filters, setFiltersState] = useState<FilterState>(readFiltersFromUrl);
+  useEffect(() => {
+    setFiltersState(readFiltersFromUrl());
+  }, [route]);
+  const setFilters = useCallback((patch: Partial<FilterState>) => {
+    setFiltersState((prev) => {
+      const next = { ...prev, ...patch };
+      writeFiltersToUrl(next);
+      return next;
+    });
+  }, []);
+
   const [items, setItems] = useState<SessionListItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [q, setQ] = useState('');
+  const [selected, setSelected] = useState<number[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -38,132 +118,186 @@ export function SesionesListPage() {
     return () => { cancelled = true; };
   }, []);
 
-  const filtered = items?.filter((s) =>
-    !q.trim() || s.titulo.toLowerCase().includes(q.toLowerCase()),
-  ) ?? null;
+  // Derived data — pure transforms over the loaded list.
+  const today = useMemo(() => new Date(), []);
+  const all = items ?? [];
+  const kpis = items ? computeKpis(items, today) : null;
+  const density = useMemo(() => buildDensity30d(all, today), [all, today]);
+
+  const filtered = useMemo(() => {
+    if (!items) return [];
+    let xs = items;
+    xs = applyQuery(xs, filters.q);
+    xs = applyQuickChip(xs, filters.quickChip, today);
+    xs = applyEstadoFilter(xs, filters.estado);
+    xs = applyDuracionFilter(xs, filters.duracion);
+    if (filters.onlyResumen) xs = xs.filter((s) => s.has_resumen);
+    return xs;
+  }, [items, filters, today]);
+
+  const recentForTema = useMemo(() => {
+    return [...all]
+      .sort((a, b) => Date.parse(b.fecha) - Date.parse(a.fecha))
+      .slice(0, 5);
+  }, [all]);
+
+  const heroCollapsed = filters.q.length > 0;
+
+  const onCardClick = (id: number) => navigate(`/sesiones/${id}`);
+  const onToggleSelect = (id: number) => {
+    setSelected((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
+  };
+  const onCalendarDayClick = (date: Date) => {
+    // Filter to that exact day by switching back to list and narrowing query
+    // window. The current BFF doesn't yet support `from`/`to` filters, so we
+    // approximate by switching to list view + leaving filters untouched —
+    // user can pick the card visually in the feed.
+    setFilters({ view: 'lista' });
+    // Future: setFilters({ view: 'lista', from: iso, to: iso }) once BFF is updated.
+  };
 
   return (
-    <div className="h-screen flex flex-col bg-gray-50 dark:bg-mesh text-gray-900 dark:text-white font-sans relative overflow-hidden transition-colors duration-500">
+    <div className="min-h-screen flex flex-col bg-gray-50 dark:bg-mesh text-gray-900 dark:text-white font-sans relative transition-colors duration-500">
       <div className="pointer-events-none absolute inset-0 bg-pixel-dots opacity-60 z-0" />
       <TopDock />
 
-      <main className="relative z-20 flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 md:px-10 pt-6 pb-16">
-        <div className="max-w-5xl mx-auto">
-          {/* Header */}
-          <header className="flex items-center gap-3 mb-6">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cl2-accent/15 to-cl2-accent-hover/10 flex items-center justify-center">
-              <Radio size={20} strokeWidth={1.75} className="text-cl2-accent" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <h1 className="text-2xl font-semibold tracking-tight text-[#0e1745] dark:text-white">
-                Plenarias
-              </h1>
-              <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
-                Sesiones legislativas con transcripción y análisis automático.
-              </p>
-            </div>
-            <button
-              onClick={() => navigate('/sesiones/subir')}
-              aria-label="Subir nueva sesión"
-              className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-cl2-accent text-white text-sm font-medium hover:bg-cl2-accent-hover shadow-[0_4px_15px_rgba(249,53,73,0.25)] transition-all focus:outline-none focus:ring-2 focus:ring-cl2-accent/40 focus:ring-offset-2 focus:ring-offset-gray-50 dark:focus:ring-offset-transparent"
-            >
-              <Plus size={14} strokeWidth={2.5} />
-              <span className="hidden sm:inline">Subir sesión</span>
-            </button>
-          </header>
+      <AnimatePresence initial={false}>
+        {!heroCollapsed && (
+          <motion.div
+            key="hero"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.25, ease: 'easeOut' }}
+            className="relative z-10 overflow-hidden"
+          >
+            <SesionesHero kpis={kpis} density={density} loading={!items} />
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-          {/* Search */}
-          <div className="relative mb-6">
-            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-            <input
-              type="text"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="Buscar por título de sesión..."
-              className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-white dark:bg-white/5 border border-[#0e1745]/[0.08] dark:border-white/10 text-sm focus:outline-none focus:ring-2 focus:ring-cl2-accent/30 transition"
+      <SesionesToolbar
+        q={filters.q}
+        onQ={(q) => setFilters({ q })}
+        quickChip={filters.quickChip}
+        onQuickChip={(quickChip) => setFilters({ quickChip })}
+        view={filters.view}
+        onView={(view) => setFilters({ view })}
+        onUpload={() => navigate('/sesiones/subir')}
+      />
+
+      <main className="relative z-10 flex-1 px-4 sm:px-6 md:px-8 py-6">
+        <div className="max-w-[1320px] mx-auto grid gap-6 lg:gap-7 lg:grid-cols-[220px_minmax(0,1fr)] xl:grid-cols-[220px_minmax(0,1fr)_280px]">
+          {/* LEFT — filters rail (collapses to nothing on small screens) */}
+          <div className="hidden lg:block sticky top-[68px] self-start">
+            <FilterRail
+              sessions={all}
+              estado={filters.estado}
+              onEstado={(estado) => setFilters({ estado })}
+              duracion={filters.duracion}
+              onDuracion={(duracion) => setFilters({ duracion })}
+              onlyResumen={filters.onlyResumen}
+              onOnlyResumen={(onlyResumen) => setFilters({ onlyResumen })}
             />
           </div>
 
-          {/* States */}
-          {error && (
-            <div className="rounded-xl border border-red-300/50 bg-red-50/60 dark:bg-red-500/10 dark:border-red-500/20 px-4 py-3 text-sm text-red-700 dark:text-red-300">
-              No se pudo cargar el listado. {error}
-            </div>
-          )}
+          {/* CENTER — feed or calendar */}
+          <section className="min-w-0">
+            {error && (
+              <div className="rounded-xl border border-red-300/50 bg-red-50/60 dark:bg-red-500/10 dark:border-red-500/20 px-4 py-3 text-sm text-red-700 dark:text-red-300 mb-4">
+                No se pudo cargar el listado. {error}
+              </div>
+            )}
 
-          {!items && !error && (
-            <div className="grid gap-3">
-              {Array.from({ length: 4 }).map((_, i) => (
-                <div key={i} className="h-[88px] rounded-xl bg-white/40 dark:bg-white/[0.03] animate-pulse" />
-              ))}
-            </div>
-          )}
+            {!items && !error && (
+              <div className="grid gap-3">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <div
+                    key={i}
+                    className="h-[96px] rounded-[10px] animate-pulse"
+                    style={{
+                      background: 'linear-gradient(90deg, rgba(14,23,69,0.04), rgba(14,23,69,0.02), rgba(14,23,69,0.04))',
+                      backgroundSize: '200% 100%',
+                    }}
+                  />
+                ))}
+              </div>
+            )}
 
-          {filtered && filtered.length === 0 && (
-            <div className="text-center py-16 text-gray-500 dark:text-gray-400">
-              <FileText size={32} className="mx-auto mb-3 opacity-40" />
-              <p className="text-sm">No se encontraron sesiones para los filtros actuales.</p>
-            </div>
-          )}
+            {items && filters.view === 'lista' && (
+              filtered.length === 0 ? (
+                <FeedEmpty filters={filters} onClear={() => setFilters(DEFAULTS)} />
+              ) : (
+                <SesionesFeed
+                  sessions={filtered}
+                  selectable={selected.length > 0}
+                  selected={selected}
+                  onToggleSelect={onToggleSelect}
+                  onClick={onCardClick}
+                />
+              )
+            )}
 
-          {/* Cards */}
-          {filtered && filtered.length > 0 && (
-            <ul className="grid gap-3">
-              {filtered.map((s) => (
-                <li key={s.id}>
-                  <button
-                    type="button"
-                    onClick={() => navigate(`/sesiones/${s.id}`)}
-                    className={cn(
-                      'group w-full text-left rounded-xl border border-[#0e1745]/[0.06] dark:border-white/[0.06]',
-                      'bg-white dark:bg-white/[0.03] hover:bg-white dark:hover:bg-white/[0.06]',
-                      'shadow-[0_2px_10px_rgba(14,23,69,0.04)] dark:shadow-none',
-                      'p-4 sm:p-5 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_6px_20px_rgba(14,23,69,0.08)]',
-                    )}
-                  >
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="min-w-0 flex-1">
-                        <h3 className="text-sm sm:text-base font-medium text-[#0e1745] dark:text-white line-clamp-2 group-hover:text-cl2-accent transition-colors">
-                          {s.titulo}
-                        </h3>
-                        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-gray-500 dark:text-gray-400">
-                          <span className="inline-flex items-center gap-1.5">
-                            <Calendar size={12} strokeWidth={2} />
-                            {fmtDate(s.fecha)}
-                          </span>
-                          <span className="inline-flex items-center gap-1.5">
-                            <Clock size={12} strokeWidth={2} />
-                            {fmtDuration(s.duration_s)}
-                          </span>
-                          {s.has_resumen && (
-                            <span className="inline-flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
-                              <FileText size={12} strokeWidth={2} />
-                              Resumen
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="shrink-0">
-                        <span
-                          className={cn(
-                            'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium',
-                            s.estado === 1
-                              ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400'
-                              : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-400',
-                          )}
-                        >
-                          <span className={cn('w-1.5 h-1.5 rounded-full', s.estado === 1 ? 'bg-emerald-500' : 'bg-amber-500')} />
-                          {s.estado === 1 ? 'Finalizada' : 'En proceso'}
-                        </span>
-                      </div>
-                    </div>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
+            {items && filters.view === 'calendar' && (
+              <CalendarView
+                sessions={filtered}
+                onDayClick={onCalendarDayClick}
+              />
+            )}
+
+            {/* Long-press / right-click affordance hint to enable compare. */}
+            {items && selected.length === 0 && filtered.length > 1 && filters.view === 'lista' && (
+              <p className="mt-6 text-[11px] text-[#0e1745]/40 dark:text-white/40 text-center">
+                Tip: shift+click en una card activa modo comparación entre plenarias.
+              </p>
+            )}
+          </section>
+
+          {/* RIGHT — tema rail (xl only) */}
+          <aside className="hidden xl:block sticky top-[68px] self-start">
+            <TemaCard topSessions={recentForTema} onItemClick={onCardClick} />
+          </aside>
         </div>
       </main>
+
+      <CompareDock
+        ids={selected}
+        onClear={() => setSelected([])}
+        onCompare={(ids) => {
+          // post-demo: open a real diff modal. For now: surface a toast-like
+          // hint and navigate to the first selected — at least gives the
+          // user immediate value.
+          console.warn('[compare] modal pendiente — ids seleccionados:', ids);
+          alert('La vista de comparación llega en el próximo sprint. Por ahora podés abrir cada plenaria desde su card.');
+        }}
+      />
+    </div>
+  );
+}
+
+function FeedEmpty({ filters, onClear }: { filters: FilterState; onClear: () => void }) {
+  const hasAny =
+    filters.q.length > 0 ||
+    filters.quickChip !== 'todas' ||
+    filters.estado !== 'todas' ||
+    filters.duracion !== 'todas' ||
+    filters.onlyResumen;
+  return (
+    <div className="text-center py-16 text-[#0e1745]/55 dark:text-white/55">
+      <p className="text-sm">
+        {hasAny
+          ? 'No hay sesiones que cumplan los filtros actuales.'
+          : 'Aún no hay sesiones cargadas.'}
+      </p>
+      {hasAny && (
+        <button
+          type="button"
+          onClick={onClear}
+          className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium text-cl2-accent border border-cl2-accent/30 hover:bg-cl2-accent/[0.06] transition-colors"
+        >
+          Limpiar filtros
+        </button>
+      )}
     </div>
   );
 }
