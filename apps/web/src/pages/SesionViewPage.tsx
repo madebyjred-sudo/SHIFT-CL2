@@ -66,6 +66,10 @@ export function SesionViewPage({ sesionId }: Props) {
   const [tab, setTab] = useState<'transcript' | 'chat'>('transcript');
   const [seekToken, setSeekToken] = useState<{ t: number; n: number } | null>(null);
   const [search, setSearch] = useState('');
+  // currentTime is the live playhead in seconds. Updated ~4 Hz while the
+  // video is playing; idle when paused. Used by the transcript pane to
+  // highlight the active segment and auto-scroll to it.
+  const [currentTime, setCurrentTime] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -156,7 +160,11 @@ export function SesionViewPage({ sesionId }: Props) {
         <div className="h-full grid grid-cols-1 lg:grid-cols-[55fr_45fr] gap-4 lg:gap-6 min-h-0">
           {/* LEFT — Video + Resumen */}
           <section className="min-h-0 overflow-y-auto pr-1">
-            <VideoPlayer youtubeId={detail?.youtube_id ?? null} seekToken={seekToken} />
+            <VideoPlayer
+              youtubeId={detail?.youtube_id ?? null}
+              seekToken={seekToken}
+              onTimeUpdate={setCurrentTime}
+            />
             <div className="mt-5">
               <ResumenPanel resumen={detail?.resumen} />
             </div>
@@ -177,6 +185,7 @@ export function SesionViewPage({ sesionId }: Props) {
                   search={search}
                   setSearch={setSearch}
                   onSeek={handleSeek}
+                  currentTime={currentTime}
                 />
               ) : (
                 <div className="h-full min-h-0">
@@ -230,6 +239,11 @@ interface YTPlayer {
   playVideo: () => void;
   cueVideoById: (videoId: string) => void;
   destroy: () => void;
+  /** Returns playback position in seconds. */
+  getCurrentTime: () => number;
+  /** YT.PlayerState: -1 unstarted, 0 ended, 1 playing, 2 paused, 3 buffering, 5 cued. */
+  getPlayerState: () => number;
+  addEventListener: (event: string, listener: (...args: unknown[]) => void) => void;
 }
 
 let ytApiPromise: Promise<void> | null = null;
@@ -261,11 +275,27 @@ function loadYouTubeIframeApi(): Promise<void> {
   return ytApiPromise;
 }
 
-function VideoPlayer({ youtubeId, seekToken }: { youtubeId: string | null; seekToken: { t: number; n: number } | null }) {
+function VideoPlayer({
+  youtubeId,
+  seekToken,
+  onTimeUpdate,
+}: {
+  youtubeId: string | null;
+  seekToken: { t: number; n: number } | null;
+  /** Fired ~4× per second while the video is PLAYING with the current
+   *  position in seconds (float). Pauses tick when the player isn't
+   *  PLAYING so the parent doesn't churn re-renders for nothing. */
+  onTimeUpdate?: (seconds: number) => void;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<YTPlayer | null>(null);
   const [apiReady, setApiReady] = useState(false);
   const [apiFailed, setApiFailed] = useState(false);
+  // Cached as a ref so the effect that owns the polling interval reads
+  // the freshest callback without restarting (otherwise every parent
+  // re-render that passes a new arrow function tears down the loop).
+  const onTimeUpdateRef = useRef(onTimeUpdate);
+  useEffect(() => { onTimeUpdateRef.current = onTimeUpdate; }, [onTimeUpdate]);
 
   // Load the API lazily on first mount. If it fails we fall back to the
   // older iframe-reload behavior so the demo never ends up with a black box.
@@ -288,6 +318,26 @@ function VideoPlayer({ youtubeId, seekToken }: { youtubeId: string | null; seekT
       return;
     }
     const w = window as any;
+    let pollHandle: number | null = null;
+    const startPolling = () => {
+      if (pollHandle != null) return;
+      pollHandle = window.setInterval(() => {
+        const p = playerRef.current;
+        if (!p) return;
+        try {
+          const t = p.getCurrentTime();
+          if (typeof t === 'number' && Number.isFinite(t)) {
+            onTimeUpdateRef.current?.(t);
+          }
+        } catch { /* noop — player not ready */ }
+      }, 250);
+    };
+    const stopPolling = () => {
+      if (pollHandle != null) {
+        clearInterval(pollHandle);
+        pollHandle = null;
+      }
+    };
     const player: YTPlayer = new w.YT.Player(containerRef.current, {
       videoId: youtubeId,
       // host: yt-nocookie keeps tracking minimal; `origin` improves API
@@ -299,9 +349,18 @@ function VideoPlayer({ youtubeId, seekToken }: { youtubeId: string | null; seekT
         playsinline: 1,
         origin: window.location.origin,
       },
+      events: {
+        onStateChange: (e: { data: number }) => {
+          // YT.PlayerState: 1 = playing. Ticks while playing, idle
+          // otherwise — keeps re-render cost near zero on pause.
+          if (e.data === 1) startPolling();
+          else stopPolling();
+        },
+      },
     });
     playerRef.current = player;
     return () => {
+      stopPolling();
       try { player.destroy(); } catch { /* noop */ }
       playerRef.current = null;
     };
@@ -398,15 +457,76 @@ function ResumenPanel({ resumen }: { resumen?: SessionDetail['resumen'] }) {
 // --- Transcript ---------------------------------------------------------
 
 function TranscriptPanel({
-  transcript, segments, search, setSearch, onSeek,
+  transcript, segments, search, setSearch, onSeek, currentTime,
 }: {
   transcript: TranscriptPayload | null;
   segments: TranscriptSegment[];
   search: string;
   setSearch: (v: string) => void;
   onSeek: (t: number) => void;
+  /** Live playhead (seconds, float). 0 when paused/cued. */
+  currentTime: number;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
+  const activeRef = useRef<HTMLLIElement>(null);
+  // When the user scrolls manually we suppress auto-scroll for a few
+  // seconds — otherwise the panel fights them. Refresh the timestamp
+  // on every wheel/touchmove; auto-scroll only runs when this is older
+  // than USER_SCROLL_PAUSE_MS.
+  const userScrolledAtRef = useRef(0);
+  const USER_SCROLL_PAUSE_MS = 4000;
+
+  // Active segment by binary-searching the playhead against segment.start.
+  // `segments` may be filtered by the search box, but we want highlighting
+  // to track the FULL transcript so the user always sees what's playing
+  // — even if they're searching something else. So we search against the
+  // unfiltered list when present.
+  const fullList = transcript?.segments ?? segments;
+  const activeIndex = useMemo(() => {
+    if (!fullList.length) return -1;
+    if (currentTime <= 0) return -1;
+    let lo = 0;
+    let hi = fullList.length - 1;
+    let result = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (fullList[mid]!.start <= currentTime) {
+        result = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return result;
+  }, [fullList, currentTime]);
+
+  const activeSegmentIndex = activeIndex >= 0 ? fullList[activeIndex]?.index : null;
+
+  // Auto-scroll the active row into view, with a user-override window so
+  // the panel never yanks the operator while they're reading.
+  useEffect(() => {
+    if (activeSegmentIndex == null) return;
+    const sinceUser = Date.now() - userScrolledAtRef.current;
+    if (sinceUser < USER_SCROLL_PAUSE_MS) return;
+    const el = activeRef.current;
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [activeSegmentIndex]);
+
+  // Track manual scroll so we know to back off auto-scroll. Wheel/touch
+  // covers the actual user gestures; the smooth scrolling we trigger
+  // ourselves doesn't fire wheel events.
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    const onUser = () => { userScrolledAtRef.current = Date.now(); };
+    el.addEventListener('wheel', onUser, { passive: true });
+    el.addEventListener('touchmove', onUser, { passive: true });
+    return () => {
+      el.removeEventListener('wheel', onUser);
+      el.removeEventListener('touchmove', onUser);
+    };
+  }, []);
 
   if (!transcript) {
     return (
@@ -436,24 +556,46 @@ function TranscriptPanel({
           <p className="text-center text-xs text-gray-400 py-8">Sin coincidencias.</p>
         ) : (
           <ul className="divide-y divide-[#0e1745]/[0.04] dark:divide-white/[0.04]">
-            {segments.map((seg) => (
-              <li key={seg.index}>
-                <button
-                  type="button"
-                  onClick={() => onSeek(seg.start)}
-                  className="group w-full text-left px-3 py-2.5 hover:bg-cl2-accent/5 transition-colors"
-                >
-                  <div className="flex items-start gap-3">
-                    <span className="shrink-0 mt-0.5 text-[10px] font-mono tabular-nums text-gray-400 group-hover:text-cl2-accent transition-colors">
-                      {fmtClock(seg.start)}
-                    </span>
-                    <p className="text-[13px] leading-snug text-gray-700 dark:text-gray-300">
-                      {seg.text}
-                    </p>
-                  </div>
-                </button>
-              </li>
-            ))}
+            {segments.map((seg) => {
+              const isActive = seg.index === activeSegmentIndex;
+              return (
+                <li key={seg.index} ref={isActive ? activeRef : null}>
+                  <button
+                    type="button"
+                    onClick={() => onSeek(seg.start)}
+                    className={cn(
+                      'group w-full text-left px-3 py-2.5 transition-all',
+                      isActive
+                        ? 'bg-cl2-burgundy/[0.08] dark:bg-cl2-accent/[0.10] ring-1 ring-inset ring-cl2-burgundy/30 dark:ring-cl2-accent/30 shadow-[inset_2px_0_0_var(--color-cl2-accent)]'
+                        : 'hover:bg-cl2-accent/5',
+                    )}
+                  >
+                    <div className="flex items-start gap-3">
+                      <span
+                        className={cn(
+                          'shrink-0 mt-0.5 text-[10px] font-mono tabular-nums transition-colors',
+                          isActive
+                            ? 'text-cl2-accent font-semibold'
+                            : 'text-gray-400 group-hover:text-cl2-accent',
+                        )}
+                      >
+                        {fmtClock(seg.start)}
+                      </span>
+                      <p
+                        className={cn(
+                          'text-[13px] leading-snug transition-colors',
+                          isActive
+                            ? 'text-[#0e1745] dark:text-white font-medium'
+                            : 'text-gray-700 dark:text-gray-300',
+                        )}
+                      >
+                        {seg.text}
+                      </p>
+                    </div>
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>
