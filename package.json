@@ -18,7 +18,10 @@
     "migrate:cl2": "tsx -r dotenv/config scripts/migrate-cl2-mariadb.ts dotenv_config_path=.env.local",
     "backfill:sil:sharepoint": "tsx -r dotenv/config scripts/backfill-sil-sharepoint.ts dotenv_config_path=.env.local",
     "backfill:sil:webforms": "tsx -r dotenv/config scripts/backfill-sil-webforms.ts dotenv_config_path=.env.local",
-    "process:sil:docs": "tsx -r dotenv/config scripts/process-sil-docs.ts dotenv_config_path=.env.local"
+    "process:sil:docs": "tsx -r dotenv/config scripts/process-sil-docs.ts dotenv_config_path=.env.local",
+    "index:reglamento": "tsx -r dotenv/config scripts/index-reglamento.ts dotenv_config_path=.env.local",
+    "enrich:sil": "tsx -r dotenv/config scripts/enrich-sil-expedientes.ts dotenv_config_path=.env.local",
+    "download:sil:bulk": "tsx -r dotenv/config scripts/download-sil-bulk.ts dotenv_config_path=.env.local"
   },
   "devDependencies": {
     "@supabase/supabase-js": "^2.46.0",

@@ -56,6 +56,12 @@ persona: |
 
   REGLA 6 — ELECCIÓN DE TOOL (importante)
   Tenés varias herramientas. Usalas en este orden mental:
+    • Pregunta PROCEDIMENTAL (plazos, mecanismo de votación, mociones,
+      dispensa de trámite, requisitos formales, atribuciones de comisiones,
+      cómo funciona el plenario, derechos/deberes de diputados) →
+      search_reglamento. Tu PRIMER reflejo ante cualquier "¿cómo se hace
+      X?" o "¿cuál es el plazo de Y?" debe ser este tool. Es el Reglamento
+      vigente, citá [Art. N].
     • Pregunta sobre lo DICHO en una sesión específica → search_session_transcript
       (solo disponible cuando la conversación está vinculada a una sesión).
     • Pregunta sobre lo DICHO en plenarios pasados (cualquier sesión) →
@@ -71,6 +77,10 @@ persona: |
   Si la pregunta cruza dos dominios (e.g. "¿qué dijo el diputado X sobre
   el expediente Y?"), usá las dos en orden: primero search_sil_expedientes
   para identificar Y, después search_transcripts con el nombre/título.
+  Si la pregunta es híbrida procedimental + sustantiva (e.g. "¿cuál es el
+  plazo de dictamen para el Exp. 22293?"), llamá a search_reglamento
+  para el plazo Y a search_sil_expedientes para el estado actual del
+  expediente — combiná en una sola respuesta con [Art. N] y [Exp. N].
 
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ANTI-EJEMPLO (lo que NO hacer):
@@ -137,6 +147,16 @@ tools:
     table: legislative_chunks
     description: Búsqueda semántica sobre PDFs/textos del SIL.
     use_when: deep_insight
+  # Reglamento de la Asamblea Legislativa de Costa Rica (96 artículos).
+  # Esta es la capa de conocimiento PROCEDIMENTAL — cómo se vota, qué
+  # plazos rigen, cómo se forma comisión, cómo se dispensan trámites.
+  # Ante CUALQUIER pregunta procedimental, Lexa tira esta tool primero.
+  - name: search_reglamento
+    type: rag
+    source: supabase_pgvector
+    table: legislative_chunks
+    filter: "source_type='reglamento'"
+    description: Búsqueda semántica sobre el Reglamento vigente.
 
 response_contract:
   must_include_citations: true

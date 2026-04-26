@@ -6,8 +6,10 @@ import {
   searchExpedientes,
   getExpedienteById,
   searchSilCorpus,
+  searchReglamento,
   renderExpedientesForLlm,
   renderExpedienteFullForLlm,
+  renderReglamentoForLlm,
 } from './silClient.js';
 import { withTimeout, withRetry, ResilienceError } from './resilience.js';
 
@@ -154,6 +156,34 @@ function hasSilTools(agentTools: Array<Record<string, unknown>>): boolean {
       t.name === 'search_sil_corpus',
   );
 }
+
+function hasReglamentoTool(agentTools: Array<Record<string, unknown>>): boolean {
+  return agentTools.some((t) => t.name === 'search_reglamento');
+}
+
+const SEARCH_REGLAMENTO_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'search_reglamento',
+    description:
+      'Busca en el Reglamento de la Asamblea Legislativa de Costa Rica (96 artículos vigentes). Usalo SIEMPRE para preguntas procedimentales: plazos, requisitos, mecanismos de votación, mociones, dispensa de trámite, comisiones, dictámenes, sesiones plenarias, derechos y deberes de diputados. Devuelve artículos completos con su número y título — citá [Art. N] inline. NO inventes artículos: si la búsqueda no devuelve un artículo aplicable, decí "el Reglamento no regula explícitamente esto".',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Pregunta o concepto procedimental en español. Ej: "plazo dictamen comisión", "votación nominal", "moción de fondo en plenario".',
+        },
+        k: {
+          type: 'integer',
+          description: 'Número de artículos a recuperar (default 5, max 10).',
+          default: 5,
+        },
+      },
+      required: ['query'],
+    },
+  },
+};
 
 // ─── SIL tool definitions ─────────────────────────────────────────────
 // These three cover the breadth of legislative-file queries:
@@ -372,6 +402,12 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // (expedientes). Lexa keeps both, Atlas leans on SIL, Centinela none.
   if (hasSilTools(agent.tools)) {
     tools.push(SEARCH_SIL_EXPEDIENTES_TOOL, GET_SIL_EXPEDIENTE_TOOL, SEARCH_SIL_CORPUS_TOOL);
+  }
+  // Reglamento de la Asamblea — procedural knowledge layer. Lexa
+  // declares it (Atlas could too, but the PROCEDURAL questions are
+  // squarely Lexa's territory).
+  if (hasReglamentoTool(agent.tools)) {
+    tools.push(SEARCH_REGLAMENTO_TOOL);
   }
 
   if (tools.length === 0) {
@@ -723,6 +759,59 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
           `1. Si la respuesta del usuario implica analizar el TEXTO del expediente, llamá a search_sil_corpus con palabras clave del expediente — el corpus tiene los PDFs ya parseados.\n` +
           `2. Citá [1] cuando hables de este expediente. Mencioná número como "Exp. ${exp.numero}".\n` +
           `3. Si el usuario pide el texto literal y no aparece en los documentos listados, decile que el documento aún no está indexado.`,
+      });
+      continue;
+    }
+
+    if (tc.function.name === 'search_reglamento') {
+      let parsedArgs: { query: string; k?: number };
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments);
+      } catch {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: 'invalid json' }) });
+        continue;
+      }
+
+      let hits: Awaited<ReturnType<typeof searchReglamento>> = [];
+      try {
+        hits = await searchReglamento(parsedArgs);
+      } catch (err) {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: (err as Error).message }) });
+        continue;
+      }
+
+      // Citation event — articles cite as `Art. N` with their official
+      // URL on asamblea.go.cr/sd/Reglamento_Asamblea/.
+      args.onChunk({
+        type: 'citation',
+        payload: hits.map((h, i) => ({
+          id: h.chunk_id,
+          session_id: '',
+          source_ref: h.articulo_full_title,
+          content: h.content,
+          similarity: h.similarity,
+          fecha: null,
+          comision: null,
+          tipo: 'reglamento',
+          source_type: 'metadata', // UI-side: render as plenaria-style card; Reglamento does not have its own card variant yet
+          expediente_numero: h.articulo_numero != null ? `Art. ${h.articulo_numero}` : null,
+          url_detalle: h.url,
+          video_url: null,
+          transcript_url: null,
+          rank: i + 1,
+        })),
+      });
+
+      messages.push({
+        role: 'tool',
+        tool_call_id: tc.id,
+        content:
+          `Artículos del Reglamento (${hits.length}):\n\n${renderReglamentoForLlm(hits)}\n\n---\n` +
+          `INSTRUCCIONES:\n` +
+          `1. Citá [Art. N] inline después de cada afirmación procedimental. Ejemplo: "El plazo es de 8 días hábiles [Art. 113]."\n` +
+          `2. Si la pregunta no se responde literalmente con los artículos devueltos, decí "el Reglamento no regula explícitamente esto" y NO inventes la respuesta.\n` +
+          `3. Cuando combinés varios artículos, citá [Art. N][Art. M].\n` +
+          `4. Hablale al usuario de "el Reglamento", "el artículo", "la norma" — nunca de "chunk".`,
       });
       continue;
     }

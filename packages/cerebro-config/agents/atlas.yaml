@@ -81,6 +81,12 @@ tools:
     source: supabase_pgvector
     table: legislative_chunks
     description: Búsqueda semántica sobre PDFs/textos del SIL.
+  - name: search_reglamento
+    type: rag
+    source: supabase_pgvector
+    table: legislative_chunks
+    filter: "source_type='reglamento'"
+    description: Reglamento vigente — usar para preguntas procedimentales sobre tramitación de expedientes.
   # Plenaria-side tools — Atlas can cross-reference into transcripts when
   # the question links a project to what was said in plenary.
   - name: search_transcripts

@@ -214,6 +214,99 @@ export async function searchSilCorpus(args: {
 
 // ─── Helpers ──────────────────────────────────────────────────────────
 
+// ─── Reglamento de la Asamblea (procedural knowledge layer) ───────────
+
+export interface ReglamentoHit {
+  chunk_id: string;
+  articulo_numero: number | null;
+  articulo_titulo: string | null;
+  articulo_full_title: string;
+  content: string;
+  similarity: number;
+  url: string | null;
+}
+
+/**
+ * Semantic search over the indexed Reglamento de la Asamblea Legislativa
+ * de Costa Rica. Each chunk in the table corresponds to one full article
+ * (e.g. "Artículo 113.- Presentación del proyecto"). When Lexa receives a
+ * procedural question ("¿cuál es el plazo para dictamen?", "¿cómo se
+ * tramita una moción de fondo?"), this is the tool to call.
+ *
+ * Uses match_chunks_v2 (LEFT JOIN — works for chunks without session_id).
+ * Falls through gracefully to an empty array if the v2 RPC isn't applied
+ * yet (migration 0007), so the chat doesn't crash on a fresh deploy.
+ */
+export async function searchReglamento(args: {
+  query: string;
+  k?: number;
+}): Promise<ReglamentoHit[]> {
+  const k = Math.min(Math.max(args.k ?? 5, 1), 15);
+  const queryEmbedding = await embedQuery(args.query);
+
+  return withRetry(
+    () =>
+      withTimeout(
+        async (signal) => {
+          const { data, error } = await supa()
+            .rpc('match_chunks_v2', {
+              query_embedding: queryEmbedding,
+              match_count: k * 2, // overfetch slightly to allow ref filtering
+              filter_session_id: null,
+              filter_source_type: null, // accept either 'reglamento' or 'metadata'
+              filter_source_ref_prefix: 'Reglamento Asamblea',
+            })
+            .abortSignal(signal);
+          if (error) {
+            // Graceful fallback: if migration 0007 isn't applied yet the
+            // v2 function is missing. Don't crash the chat — return empty
+            // and warn-log. Operator sees this in /health/deep eventually.
+            if (error.message.includes('match_chunks_v2') || error.code === '42883') {
+              console.warn('[searchReglamento] match_chunks_v2 not found — apply migration 0007. Returning empty.');
+              return [] as ReglamentoHit[];
+            }
+            throw new Error(`match_chunks_v2: ${error.message}`);
+          }
+          const hits = (data ?? []) as Array<{
+            chunk_id: string;
+            source_type?: string;
+            source_ref?: string;
+            content: string;
+            similarity: number;
+            metadata?: Record<string, unknown> | null;
+          }>;
+          return hits.slice(0, k).map((h) => {
+            const md = (h.metadata ?? {}) as Record<string, unknown>;
+            return {
+              chunk_id: h.chunk_id,
+              articulo_numero: typeof md.articulo_numero === 'number' ? md.articulo_numero : null,
+              articulo_titulo: typeof md.articulo_titulo === 'string' ? md.articulo_titulo : null,
+              articulo_full_title:
+                typeof md.articulo_full_title === 'string'
+                  ? md.articulo_full_title
+                  : (h.source_ref ?? 'Reglamento'),
+              content: h.content,
+              similarity: h.similarity,
+              url: typeof md.url === 'string' ? md.url : null,
+            };
+          });
+        },
+        { ms: 8_000, label: 'reglamento:search' },
+      ),
+    { attempts: 2, baseDelayMs: 250, label: 'reglamento:search' },
+  );
+}
+
+export function renderReglamentoForLlm(hits: ReglamentoHit[]): string {
+  if (hits.length === 0) return '(sin coincidencias en el Reglamento)';
+  return hits
+    .map(
+      (h, i) =>
+        `[${i + 1}] ${h.articulo_full_title} (similaridad ${(h.similarity * 100).toFixed(0)}%)\n${h.content}`,
+    )
+    .join('\n\n---\n\n');
+}
+
 /**
  * Render a list of expedientes as a markdown bullet list for the LLM
  * (compact, citation-friendly). Each line includes the canonical SIL URL
