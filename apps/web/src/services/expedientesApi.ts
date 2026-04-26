@@ -49,3 +49,24 @@ export async function fetchExpediente(numero: number): Promise<Expediente> {
   const json = (await res.json()) as { ok: true; expediente: Expediente };
   return json.expediente;
 }
+
+/**
+ * Resolve a doc's view_url to a self-authenticating URL (GCS signed URL
+ * for mirrored docs, asamblea.go.cr source URL otherwise). The BFF needs
+ * a JWT, but the URL it returns does not — so we can window.open() it.
+ *
+ * Why a separate call instead of <a href={view_url}>: a plain browser
+ * navigation can't carry the Authorization header, so it would 401.
+ */
+export async function resolveDocUrl(viewUrl: string): Promise<string> {
+  const sep = viewUrl.includes('?') ? '&' : '?';
+  const res = await fetch(`${viewUrl}${sep}json=1`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail?.error ?? `http ${res.status}`);
+  }
+  const json = (await res.json()) as { ok: true; url: string; mirrored: boolean };
+  return json.url;
+}

@@ -14,11 +14,11 @@
  *   │                      │ click → signed URL  │
  *   └──────────────────────┴──────────────────────┘
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type MouseEvent } from 'react';
 import { ArrowLeft, ExternalLink, FileText, Gavel, Calendar, Users, Building2, Scale } from 'lucide-react';
 import { TopDock } from '@/components/top-dock';
 import { navigate } from '@/lib/router';
-import { fetchExpediente, type Expediente, type ExpedienteDoc } from '@/services/expedientesApi';
+import { fetchExpediente, resolveDocUrl, type Expediente, type ExpedienteDoc } from '@/services/expedientesApi';
 
 interface Props {
   numero: number;
@@ -208,12 +208,41 @@ function MetaCard({ icon, label, value, small }: { icon: React.ReactNode; label:
 
 function DocRow({ doc }: { doc: ExpedienteDoc }) {
   const t = tipoLabel(doc.tipo);
+  const [opening, setOpening] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Click handler that resolves the auth-gated view_url to a signed URL
+  // (or source_url fallback) and opens it in a new tab. We pre-open the
+  // tab with `about:blank` BEFORE awaiting so popup blockers count this
+  // as a user-initiated open; once the URL resolves we point the tab at
+  // it. If the resolution fails, we close the placeholder tab and show
+  // an inline error.
+  const handleOpen = async (e: MouseEvent) => {
+    e.preventDefault();
+    if (opening) return;
+    setOpening(true);
+    setError(null);
+    const placeholder = window.open('', '_blank', 'noopener');
+    try {
+      const url = await resolveDocUrl(doc.view_url);
+      if (placeholder) placeholder.location.href = url;
+      else window.open(url, '_blank', 'noopener');
+    } catch (err) {
+      if (placeholder) placeholder.close();
+      setError((err as Error).message);
+    } finally {
+      setOpening(false);
+    }
+  };
+
   return (
     <li>
       <a
         href={doc.view_url}
+        onClick={handleOpen}
         target="_blank"
         rel="noopener noreferrer"
+        aria-busy={opening}
         className="block px-4 py-3 hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors"
       >
         <div className="flex items-start gap-3">
@@ -235,10 +264,20 @@ function DocRow({ doc }: { doc: ExpedienteDoc }) {
                   · {Math.round(doc.text_chars / 1000)}k chars
                 </span>
               )}
+              {opening && (
+                <span className="text-[10px] text-[#0e1745]/45 dark:text-white/45">
+                  · abriendo…
+                </span>
+              )}
             </div>
             {doc.titulo && (
               <p className="text-[13px] text-[#0e1745]/85 dark:text-white/85 mt-1 line-clamp-2">
                 {doc.titulo}
+              </p>
+            )}
+            {error && (
+              <p className="text-[11px] text-rose-600 dark:text-rose-400 mt-1">
+                No se pudo abrir el documento: {error}
               </p>
             )}
           </div>

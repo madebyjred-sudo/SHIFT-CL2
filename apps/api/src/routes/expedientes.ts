@@ -111,10 +111,22 @@ expedientesRouter.get('/:numero/docs/:docId', async (req, res) => {
       return;
     }
 
+    // The client may pass `?json=1` to ask for the resolved URL as JSON
+    // instead of a 302. We need this because <a href> navigations don't
+    // carry the Bearer token — the auth-gated browser nav would 401. The
+    // SPA fetches `?json=1` with the JWT, gets the (self-authenticating)
+    // signed URL, and opens it in a new tab. Plain 302 mode is preserved
+    // for any server-to-server caller / future direct embed scenarios.
+    const wantsJson = req.query.json === '1';
+
     // The doc row has a gcs_path field once process-sil-docs has run for it.
-    // Until then, redirect to the asamblea.go.cr source — better than a 404.
+    // Until then, fall back to the asamblea.go.cr source — better than a 404.
     const gcsPath = (doc as unknown as { gcs_path?: string | null }).gcs_path ?? null;
     if (!gcsPath) {
+      if (wantsJson) {
+        res.json({ ok: true, url: doc.source_url, mirrored: false });
+        return;
+      }
       res.redirect(302, doc.source_url);
       return;
     }
@@ -123,16 +135,21 @@ expedientesRouter.get('/:numero/docs/:docId', async (req, res) => {
     const m = gcsPath.match(/^gs:\/\/([^/]+)\/(.+)$/);
     if (!m) {
       req.log.warn('expediente_doc_bad_gcs_path', { docId, gcsPath });
+      if (wantsJson) {
+        res.json({ ok: true, url: doc.source_url, mirrored: false });
+        return;
+      }
       res.redirect(302, doc.source_url);
       return;
     }
     const [, bucketName, objectPath] = m;
     const file = storage().bucket(bucketName).file(objectPath);
 
-    // Sign a short-lived URL and 302 to it. Keeps the BFF off the data path
-    // (no Express stream chunking through our process), gives Google's CDN
-    // a chance to cache, and the URL expires after SIGNED_URL_TTL_MS so
-    // sharing it accidentally has bounded impact.
+    // Sign a short-lived URL. With ?json=1 we return it as JSON so the SPA
+    // can window.open() it; otherwise we 302 (legacy embed path). Keeps
+    // the BFF off the data path (no Express stream chunking through our
+    // process), gives Google's CDN a chance to cache, and the URL expires
+    // after SIGNED_URL_TTL_MS so sharing it accidentally has bounded impact.
     const [signedUrl] = await withTimeout(
       () =>
         file.getSignedUrl({
@@ -142,6 +159,10 @@ expedientesRouter.get('/:numero/docs/:docId', async (req, res) => {
         }),
       { ms: STREAM_TIMEOUT_MS, label: 'gcs:signed_url' },
     );
+    if (wantsJson) {
+      res.json({ ok: true, url: signedUrl, mirrored: true });
+      return;
+    }
     res.redirect(302, signedUrl);
   } catch (err) {
     req.log.error('expediente_doc_failed', { error: (err as Error).message, numero, docId });
