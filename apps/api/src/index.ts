@@ -26,6 +26,7 @@ import { adminRouter } from './routes/admin.js';
 import { silRouter } from './routes/sil.js';
 import { workspaceRouter } from './routes/workspace.js';
 import { publicDemoRouter } from './routes/publicDemo.js';
+import { podcastsRouter } from './routes/podcasts.js';
 import { requestContext } from './middleware/requestContext.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { logger } from './services/logger.js';
@@ -114,6 +115,14 @@ app.use(
   '/api/public',
   rateLimit({ bucket: 'public', max: 30, windowMs: 60_000 }),
   publicDemoRouter,
+);
+app.use(
+  // Podcasts — async TTS pipeline. Status polling is cheap; the heavy
+  // POST is gated server-side by the per-user daily cap (5/24h) and
+  // the global cost ceiling implicit in script + TTS char budgets.
+  '/api/podcasts',
+  rateLimit({ bucket: 'podcasts', max: 60, windowMs: 60_000 }),
+  podcastsRouter,
 );
 
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {

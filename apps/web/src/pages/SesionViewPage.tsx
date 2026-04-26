@@ -18,7 +18,8 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { ArrowLeft, Calendar, Check as CheckIcon, Clock, Eye, EyeOff, FileSliders, MessageSquare, Search, Sparkles, X } from 'lucide-react';
+import { ArrowLeft, Calendar, Check as CheckIcon, Clock, Eye, EyeOff, FileSliders, Headphones, MessageSquare, Search, Sparkles, X } from 'lucide-react';
+import { PodcastModal } from '@/components/podcasts/PodcastModal';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -80,6 +81,7 @@ export function SesionViewPage({ sesionId }: Props) {
   // textarea with the caret at the end. Used by "Enviar a Lexa" from
   // both the transcript multi-select and the resumen cards.
   const [chatPrefill, setChatPrefill] = useState<{ text: string; nonce: number } | null>(null);
+  const [podcastOpen, setPodcastOpen] = useState(false);
 
   const sendToLexa = (contextText: string) => {
     const lead = detail ? `sesión #${detail.id}` : 'esta sesión';
@@ -169,8 +171,24 @@ export function SesionViewPage({ sesionId }: Props) {
             <FileSliders size={13} />
             Generar PPTX
           </button>
+          <button
+            type="button"
+            onClick={() => setPodcastOpen(true)}
+            title="Generar podcast — narrado por Lexa"
+            className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-cl2-burgundy/10 text-cl2-burgundy dark:bg-cl2-accent/15 dark:text-cl2-accent-soft hover:bg-cl2-burgundy/15 dark:hover:bg-cl2-accent/20 transition-colors"
+          >
+            <Headphones size={13} />
+            Generar podcast
+          </button>
         </div>
       </div>
+      <PodcastModal
+        open={podcastOpen}
+        onClose={() => setPodcastOpen(false)}
+        source_type="sesion"
+        source_id={String(sesionId)}
+        source_title={detail?.titulo}
+      />
 
       {/* Body */}
       <main className="relative z-20 flex-1 min-h-0 max-w-[1600px] w-full mx-auto px-4 sm:px-6 md:px-8 py-4">
