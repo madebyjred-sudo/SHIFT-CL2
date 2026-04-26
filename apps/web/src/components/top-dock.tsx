@@ -12,9 +12,13 @@ interface TopDockProps {
 export function TopDock({ onOpenHistory, onToggleHistory, isHistoryOpen }: TopDockProps) {
   const { theme, toggleTheme } = useTheme();
   const path = useRoute();
-  const currentView: 'chat' | 'live' = path.startsWith('/sesiones') ? 'live' : 'chat';
-  const handleNavigate = (view: 'chat' | 'live') => {
-    navigate(view === 'live' ? '/sesiones' : '/');
+  const currentView: 'chat' | 'live' | 'admin' =
+    path.startsWith('/admin') ? 'admin'
+    : path.startsWith('/sesiones') || path.startsWith('/expediente') ? 'live'
+    : 'chat';
+  const handleNavigate = (view: 'chat' | 'live' | 'admin') => {
+    if (view === 'admin') navigate('/admin/punto-medio');
+    else navigate(view === 'live' ? '/sesiones' : '/');
   };
 
   return (
