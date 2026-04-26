@@ -23,8 +23,22 @@
  * pairs) before forwarding to OpenRouter.
  */
 import { Router, type Request, type Response } from 'express';
+import multer from 'multer';
 import type { CerebroStreamChunk } from '@shift-cl2/shared-types';
 import { openRouterStream } from '../services/openRouterClient.js';
+import { transcribeAudio } from '../services/elevenlabsClient.js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { signPodcastAudio } from '../services/podcastStorage.js';
+
+let _shareSupa: SupabaseClient | null = null;
+function shareSupa(): SupabaseClient {
+  if (_shareSupa) return _shareSupa;
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) throw new Error('supabase env missing');
+  _shareSupa = createClient(url, key, { auth: { persistSession: false } });
+  return _shareSupa;
+}
 
 export const publicDemoRouter = Router();
 
@@ -216,6 +230,145 @@ publicDemoRouter.post('/demo-chat', async (req: Request, res: Response) => {
     });
   } finally {
     res.end();
+  }
+});
+
+// ─── Public voice transcribe (landing demo) ──────────────────────────
+//
+// Same shape as /api/voice/transcribe but anonymous + heavily capped.
+// Lets a prospect dictate a question on the landing without an account.
+// Caps:
+//   - audio max 5MB (~5 min of webm/opus)
+//   - 10 transcriptions per IP per 24h (independent counter from chat)
+//   - rejects empty + oversize at multer layer
+const VOICE_PER_IP_24H = 10;
+const voiceIpBuckets = new Map<string, Bucket>();
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of voiceIpBuckets) if (v.resetAt <= now) voiceIpBuckets.delete(k);
+}, 60_000).unref();
+
+const voiceUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
+
+publicDemoRouter.post('/voice', voiceUpload.single('audio'), async (req, res) => {
+  const ip = clientIp(req);
+  const bucket: Bucket = voiceIpBuckets.get(ip) ?? { count: 0, resetAt: Date.now() + 24 * 60 * 60 * 1000 };
+  rollWindow(bucket, 24 * 60 * 60 * 1000);
+  voiceIpBuckets.set(ip, bucket);
+
+  if (bucket.count >= VOICE_PER_IP_24H) {
+    const retryAfter = Math.max(1, Math.ceil((bucket.resetAt - Date.now()) / 1000));
+    res.setHeader('Retry-After', String(retryAfter));
+    res.status(429).json({
+      ok: false,
+      error: 'demo_voice_quota_exhausted',
+      message: 'Llegaste al máximo de transcripciones de demo por hoy.',
+      retry_after_s: retryAfter,
+    });
+    return;
+  }
+
+  if (!req.file || req.file.size === 0) {
+    res.status(400).json({ ok: false, error: 'audio_required' });
+    return;
+  }
+  if (!process.env.ELEVENLABS_API_KEY) {
+    res.status(500).json({ ok: false, error: 'eleven_not_configured' });
+    return;
+  }
+
+  // Burn the slot up front — same rationale as /demo-chat.
+  bucket.count += 1;
+
+  try {
+    const text = await transcribeAudio(req.file.buffer, req.file.mimetype);
+    res.json({ ok: true, text });
+  } catch (err) {
+    req.log?.warn('public_voice_failed', { error: (err as Error).message, ip });
+    res.status(502).json({
+      ok: false,
+      error: 'transcribe_failed',
+      detail: (err as Error).message.slice(0, 200),
+    });
+  }
+});
+
+// ─── Podcast share lookup ─────────────────────────────────────────────
+//
+// GET /api/public/podcasts/share/:token — anonymous endpoint. Token is
+// the auth: server validates against `podcasts.share_token` + checks
+// expiration, increments view count, and 302s to a short-lived GCS
+// signed URL. Browser <audio> can follow the redirect with credentials
+// omitted (signed URL is self-authenticating).
+//
+// Defense:
+//   - Token is a UUIDv4 (rejects non-UUID quickly without a DB hit).
+//   - Expiration enforced on read.
+//   - On `?json=1` returns metadata so the share page can render a
+//     player + title + duration before redirecting to audio.
+publicDemoRouter.get('/podcasts/share/:token', async (req, res) => {
+  const token = String(req.params.token ?? '');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(token)) {
+    res.status(404).json({ ok: false, error: 'not_found' });
+    return;
+  }
+
+  const { data, error } = await shareSupa()
+    .from('podcasts')
+    .select('id, audio_path, title, duration_actual_s, share_expires_at, share_views, status')
+    .eq('share_token', token)
+    .single();
+
+  if (error || !data) {
+    res.status(404).json({ ok: false, error: 'not_found' });
+    return;
+  }
+  const row = data as {
+    id: string;
+    audio_path: string | null;
+    title: string | null;
+    duration_actual_s: number | null;
+    share_expires_at: string | null;
+    share_views: number;
+    status: string;
+  };
+
+  if (row.status !== 'ready' || !row.audio_path) {
+    res.status(409).json({ ok: false, error: 'not_ready' });
+    return;
+  }
+  if (row.share_expires_at && new Date(row.share_expires_at).getTime() < Date.now()) {
+    res.status(410).json({ ok: false, error: 'expired' });
+    return;
+  }
+
+  // Telemetry — non-blocking, log on failure but don't bail.
+  void shareSupa()
+    .from('podcasts')
+    .update({ share_views: (row.share_views ?? 0) + 1 })
+    .eq('id', row.id)
+    .then((r) => {
+      if (r.error) req.log?.warn('share_view_count_failed', { error: r.error.message });
+    });
+
+  try {
+    const url = await signPodcastAudio(row.audio_path);
+    if (req.query.json === '1') {
+      res.json({
+        ok: true,
+        url,
+        title: row.title,
+        duration_s: row.duration_actual_s,
+      });
+      return;
+    }
+    res.redirect(302, url);
+  } catch (err) {
+    req.log?.error('share_sign_failed', { error: (err as Error).message });
+    res.status(502).json({ ok: false, error: 'sign_failed' });
   }
 });
 

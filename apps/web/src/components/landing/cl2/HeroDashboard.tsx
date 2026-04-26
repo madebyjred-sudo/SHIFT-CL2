@@ -14,6 +14,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Cite, renderWithCitations } from "./Primitives";
 import { Icon } from "./Icon";
+import { VoiceInput } from "@/components/ui/voice-input";
 
 // ─── Constraints (must match apps/api/src/routes/publicDemo.ts) ──────
 const DEMO_LIMIT = 5;
@@ -375,6 +376,39 @@ export const HeroDashboard = () => {
                 </div>
               )
             )}
+
+            {/* Follow-up chips — surface untried suggested prompts after
+                a reply lands so the user keeps exploring without typing.
+                Show only when not streaming, not blocked, and there's
+                still quota. Three at a time. */}
+            {!streaming && !composerLocked && messages.length > 0 && (() => {
+              const tried = new Set(
+                messages
+                  .filter((m) => m.role === "user")
+                  .map((m) => m.content.trim()),
+              );
+              const remaining_chips = SUGGESTED.filter((s) => !tried.has(s)).slice(0, 3);
+              if (remaining_chips.length === 0) return null;
+              return (
+                <div className="pt-1 border-t border-dashed border-cl2-ink/[0.08] -mx-1 px-1 pt-3">
+                  <div className="font-mono text-[10px] text-cl2-ink/40 uppercase tracking-wider mb-2">
+                    Seguí explorando
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {remaining_chips.map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => void send(s)}
+                        className="text-left text-[12px] text-cl2-ink/75 bg-cl2-ink/[0.025] border border-cl2-ink/[0.08] hover:border-cl2-burgundy/40 hover:bg-cl2-burgundy/[0.04] hover:text-cl2-burgundy rounded-full px-3 py-1 transition-colors"
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
           </div>
 
           {/* Blocked banner above composer */}
@@ -420,6 +454,17 @@ export const HeroDashboard = () => {
                 {input.length}/{PROMPT_MAX}
               </span>
             )}
+            {/* Voice input — anonymous endpoint, 10/IP/24h server cap.
+                Transcribed text replaces whatever's in the input so the
+                user can review before pressing send. Same component as
+                the auth'd surface, just pointed at /api/public/voice. */}
+            <VoiceInput
+              endpoint="/api/public/voice"
+              skipAuth
+              disabled={blocked}
+              accent="hsl(var(--cl2-burgundy))"
+              onTranscript={(t) => setInput(t)}
+            />
             <span className="font-mono text-[10px] text-cl2-ink/40 hidden sm:inline">↵</span>
             <button
               type="submit"

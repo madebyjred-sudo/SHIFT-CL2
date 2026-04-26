@@ -124,6 +124,40 @@ export async function listPodcastsBySource(
   return r.items;
 }
 
+export interface PodcastShare {
+  url: string;
+  token: string;
+  expires_at: string;
+}
+
+/**
+ * Mint or rotate a public share link for a podcast. ttlDays defaults
+ * to 30, capped at 365 server-side. Calling again rotates the token.
+ */
+export async function createPodcastShare(id: string, ttlDays = 30): Promise<PodcastShare> {
+  const res = await fetch(`${BASE}/${id}/share`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+    body: JSON.stringify({ ttl_days: ttlDays }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
+  return (await res.json()) as PodcastShare;
+}
+
+export async function revokePodcastShare(id: string): Promise<void> {
+  const res = await fetch(`${BASE}/${id}/share`, {
+    method: 'DELETE',
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
+}
+
 export async function deletePodcast(id: string): Promise<void> {
   const res = await fetch(`${BASE}/${id}`, {
     method: 'DELETE',

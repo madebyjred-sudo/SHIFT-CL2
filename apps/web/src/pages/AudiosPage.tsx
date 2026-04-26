@@ -24,6 +24,7 @@ import {
   Filter,
   Headphones,
   Library,
+  Link2,
   Loader2,
   Pause,
   Play,
@@ -34,6 +35,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import { PodcastShareModal } from '@/components/podcasts/PodcastShareModal';
 import { TopDock } from '@/components/top-dock';
 import { Sidebar } from '@/components/sidebar';
 import {
@@ -265,6 +267,7 @@ function PodcastRowItem({ row, onDelete }: { row: PodcastRow; onDelete: () => vo
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [resolving, setResolving] = useState(false);
   const [playing, setPlaying] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
 
   const ensureUrl = async () => {
@@ -388,6 +391,17 @@ function PodcastRowItem({ row, onDelete }: { row: PodcastRow; onDelete: () => vo
         )}
 
         {row.status === 'ready' && (
+          <button
+            type="button"
+            onClick={() => setShareOpen(true)}
+            title="Compartir link público"
+            className="shrink-0 p-2 rounded-md text-[#0e1745]/55 dark:text-white/55 hover:text-cl2-burgundy dark:hover:text-cl2-accent-soft hover:bg-cl2-burgundy/[0.05] dark:hover:bg-cl2-accent/[0.10]"
+          >
+            <Link2 size={13} />
+          </button>
+        )}
+
+        {row.status === 'ready' && (
           <a
             href={audioUrl ?? '#'}
             onClick={async (e) => {
@@ -421,6 +435,13 @@ function PodcastRowItem({ row, onDelete }: { row: PodcastRow; onDelete: () => vo
       {playing && audioUrl && audioRef.current && (
         <ScrubberRow audio={audioRef.current} />
       )}
+
+      <PodcastShareModal
+        open={shareOpen}
+        onClose={() => setShareOpen(false)}
+        podcastId={row.id}
+        podcastTitle={row.title}
+      />
     </motion.li>
   );
 }

@@ -281,6 +281,85 @@ podcastsRouter.get('/by-source', async (req, res) => {
 });
 
 /**
+ * POST /api/podcasts/:id/share — mint a share token for the podcast.
+ * Body: { ttl_days?: number } — default 30, max 365.
+ * Returns: { ok, url, expires_at }.
+ *
+ * Idempotent in the sense that re-calling rotates the token — the URL
+ * the user got last time stops working, the new one starts. UX in the
+ * client should warn before rotating.
+ */
+podcastsRouter.post('/:id/share', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const id = String(req.params.id);
+  const ttlDays = Math.max(1, Math.min(365, Number(req.body?.ttl_days ?? 30) || 30));
+
+  // Verify ownership + ready status.
+  const { data: existing, error: existingErr } = await supa()
+    .from('podcasts')
+    .select('id, status')
+    .eq('id', id)
+    .eq('user_id', userId)
+    .single();
+  if (existingErr || !existing) {
+    res.status(404).json({ ok: false, error: 'not_found' });
+    return;
+  }
+  if ((existing as { status: string }).status !== 'ready') {
+    res.status(409).json({ ok: false, error: 'not_ready' });
+    return;
+  }
+
+  // Mint token via Postgres' pgcrypto if available, else random uuid v4
+  // generated client-side. We call gen_random_uuid() through Supabase RPC
+  // is overkill — use crypto.randomUUID() in node 18+.
+  const { randomUUID } = await import('node:crypto');
+  const token = randomUUID();
+  const expiresAt = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000).toISOString();
+
+  const { error } = await supa()
+    .from('podcasts')
+    .update({ share_token: token, share_expires_at: expiresAt, share_views: 0 })
+    .eq('id', id)
+    .eq('user_id', userId);
+
+  if (error) {
+    res.status(500).json({ ok: false, error: error.message });
+    return;
+  }
+
+  // Build public URL — origin from req for dev / prod parity.
+  const origin = `${req.protocol}://${req.get('host')}`;
+  res.json({
+    ok: true,
+    url: `${origin}/api/public/podcasts/share/${token}`,
+    token,
+    expires_at: expiresAt,
+  });
+});
+
+/**
+ * DELETE /api/podcasts/:id/share — revoke any active share token.
+ * Tokens become unrecoverable; recipient links return 404.
+ */
+podcastsRouter.delete('/:id/share', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const id = String(req.params.id);
+  const { error } = await supa()
+    .from('podcasts')
+    .update({ share_token: null, share_expires_at: null })
+    .eq('id', id)
+    .eq('user_id', userId);
+  if (error) {
+    res.status(500).json({ ok: false, error: error.message });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+/**
  * DELETE /api/podcasts/:id — owner-only delete. Removes the row +
  * orphans the audio in GCS (lifecycle rule will purge it eventually).
  * We don't hard-delete the GCS object here on purpose: keeping the
