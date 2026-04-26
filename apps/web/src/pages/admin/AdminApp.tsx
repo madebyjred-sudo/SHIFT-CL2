@@ -11,6 +11,7 @@
 import { useEffect, useState } from 'react';
 import { matchAdminSection, navigate, type AdminSection } from '@/lib/router';
 import { AdminShell } from './AdminShell';
+import { ToastProvider } from './Toast';
 import { OverviewSection } from './sections/OverviewSection';
 import { TranscripcionesSection } from './sections/TranscripcionesSection';
 import { AgentesSection } from './sections/AgentesSection';
@@ -56,17 +57,19 @@ export function AdminApp({ section }: AdminAppProps): React.ReactElement {
   }, [section]);
 
   return (
-    <AdminShell active={section} badges={badges}>
-      {section === 'overview' && <OverviewSection />}
-      {section === 'transcripciones' && <TranscripcionesSection />}
-      {section === 'agentes' && <AgentesSection />}
-      {section === 'punto-medio' && <PuntoMedioSection />}
-      {section === 'sesiones' && <SesionesSection />}
-      {section === 'expedientes' && <ExpedientesSection />}
-      {section === 'usuarios' && <UsuariosSection />}
-      {section === 'auditoria' && <AuditoriaSection />}
-      {section === 'config' && <ConfigSection />}
-    </AdminShell>
+    <ToastProvider>
+      <AdminShell active={section} badges={badges}>
+        {section === 'overview' && <OverviewSection />}
+        {section === 'transcripciones' && <TranscripcionesSection />}
+        {section === 'agentes' && <AgentesSection />}
+        {section === 'punto-medio' && <PuntoMedioSection />}
+        {section === 'sesiones' && <SesionesSection />}
+        {section === 'expedientes' && <ExpedientesSection />}
+        {section === 'usuarios' && <UsuariosSection />}
+        {section === 'auditoria' && <AuditoriaSection />}
+        {section === 'config' && <ConfigSection />}
+      </AdminShell>
+    </ToastProvider>
   );
 }
 

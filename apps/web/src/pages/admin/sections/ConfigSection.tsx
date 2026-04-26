@@ -1,11 +1,18 @@
 /**
  * Configuración — modelos, feature flags, rate limits, build info.
  *
- * Modelos + flags persist to localStorage today (single-operator demo).
- * When tenant config lands, swap useState for the tenant_config table.
+ * Flags persist server-side via /api/admin/flags (Supabase
+ * `feature_flags`). Optimistic UI: toggle flips instantly, reverts on
+ * API error. Models live in /api/admin/agents (PATCH model) — clicking
+ * Editar deep-links to the Agentes section where the modal lives.
+ *
+ * "Restaurar defaults" reverts each flag to its first-paint value (the
+ * snapshot loaded on mount), not the seeded defaults — that way the
+ * operator can test toggles freely and one click reverses everything
+ * since they last loaded the page.
  */
 import { useEffect, useState } from 'react';
-import { RotateCcw, Check, Pencil } from 'lucide-react';
+import { RotateCcw, Pencil, RefreshCw } from 'lucide-react';
 import {
   ActionButton,
   BarRow,
@@ -17,49 +24,115 @@ import {
   SectionHeader,
   Toggle,
 } from '../primitives';
-import { fetchAdminBuild, useAdminFetch } from '@/services/adminApi';
+import {
+  fetchAdminBuild,
+  fetchFlags,
+  patchFlag,
+  useAdminFetch,
+  type FeatureFlags,
+} from '@/services/adminApi';
+import { navigate } from '@/lib/router';
+import { useToast } from '../Toast';
 
-interface Flags {
-  deepInsight: boolean;
-  voiceQuery: boolean;
-  expExtract: boolean;
-  citationsForce: boolean;
-  graphRag: boolean;
-  hybridRetrieval: boolean;
+interface FlagDef {
+  key: string;
+  title: string;
+  description: string;
 }
 
-const DEFAULT_FLAGS: Flags = {
-  deepInsight: true,
-  voiceQuery: false,
-  expExtract: true,
-  citationsForce: true,
-  graphRag: false,
-  hybridRetrieval: true,
-};
+const FLAG_DEFS: FlagDef[] = [
+  { key: 'deep_insight',     title: 'Deep Insight (Centinela)',           description: 'Botón shiny-cta en el composer para análisis profundo. Costo más alto.' },
+  { key: 'voice_query',      title: 'Consulta por voz',                    description: 'Whisper en navegador. Beta; off por default.' },
+  { key: 'exp_extract',      title: 'Extracción auto de expedientes',      description: 'Atlas detecta Exp. NN.NNN en mensajes y los precarga.' },
+  { key: 'citations_force',  title: 'Citación obligatoria',                description: 'Bloquea respuestas sin al menos una cita. No tocar.' },
+  { key: 'hybrid_retrieval', title: 'Hybrid retrieval (BM25 + dense + RRF)', description: 'On por default. Combina lexical y semántico vía match_chunks_hybrid.' },
+  { key: 'graph_rag',        title: 'GraphRAG / LightRAG',                  description: 'Activa la tool query_legislative_graph. Requiere Cerebro con lightrag-hku instalado.' },
+];
 
-const STORAGE_KEY = 'cl2.admin.flags';
+const MODEL_ROWS = [
+  { agent: 'lexa',      label: 'Modelo Lexa',      def: 'anthropic/claude-sonnet-4.6', sec: 'Análisis Plenario · 4k tok' },
+  { agent: 'atlas',     label: 'Modelo Atlas',     def: 'anthropic/claude-sonnet-4.6', sec: 'Comisiones & Datos · 4k tok' },
+  { agent: 'centinela', label: 'Modelo Centinela', def: 'openai/gpt-4.1',              sec: 'Alertas · 6k tok' },
+] as const;
+
+const STATIC_INFRA = [
+  { label: 'Embeddings', value: 'gemini-embedding-001',  sec: '3.072 dim · multilingual', edit: false },
+  { label: 'Reranker',   value: 'voyageai/rerank-2',     sec: 'top-30 → top-k · identity fallback', edit: false },
+  { label: 'Whisper',    value: 'whisper-large · v3',    sec: 'es-CR · diarización on', edit: false },
+];
 
 export function ConfigSection(): React.ReactElement {
-  const [flags, setFlags] = useState<Flags>(() => {
-    if (typeof window === 'undefined') return DEFAULT_FLAGS;
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      return raw ? { ...DEFAULT_FLAGS, ...(JSON.parse(raw) as Partial<Flags>) } : DEFAULT_FLAGS;
-    } catch {
-      return DEFAULT_FLAGS;
-    }
-  });
-  const [dirty, setDirty] = useState(false);
+  const { notify, confirm } = useToast();
+  const flagsState = useAdminFetch(fetchFlags);
   const build = useAdminFetch(fetchAdminBuild);
 
-  useEffect(() => {
-    if (!dirty) return;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(flags));
-  }, [flags, dirty]);
+  // Local optimistic mirror of flag values. We seed it from the server
+  // response and write through it so the UI flips instantly while the
+  // upsert lands. On error, we revert.
+  const [pending, setPending] = useState<Set<string>>(new Set());
+  const [snapshot, setSnapshot] = useState<FeatureFlags | null>(null);
+  const [optimistic, setOptimistic] = useState<FeatureFlags>({});
 
-  const flip = (k: keyof Flags) => {
-    setFlags((f) => ({ ...f, [k]: !f[k] }));
-    setDirty(true);
+  useEffect(() => {
+    if (flagsState.data?.flags && snapshot === null) {
+      setSnapshot(flagsState.data.flags);
+      setOptimistic(flagsState.data.flags);
+    }
+  }, [flagsState.data, snapshot]);
+
+  const flagBool = (key: string): boolean => {
+    const v = optimistic[key];
+    return v === true || v === 'true';
+  };
+
+  const onToggle = async (key: string, next: boolean) => {
+    setPending((s) => new Set(s).add(key));
+    setOptimistic((o) => ({ ...o, [key]: next }));
+    try {
+      await patchFlag(key, next);
+      notify({ kind: 'success', text: `Flag ${key} = ${next ? 'on' : 'off'}` });
+    } catch (err) {
+      // Revert on failure.
+      setOptimistic((o) => ({ ...o, [key]: !next }));
+      notify({ kind: 'error', text: 'No se pudo guardar el flag', detail: (err as Error).message });
+    } finally {
+      setPending((s) => {
+        const out = new Set(s);
+        out.delete(key);
+        return out;
+      });
+    }
+  };
+
+  const restoreDefaults = async () => {
+    if (!snapshot) return;
+    const ok = await confirm({
+      title: 'Restaurar valores anteriores',
+      description:
+        'Esto vuelve a los valores que estaban activos cuando entraste a esta vista. No restaura los defaults de la tabla.',
+      confirmLabel: 'Restaurar',
+    });
+    if (!ok) return;
+
+    // Walk every flag whose current optimistic value differs from the
+    // original snapshot, push the snapshot value back through the API.
+    const dirty = Object.keys(snapshot).filter(
+      (k) => JSON.stringify(snapshot[k]) !== JSON.stringify(optimistic[k]),
+    );
+    if (dirty.length === 0) {
+      notify({ kind: 'info', text: 'Nada que restaurar — sin cambios' });
+      return;
+    }
+    try {
+      for (const k of dirty) {
+        // eslint-disable-next-line no-await-in-loop
+        await patchFlag(k, snapshot[k]);
+      }
+      setOptimistic(snapshot);
+      notify({ kind: 'success', text: `${dirty.length} flag(s) restaurado(s)` });
+    } catch (err) {
+      notify({ kind: 'error', text: 'No se pudo restaurar', detail: (err as Error).message });
+    }
   };
 
   return (
@@ -68,18 +141,11 @@ export function ConfigSection(): React.ReactElement {
         eyebrow="Sistema · Configuración"
         actions={
           <>
-            <ActionButton
-              variant="ghost"
-              icon={RotateCcw}
-              onClick={() => {
-                setFlags(DEFAULT_FLAGS);
-                setDirty(true);
-              }}
-            >
-              Restaurar defaults
+            <ActionButton variant="ghost" icon={RefreshCw} onClick={() => void flagsState.refetch()}>
+              Recargar
             </ActionButton>
-            <ActionButton variant="coral" icon={Check} disabled={!dirty}>
-              Guardar cambios
+            <ActionButton variant="ghost" icon={RotateCcw} onClick={() => void restoreDefaults()}>
+              Restaurar
             </ActionButton>
           </>
         }
@@ -88,25 +154,33 @@ export function ConfigSection(): React.ReactElement {
       <div className="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
         {/* Modelos */}
         <Card>
-          <CardHeader title="Modelos & límites" meta="por agente" />
+          <CardHeader title="Modelos & runtime" meta="por agente" />
           <CardBody className="flex flex-col gap-3.5">
-            {[
-              { label: 'Modelo Lexa',      value: 'anthropic/claude-sonnet-4.6', sec: 'temperature 0.2 · 4k tok' },
-              { label: 'Modelo Atlas',     value: 'anthropic/claude-sonnet-4.6', sec: 'temperature 0.1 · 4k tok' },
-              { label: 'Modelo Centinela', value: 'openai/gpt-4.1',              sec: 'temperature 0.3 · 6k tok' },
-              { label: 'Embeddings',       value: 'gemini-embedding-001',         sec: '3.072 dim · multilingual' },
-              { label: 'Reranker',         value: 'voyageai/rerank-2',            sec: 'top-30 → top-k · identity fallback' },
-              { label: 'Whisper',          value: 'whisper-large · v3',           sec: 'es-CR · diarización on' },
-            ].map((m) => (
-              <div key={m.label} className="flex items-center gap-3">
-                <div className="flex-1">
+            {MODEL_ROWS.map((m) => (
+              <div key={m.agent} className="flex items-center gap-3">
+                <div className="flex-1 min-w-0">
                   <div className="text-[12px] text-[#0e1745]/60 dark:text-white/60">{m.label}</div>
-                  <div className="font-mono text-[12.5px] font-semibold text-[#0e1745] dark:text-white">{m.value}</div>
+                  <div className="font-mono text-[12.5px] font-semibold text-[#0e1745] dark:text-white truncate">
+                    {m.def}
+                  </div>
                   <div className="text-[11px] text-[#0e1745]/50 dark:text-white/50">{m.sec}</div>
                 </div>
-                <ActionButton variant="ghost" icon={Pencil}>
+                <ActionButton variant="ghost" icon={Pencil} onClick={() => navigate('/admin/agentes')}>
                   Editar
                 </ActionButton>
+              </div>
+            ))}
+            <div className="my-1 h-px bg-[#0e1745]/[0.06] dark:bg-white/[0.08]" />
+            {STATIC_INFRA.map((m) => (
+              <div key={m.label} className="flex items-center gap-3">
+                <div className="flex-1 min-w-0">
+                  <div className="text-[12px] text-[#0e1745]/60 dark:text-white/60">{m.label}</div>
+                  <div className="font-mono text-[12.5px] font-semibold text-[#0e1745] dark:text-white truncate">
+                    {m.value}
+                  </div>
+                  <div className="text-[11px] text-[#0e1745]/50 dark:text-white/50">{m.sec}</div>
+                </div>
+                <Pill kind="neutral">runtime</Pill>
               </div>
             ))}
           </CardBody>
@@ -114,26 +188,41 @@ export function ConfigSection(): React.ReactElement {
 
         {/* Feature flags */}
         <Card>
-          <CardHeader title="Feature flags" meta="cambia visible a usuario" />
+          <CardHeader
+            title="Feature flags"
+            meta={flagsState.loading ? 'cargando…' : flagsState.error ? <Pill kind="danger">error</Pill> : `live · ${Object.keys(optimistic).length}`}
+          />
           <div>
-            {[
-              { k: 'deepInsight',     ttl: 'Deep Insight (Centinela)',           desc: 'Botón shiny-cta en composer para análisis profundo. Costo más alto.' },
-              { k: 'voiceQuery',      ttl: 'Consulta por voz',                    desc: 'Whisper en navegador. Beta; off por default.' },
-              { k: 'expExtract',      ttl: 'Extracción auto de expedientes',      desc: 'Atlas detecta Exp. NN.NNN en mensajes y los precarga.' },
-              { k: 'citationsForce',  ttl: 'Citación obligatoria',                desc: 'Bloquea respuestas sin al menos una cita. No tocar.' },
-              { k: 'hybridRetrieval', ttl: 'Hybrid retrieval (BM25 + dense + RRF)', desc: 'On por default. Combina lexical y semántico vía RPC `match_chunks_hybrid`.' },
-              { k: 'graphRag',        ttl: 'GraphRAG / LightRAG',                  desc: 'Activa la tool query_legislative_graph. Requiere Cerebro con lightrag-hku instalado.' },
-            ].map((f) => (
-              <CardRow key={f.k}>
-                <div className="flex items-center gap-3">
-                  <div className="flex-1">
-                    <div className="text-[13px] font-semibold">{f.ttl}</div>
-                    <div className="mt-0.5 text-[11.5px] text-[#0e1745]/55 dark:text-white/55">{f.desc}</div>
+            {FLAG_DEFS.map((f) => {
+              const isPending = pending.has(f.key);
+              const isOn = flagBool(f.key);
+              return (
+                <CardRow key={f.key}>
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1">
+                      <div className="text-[13px] font-semibold text-[#0e1745] dark:text-white flex items-center gap-2">
+                        {f.title}
+                        {isPending && <Pill kind="neutral">guardando…</Pill>}
+                      </div>
+                      <div className="mt-0.5 text-[11.5px] text-[#0e1745]/55 dark:text-white/55">
+                        {f.description}
+                      </div>
+                    </div>
+                    <Toggle
+                      on={isOn}
+                      onChange={(next) => void onToggle(f.key, next)}
+                      coral
+                      label={f.title}
+                    />
                   </div>
-                  <Toggle on={flags[f.k as keyof Flags]} onChange={() => flip(f.k as keyof Flags)} coral />
-                </div>
-              </CardRow>
-            ))}
+                </CardRow>
+              );
+            })}
+            {flagsState.error && (
+              <div className="px-[18px] py-3 text-[11.5px] text-rose-700 dark:text-rose-300">
+                No se pudo cargar: {flagsState.error}
+              </div>
+            )}
           </div>
         </Card>
       </div>

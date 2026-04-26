@@ -34,6 +34,8 @@ import {
   type PendingBundle,
   type PendingItem,
 } from '@/services/puntoMedioApi';
+import { forceConsolidate } from '@/services/adminApi';
+import { useToast } from '../Toast';
 
 type TabId = 'consolidation' | 'pattern' | 'applied';
 
@@ -46,6 +48,8 @@ export function PuntoMedioSection(): React.ReactElement {
   const [bundle, setBundle] = useState<PendingBundle | null>(null);
   const [busy, setBusy] = useState<Set<number>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  const [forcing, setForcing] = useState(false);
+  const { notify, confirm } = useToast();
 
   const reload = async () => {
     setError(null);
@@ -54,6 +58,26 @@ export function PuntoMedioSection(): React.ReactElement {
       setBundle(b);
     } catch (err) {
       setError((err as Error).message);
+    }
+  };
+
+  const handleForce = async () => {
+    const ok = await confirm({
+      title: 'Forzar consolidación ahora',
+      description:
+        'Cerebro re-consolida los insights pendientes y puede generar nuevos patrones. Toma 1-3 minutos. ¿Seguir?',
+      confirmLabel: 'Forzar',
+    });
+    if (!ok) return;
+    setForcing(true);
+    try {
+      await forceConsolidate();
+      notify({ kind: 'success', text: 'Consolidación encolada. Recargá en unos minutos.' });
+      void reload();
+    } catch (err) {
+      notify({ kind: 'error', text: 'No se pudo forzar consolidación', detail: (err as Error).message });
+    } finally {
+      setForcing(false);
     }
   };
 
@@ -116,8 +140,8 @@ export function PuntoMedioSection(): React.ReactElement {
             <ActionButton variant="ghost" icon={RefreshCw} onClick={() => void reload()}>
               Recargar
             </ActionButton>
-            <ActionButton variant="coral" icon={Zap}>
-              Forzar consolidación
+            <ActionButton variant="coral" icon={Zap} onClick={() => void handleForce()} disabled={forcing}>
+              {forcing ? 'Forzando…' : 'Forzar consolidación'}
             </ActionButton>
           </>
         }

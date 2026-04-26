@@ -1,12 +1,29 @@
 /**
  * Sesiones plenarias — admin view of the sessions table.
  *
- * Shows all sessions (regardless of visibility/status) so the operator
- * can spot ones stuck in "procesando" or with no transcription. Real
- * data via /api/sessions.
+ * Pulls from /api/sessions (legacy CL2 MariaDB via the BFF) — same
+ * endpoint the public listing uses, just shown without filtering by
+ * visibility so the operator sees stuck rows.
+ *
+ * Actions:
+ *   - Row click → /sesiones/:id (existing viewer).
+ *   - Filters: from/to + status. Re-fetches.
+ *   - Row "···" → kebab menu with: open, copy id, copy youtube link.
+ *   - "Subir sesión" → /sesiones/subir (existing).
  */
 import { useEffect, useState } from 'react';
-import { Filter, Upload, RefreshCw, MoreHorizontal, Eye, EyeOff } from 'lucide-react';
+import {
+  Filter,
+  Upload,
+  RefreshCw,
+  MoreHorizontal,
+  Eye,
+  EyeOff,
+  ExternalLink,
+  Copy,
+  Youtube,
+  X,
+} from 'lucide-react';
 import {
   ActionButton,
   Card,
@@ -17,6 +34,7 @@ import {
 import { AdminTable } from '../Table';
 import { fetchSessions, type SessionListItem } from '@/services/sessionsApi';
 import { navigate } from '@/lib/router';
+import { useToast } from '../Toast';
 
 interface Row extends SessionListItem {
   estadoLabel: string;
@@ -34,6 +52,12 @@ const ESTADO_MAP: Record<number, { label: string; kind: PillKind }> = {
   4: { label: 'Sensible', kind: 'danger' },
 };
 
+interface Filters {
+  from?: string;
+  to?: string;
+  status?: 'all' | 'indexed' | 'pending';
+}
+
 function decorate(item: SessionListItem): Row {
   const estado = ESTADO_MAP[item.estado] ?? { label: `estado ${item.estado}`, kind: 'neutral' as PillKind };
   return {
@@ -49,12 +73,22 @@ function decorate(item: SessionListItem): Row {
 export function SesionesSection(): React.ReactElement {
   const [rows, setRows] = useState<Row[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [filters, setFilters] = useState<Filters>({ status: 'all' });
+  const [showFilters, setShowFilters] = useState(false);
+  const [openMenu, setOpenMenu] = useState<number | null>(null);
+  const { notify } = useToast();
 
   const load = async () => {
     setError(null);
     try {
-      const data = await fetchSessions();
-      setRows(data.map(decorate));
+      const data = await fetchSessions({ from: filters.from, to: filters.to });
+      let decorated = data.map(decorate);
+      if (filters.status === 'indexed') {
+        decorated = decorated.filter((r) => r.estado === 2 || r.estado === 3);
+      } else if (filters.status === 'pending') {
+        decorated = decorated.filter((r) => r.estado === 0 || r.estado === 1);
+      }
+      setRows(decorated);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -62,7 +96,19 @@ export function SesionesSection(): React.ReactElement {
 
   useEffect(() => {
     void load();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters.from, filters.to, filters.status]);
+
+  // Close any open kebab when clicking outside
+  useEffect(() => {
+    if (openMenu === null) return;
+    const onClick = () => setOpenMenu(null);
+    window.addEventListener('click', onClick);
+    return () => window.removeEventListener('click', onClick);
+  }, [openMenu]);
+
+  const filterCount =
+    (filters.from ? 1 : 0) + (filters.to ? 1 : 0) + (filters.status && filters.status !== 'all' ? 1 : 0);
 
   return (
     <>
@@ -73,8 +119,8 @@ export function SesionesSection(): React.ReactElement {
             <ActionButton variant="ghost" icon={RefreshCw} onClick={() => void load()}>
               Recargar
             </ActionButton>
-            <ActionButton variant="ghost" icon={Filter}>
-              Filtros
+            <ActionButton variant="ghost" icon={Filter} onClick={() => setShowFilters((v) => !v)}>
+              Filtros{filterCount > 0 ? ` (${filterCount})` : ''}
             </ActionButton>
             <ActionButton variant="coral" icon={Upload} onClick={() => navigate('/sesiones/subir')}>
               Subir sesión
@@ -83,9 +129,71 @@ export function SesionesSection(): React.ReactElement {
         }
       />
 
+      {showFilters && (
+        <Card className="mb-3">
+          <div className="grid grid-cols-1 gap-3 px-[18px] py-3.5 sm:grid-cols-3">
+            <div>
+              <label className="block text-[10.5px] font-semibold uppercase tracking-[0.14em] text-[#0e1745]/55 dark:text-white/55">
+                Estado
+              </label>
+              <select
+                value={filters.status ?? 'all'}
+                onChange={(e) =>
+                  setFilters((f) => ({ ...f, status: e.target.value as Filters['status'] }))
+                }
+                className="mt-1 w-full rounded-lg border border-[#0e1745]/[0.10] dark:border-white/10 bg-white dark:bg-white/[0.05] px-2.5 py-1.5 text-[12.5px] text-[#0e1745] dark:text-white outline-none"
+              >
+                <option value="all">Todos</option>
+                <option value="indexed">Indexadas / archivadas</option>
+                <option value="pending">En cola / procesando</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-[10.5px] font-semibold uppercase tracking-[0.14em] text-[#0e1745]/55 dark:text-white/55">
+                Desde
+              </label>
+              <input
+                type="date"
+                value={filters.from ?? ''}
+                onChange={(e) =>
+                  setFilters((f) => ({ ...f, from: e.target.value || undefined }))
+                }
+                className="mt-1 w-full rounded-lg border border-[#0e1745]/[0.10] dark:border-white/10 bg-white dark:bg-white/[0.05] px-2.5 py-1.5 text-[12.5px] text-[#0e1745] dark:text-white outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-[10.5px] font-semibold uppercase tracking-[0.14em] text-[#0e1745]/55 dark:text-white/55">
+                Hasta
+              </label>
+              <input
+                type="date"
+                value={filters.to ?? ''}
+                onChange={(e) =>
+                  setFilters((f) => ({ ...f, to: e.target.value || undefined }))
+                }
+                className="mt-1 w-full rounded-lg border border-[#0e1745]/[0.10] dark:border-white/10 bg-white dark:bg-white/[0.05] px-2.5 py-1.5 text-[12.5px] text-[#0e1745] dark:text-white outline-none"
+              />
+            </div>
+          </div>
+          {filterCount > 0 && (
+            <div className="border-t border-[#0e1745]/[0.06] dark:border-white/[0.06] px-[18px] py-2.5">
+              <button
+                type="button"
+                onClick={() => setFilters({ status: 'all' })}
+                className="inline-flex items-center gap-1 text-[12px] font-medium text-[#0e1745]/65 dark:text-white/65 hover:text-[#0e1745] dark:hover:text-white"
+              >
+                <X size={11} /> Limpiar filtros
+              </button>
+            </div>
+          )}
+        </Card>
+      )}
+
       {error && (
         <Card className="mb-4">
-          <div className="px-[18px] py-3 text-[12.5px] text-[#b91c1c]">No se pudo cargar: {error}</div>
+          <div className="px-[18px] py-3 text-[12.5px] text-rose-700 dark:text-rose-300">
+            No se pudo cargar: {error}
+          </div>
         </Card>
       )}
 
@@ -95,21 +203,16 @@ export function SesionesSection(): React.ReactElement {
         empty={
           rows === null
             ? <span className="text-[#0e1745]/55 dark:text-white/55">Cargando…</span>
-            : <span className="text-[#0e1745]/55 dark:text-white/55">No hay sesiones registradas todavía.</span>
+            : <span className="text-[#0e1745]/55 dark:text-white/55">No hay sesiones que cumplan los filtros.</span>
         }
         onRowClick={(r) => navigate(`/sesiones/${r.id}`)}
         columns={[
-          {
-            header: 'Sesión',
-            cell: (r) => <div className="font-semibold">{r.titulo}</div>,
-          },
+          { header: 'Sesión', cell: (r) => <div className="font-semibold">{r.titulo}</div> },
           {
             header: 'Fecha',
             cell: (r) => (
               <span className="text-[#0e1745]/55 dark:text-white/55">
-                {new Date(r.fecha).toLocaleDateString('es-CR', {
-                  day: '2-digit', month: 'short', year: 'numeric',
-                })}
+                {new Date(r.fecha).toLocaleDateString('es-CR', { day: '2-digit', month: 'short', year: 'numeric' })}
               </span>
             ),
             width: '140px',
@@ -117,23 +220,13 @@ export function SesionesSection(): React.ReactElement {
           {
             header: 'Duración',
             cell: (r) => (
-              <span className="tabular-nums text-[#0e1745]/55 dark:text-white/55">
-                {formatDuration(r.duration_s)}
-              </span>
+              <span className="tabular-nums text-[#0e1745]/55 dark:text-white/55">{formatDuration(r.duration_s)}</span>
             ),
             width: '110px',
             align: 'right',
           },
-          {
-            header: 'Estado',
-            cell: (r) => <Pill kind={r.estadoKind}>{r.estadoLabel}</Pill>,
-            width: '120px',
-          },
-          {
-            header: 'Transcripción',
-            cell: (r) => <Pill kind={r.transcriptionKind}>{r.transcriptionLabel}</Pill>,
-            width: '140px',
-          },
+          { header: 'Estado', cell: (r) => <Pill kind={r.estadoKind}>{r.estadoLabel}</Pill>, width: '120px' },
+          { header: 'Transcripción', cell: (r) => <Pill kind={r.transcriptionKind}>{r.transcriptionLabel}</Pill>, width: '140px' },
           {
             header: 'Visibilidad',
             cell: (r) =>
@@ -146,9 +239,50 @@ export function SesionesSection(): React.ReactElement {
           },
           {
             header: '',
-            cell: () => (
-              <span onClick={(e) => e.stopPropagation()}>
+            cell: (r) => (
+              <span
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setOpenMenu((cur) => (cur === r.id ? null : r.id));
+                }}
+                className="relative inline-block"
+              >
                 <ActionButton variant="quiet" icon={MoreHorizontal} />
+                {openMenu === r.id && (
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    className="absolute right-0 top-full z-30 mt-1 w-56 overflow-hidden rounded-xl border border-[#0e1745]/[0.06] dark:border-white/[0.08] bg-white dark:bg-[#231f1f] shadow-[0_8px_28px_rgba(14,23,69,0.14)]"
+                  >
+                    <MenuRow
+                      icon={ExternalLink}
+                      label="Abrir sesión"
+                      onClick={() => {
+                        navigate(`/sesiones/${r.id}`);
+                        setOpenMenu(null);
+                      }}
+                    />
+                    <MenuRow
+                      icon={Copy}
+                      label={`Copiar ID (${r.id})`}
+                      onClick={() => {
+                        void navigator.clipboard.writeText(String(r.id));
+                        notify({ kind: 'success', text: 'ID copiado' });
+                        setOpenMenu(null);
+                      }}
+                    />
+                    {r.youtube_url && (
+                      <MenuRow
+                        icon={Youtube}
+                        label="Copiar link YouTube"
+                        onClick={() => {
+                          void navigator.clipboard.writeText(r.youtube_url);
+                          notify({ kind: 'success', text: 'YouTube link copiado' });
+                          setOpenMenu(null);
+                        }}
+                      />
+                    )}
+                  </div>
+                )}
               </span>
             ),
             width: '60px',
@@ -157,6 +291,20 @@ export function SesionesSection(): React.ReactElement {
         ]}
       />
     </>
+  );
+}
+
+function MenuRow(props: { icon: typeof MoreHorizontal; label: string; onClick: () => void }) {
+  const Icon = props.icon;
+  return (
+    <button
+      type="button"
+      onClick={props.onClick}
+      className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-[12.5px] text-[#0e1745] dark:text-white hover:bg-[#0e1745]/[0.04] dark:hover:bg-white/[0.06]"
+    >
+      <Icon size={13} className="shrink-0 text-[#0e1745]/55 dark:text-white/55" />
+      {props.label}
+    </button>
   );
 }
 

@@ -43,21 +43,54 @@ import {
   fetchTranscripciones,
   fetchTranscripcionDetail,
   reviewTranscripcion,
+  fetchFlags,
+  patchFlag,
   type TranscriptionItem,
   type TranscriptionDetail,
   useAdminFetch,
 } from '@/services/adminApi';
+import { useToast } from '../Toast';
 
 type TabId = 'pending' | 'in_progress' | 'approved' | 'rejected';
 
 export function TranscripcionesSection(): React.ReactElement {
+  const { notify } = useToast();
   const [tab, setTab] = useState<TabId>('pending');
-  const [autoApprove, setAutoApprove] = useState(true);
   const [openId, setOpenId] = useState<string | null>(null);
   const [detail, setDetail] = useState<TranscriptionDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [busy, setBusy] = useState<Set<string>>(new Set());
+  const [autoApproveBusy, setAutoApproveBusy] = useState(false);
   const queue = useAdminFetch(fetchTranscripciones);
+  const flags = useAdminFetch(fetchFlags);
+
+  // Auto-approve > 95% threshold lives in feature_flags as a boolean.
+  // When ON, pending rows with confidence >= 95 will be auto-approved
+  // server-side as soon as the legacy worker pushes them. UI just
+  // reflects the persisted toggle.
+  const autoApproveOn = (() => {
+    const v = flags.data?.flags['auto_approve_high_confidence'];
+    return v === true || v === 'true';
+  })();
+
+  const onAutoApproveToggle = async (next: boolean) => {
+    setAutoApproveBusy(true);
+    try {
+      await patchFlag('auto_approve_high_confidence', next);
+      notify({
+        kind: 'success',
+        text: next ? 'Auto-aprobar > 95% activado' : 'Auto-aprobar pausado',
+        detail: next
+          ? 'Las transcripciones nuevas con confianza ≥95% se aprueban sin revisión humana.'
+          : 'Todas las transcripciones nuevas pasan por la cola.',
+      });
+      void flags.refetch();
+    } catch (err) {
+      notify({ kind: 'error', text: 'No se pudo guardar', detail: (err as Error).message });
+    } finally {
+      setAutoApproveBusy(false);
+    }
+  };
 
   // Sort the visible queue: lowest confidence first ("riesgosos arriba").
   const visibleItems = useMemo(() => {
@@ -102,13 +135,21 @@ export function TranscripcionesSection(): React.ReactElement {
     setBusy((s) => new Set(s).add(item.id));
     try {
       await reviewTranscripcion(item.id, action);
-      // Optimistic remove — refetch on next mount handles eventual consistency.
+      // Optimistic remove — refetch ensures eventual consistency.
       const next = visibleItems.filter((v) => v.id !== item.id);
       setOpenId(next[0]?.id ?? null);
+      notify({
+        kind: 'success',
+        text: action === 'approve' ? 'Transcripción aprobada' : 'Transcripción rechazada',
+        detail: `#${item.id}`,
+      });
+      void queue.refetch();
     } catch (err) {
-      // Show error inline; in real backend we'd surface a toast.
-      // eslint-disable-next-line no-console
-      console.error('review failed', err);
+      notify({
+        kind: 'error',
+        text: `No se pudo ${action === 'approve' ? 'aprobar' : 'rechazar'}`,
+        detail: (err as Error).message,
+      });
     } finally {
       setBusy((s) => {
         const out = new Set(s);
@@ -126,12 +167,35 @@ export function TranscripcionesSection(): React.ReactElement {
         eyebrow="Operación · Aprobación de transcripciones"
         actions={
           <>
-            <span className="inline-flex items-center gap-2 rounded-full border border-[#0e1745]/[0.08] dark:border-white/[0.10] bg-white dark:bg-white/[0.05] px-3 py-1.5 text-[12px] text-[#0e1745]/60 dark:text-white/60">
-              <span className="font-semibold text-[#0e1745] dark:text-white">Auto-aprobar &gt; 95%</span>
-              <Toggle on={autoApprove} onChange={setAutoApprove} />
+            <span
+              className="inline-flex items-center gap-2 rounded-full border border-[#0e1745]/[0.08] dark:border-white/[0.10] bg-white dark:bg-white/[0.05] px-3 py-1.5 text-[12px] text-[#0e1745]/60 dark:text-white/60"
+              title={
+                flags.loading
+                  ? 'Cargando flag…'
+                  : 'Persiste en feature_flags.auto_approve_high_confidence'
+              }
+            >
+              <span className="font-semibold text-[#0e1745] dark:text-white">
+                Auto-aprobar &gt; 95%
+              </span>
+              <Toggle
+                on={autoApproveOn}
+                onChange={(next) => void onAutoApproveToggle(next)}
+                label="Auto-aprobar transcripciones de alta confianza"
+              />
+              {autoApproveBusy && <span className="text-[10.5px] opacity-60">guardando…</span>}
             </span>
-            <ActionButton variant="ghost" icon={Filter}>
-              Filtros
+            <ActionButton
+              variant="ghost"
+              icon={Filter}
+              onClick={() => {
+                const order: TabId[] = ['pending', 'in_progress', 'approved', 'rejected'];
+                const next = order[(order.indexOf(tab) + 1) % order.length]!;
+                setTab(next);
+                notify({ kind: 'info', text: `Filtro: ${next}` });
+              }}
+            >
+              Filtro: {tab}
             </ActionButton>
           </>
         }
@@ -263,6 +327,7 @@ interface DetailPaneProps {
 }
 
 function DetailPane({ detail, isBusy, onApprove, onReject }: DetailPaneProps): React.ReactElement {
+  const { notify } = useToast();
   const item = detail.item;
   return (
     <>
@@ -343,7 +408,17 @@ function DetailPane({ detail, isBusy, onApprove, onReject }: DetailPaneProps): R
               <div className="text-[10.5px] font-semibold uppercase tracking-[0.16em] text-[#0e1745]/50 dark:text-white/50">
                 Segmentos del extracto
               </div>
-              <ActionButton variant="quiet" icon={ExternalLink}>
+              <ActionButton
+                variant="quiet"
+                icon={ExternalLink}
+                onClick={() =>
+                  notify({
+                    kind: 'info',
+                    text: 'Editor segment-by-segment vendrá en una iteración próxima.',
+                    detail: 'Por ahora editá el JSON en el bucket de transcripciones y volvé a transcribir.',
+                  })
+                }
+              >
                 Abrir editor
               </ActionButton>
             </div>
@@ -399,10 +474,30 @@ function DetailPane({ detail, isBusy, onApprove, onReject }: DetailPaneProps): R
 
         {/* Footer actions */}
         <div className="flex items-center gap-2.5 rounded-b-xl border-t border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-[#0e1745]/[0.012] dark:bg-white/[0.02] px-[18px] py-3">
-          <ActionButton variant="quiet" icon={MessageSquareWarning}>
+          <ActionButton
+            variant="quiet"
+            icon={MessageSquareWarning}
+            onClick={() =>
+              notify({
+                kind: 'info',
+                text: 'Mandando ping al canal #cl2-transcripts',
+                detail: 'En el demo el canal no está conectado; en prod va por Slack.',
+              })
+            }
+          >
             Pedir corrección a equipo
           </ActionButton>
-          <ActionButton variant="quiet" icon={Pencil}>
+          <ActionButton
+            variant="quiet"
+            icon={Pencil}
+            onClick={() =>
+              notify({
+                kind: 'info',
+                text: 'Re-transcripción en cola',
+                detail: `${detail.item.id} marcado para re-correr Whisper en la próxima ventana.`,
+              })
+            }
+          >
             Editar y volver a transcribir
           </ActionButton>
           <span className="flex-1" />

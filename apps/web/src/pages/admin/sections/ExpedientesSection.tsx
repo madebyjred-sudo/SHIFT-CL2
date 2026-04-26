@@ -18,8 +18,14 @@ import {
   Toggle,
 } from '../primitives';
 import { AdminTable } from '../Table';
-import { fetchAdminSummary, useAdminFetch } from '@/services/adminApi';
+import {
+  fetchAdminSummary,
+  fetchWatchlist,
+  toggleWatchlist,
+  useAdminFetch,
+} from '@/services/adminApi';
 import { navigate } from '@/lib/router';
+import { useToast } from '../Toast';
 
 interface ExpedienteRow {
   id: number;
@@ -32,9 +38,17 @@ interface ExpedienteRow {
 }
 
 export function ExpedientesSection(): React.ReactElement {
+  const { notify } = useToast();
   const summary = useAdminFetch(fetchAdminSummary);
+  const watchlist = useAdminFetch(fetchWatchlist);
   const [rows, setRows] = useState<ExpedienteRow[] | null>(null);
-  const [alerts, setAlerts] = useState<Set<number>>(new Set([0]));
+  const [alerts, setAlerts] = useState<Set<number>>(new Set());
+  const [busyAlerts, setBusyAlerts] = useState<Set<number>>(new Set());
+
+  // Mirror server-side watchlist into local state on first load + after refetch.
+  useEffect(() => {
+    if (watchlist.data?.ids) setAlerts(new Set(watchlist.data.ids));
+  }, [watchlist.data]);
 
   const load = async () => {
     const { data, error } = await supabase
@@ -55,6 +69,34 @@ export function ExpedientesSection(): React.ReactElement {
     void load();
   }, []);
 
+  const handleAlertToggle = async (id: number, next: boolean) => {
+    setBusyAlerts((s) => new Set(s).add(id));
+    // Optimistic flip.
+    setAlerts((s) => {
+      const out = new Set(s);
+      if (next) out.add(id); else out.delete(id);
+      return out;
+    });
+    try {
+      await toggleWatchlist(id, next ? 'add' : 'remove');
+      notify({ kind: 'success', text: next ? `Alerta activada para Exp. ${id}` : `Alerta quitada para Exp. ${id}` });
+    } catch (err) {
+      // Revert on error.
+      setAlerts((s) => {
+        const out = new Set(s);
+        if (next) out.delete(id); else out.add(id);
+        return out;
+      });
+      notify({ kind: 'error', text: 'No se pudo guardar la alerta', detail: (err as Error).message });
+    } finally {
+      setBusyAlerts((s) => {
+        const out = new Set(s);
+        out.delete(id);
+        return out;
+      });
+    }
+  };
+
   return (
     <>
       <SectionHeader
@@ -64,10 +106,31 @@ export function ExpedientesSection(): React.ReactElement {
             <ActionButton variant="ghost" icon={RefreshCw} onClick={() => void load()}>
               Recargar
             </ActionButton>
-            <ActionButton variant="ghost" icon={LinkIcon}>
+            <ActionButton
+              variant="ghost"
+              icon={LinkIcon}
+              onClick={() => {
+                const url = window.prompt('Pegá la URL del expediente en consultassil3.asamblea.go.cr:');
+                if (!url) return;
+                const m = url.match(/expediente=(\d+)/i);
+                if (m) {
+                  navigate(`/expediente/${m[1]}`);
+                } else {
+                  notify({ kind: 'error', text: 'No reconocí el número de expediente en la URL' });
+                }
+              }}
+            >
               Pegar URL del SIL
             </ActionButton>
-            <ActionButton variant="coral" icon={Plus}>
+            <ActionButton
+              variant="coral"
+              icon={Plus}
+              onClick={() => {
+                const num = window.prompt('Número de expediente (ej. 24604):');
+                if (!num || !/^\d+$/.test(num)) return;
+                navigate(`/expediente/${num}`);
+              }}
+            >
               Agregar expediente
             </ActionButton>
           </>
@@ -134,16 +197,13 @@ export function ExpedientesSection(): React.ReactElement {
           {
             header: 'Alerta',
             cell: (r) => (
-              <span onClick={(e) => e.stopPropagation()}>
+              <span
+                onClick={(e) => e.stopPropagation()}
+                title={busyAlerts.has(r.id) ? 'Guardando…' : alerts.has(r.id) ? 'Quitar de mi lista' : 'Agregar a mi lista'}
+              >
                 <Toggle
                   on={alerts.has(r.id)}
-                  onChange={(next) =>
-                    setAlerts((s) => {
-                      const out = new Set(s);
-                      next ? out.add(r.id) : out.delete(r.id);
-                      return out;
-                    })
-                  }
+                  onChange={(next) => void handleAlertToggle(r.id, next)}
                   coral
                 />
               </span>
