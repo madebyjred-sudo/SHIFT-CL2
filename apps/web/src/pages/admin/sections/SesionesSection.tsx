@@ -94,8 +94,8 @@ export function SesionesSection(): React.ReactElement {
         rows={rows ?? []}
         empty={
           rows === null
-            ? <span className="text-[#0e1745]/55">Cargando…</span>
-            : <span className="text-[#0e1745]/55">No hay sesiones registradas todavía.</span>
+            ? <span className="text-[#0e1745]/55 dark:text-white/55">Cargando…</span>
+            : <span className="text-[#0e1745]/55 dark:text-white/55">No hay sesiones registradas todavía.</span>
         }
         onRowClick={(r) => navigate(`/sesiones/${r.id}`)}
         columns={[
@@ -106,7 +106,7 @@ export function SesionesSection(): React.ReactElement {
           {
             header: 'Fecha',
             cell: (r) => (
-              <span className="text-[#0e1745]/55">
+              <span className="text-[#0e1745]/55 dark:text-white/55">
                 {new Date(r.fecha).toLocaleDateString('es-CR', {
                   day: '2-digit', month: 'short', year: 'numeric',
                 })}
@@ -117,7 +117,7 @@ export function SesionesSection(): React.ReactElement {
           {
             header: 'Duración',
             cell: (r) => (
-              <span className="tabular-nums text-[#0e1745]/55">
+              <span className="tabular-nums text-[#0e1745]/55 dark:text-white/55">
                 {formatDuration(r.duration_s)}
               </span>
             ),

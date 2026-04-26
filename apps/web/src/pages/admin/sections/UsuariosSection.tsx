@@ -52,10 +52,10 @@ export function UsuariosSection(): React.ReactElement {
         rows={items}
         empty={
           users.loading
-            ? <span className="text-[#0e1745]/55">Cargando equipo…</span>
+            ? <span className="text-[#0e1745]/55 dark:text-white/55">Cargando equipo…</span>
             : users.error
               ? <span className="text-[#b91c1c]">No se pudo cargar: {users.error}</span>
-              : <span className="text-[#0e1745]/55">No hay usuarios registrados.</span>
+              : <span className="text-[#0e1745]/55 dark:text-white/55">No hay usuarios registrados.</span>
         }
         columns={[
           {
@@ -69,7 +69,7 @@ export function UsuariosSection(): React.ReactElement {
           },
           {
             header: 'Correo',
-            cell: (u) => <span className="font-mono text-[11.5px] text-[#0e1745]/55">{u.email}</span>,
+            cell: (u) => <span className="font-mono text-[11.5px] text-[#0e1745]/55 dark:text-white/55">{u.email}</span>,
           },
           {
             header: 'Rol',
@@ -77,14 +77,14 @@ export function UsuariosSection(): React.ReactElement {
               u.role ? (
                 <Pill kind={roleKind(u.role)}>{u.role}</Pill>
               ) : (
-                <span className="text-[#0e1745]/55">—</span>
+                <span className="text-[#0e1745]/55 dark:text-white/55">—</span>
               ),
             width: '120px',
           },
           {
             header: 'Última actividad',
             cell: (u) => (
-              <span className="text-[#0e1745]/55">
+              <span className="text-[#0e1745]/55 dark:text-white/55">
                 {u.last_sign_in_at ? formatRelative(new Date(u.last_sign_in_at)) : '—'}
               </span>
             ),

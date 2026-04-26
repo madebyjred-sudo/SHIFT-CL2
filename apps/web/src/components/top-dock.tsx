@@ -17,7 +17,7 @@ export function TopDock({ onOpenHistory, onToggleHistory, isHistoryOpen }: TopDo
     : path.startsWith('/sesiones') || path.startsWith('/expediente') ? 'live'
     : 'chat';
   const handleNavigate = (view: 'chat' | 'live' | 'admin') => {
-    if (view === 'admin') navigate('/admin/punto-medio');
+    if (view === 'admin') navigate('/admin/overview');
     else navigate(view === 'live' ? '/sesiones' : '/');
   };
 

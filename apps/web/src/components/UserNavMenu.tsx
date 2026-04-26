@@ -144,7 +144,7 @@ export function UserNavMenu({ currentView = 'chat', onNavigate }: UserNavMenuPro
         onClick={() => onNavigate?.('live')}
       />
       <MenuItem
-        ariaLabel="Admin · Punto Medio"
+        ariaLabel="Admin · Consola"
         icon={<ShieldCheck size={18} strokeWidth={1.75} />}
         isActive={currentView === 'admin'}
         onClick={() => onNavigate?.('admin')}

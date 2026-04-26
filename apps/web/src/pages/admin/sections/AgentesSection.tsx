@@ -130,7 +130,7 @@ export function AgentesSection(): React.ReactElement {
                     >
                       {a.name}
                     </div>
-                    <div className="text-[11px] text-[#0e1745]/55">{a.role}</div>
+                    <div className="text-[11px] text-[#0e1745]/55 dark:text-white/55">{a.role}</div>
                   </div>
                 </div>
               }
@@ -139,14 +139,14 @@ export function AgentesSection(): React.ReactElement {
             <CardBody className="flex flex-col gap-3">
               <div className="flex items-center gap-2">
                 <StatusDot kind={a.health} pulse={a.health === 'green'} />
-                <span className="text-[12px] font-semibold text-[#0e1745]">
+                <span className="text-[12px] font-semibold text-[#0e1745] dark:text-white">
                   {a.health === 'green'
                     ? 'Saludable'
                     : a.health === 'amber'
                       ? 'Latencia alta'
                       : 'Caído'}
                 </span>
-                <span className="ml-auto font-mono text-[11.5px] text-[#0e1745]/55">
+                <span className="ml-auto font-mono text-[11.5px] text-[#0e1745]/55 dark:text-white/55">
                   uptime {a.uptime}
                 </span>
               </div>
@@ -200,15 +200,15 @@ export function AgentesSection(): React.ReactElement {
                 />
               </div>
 
-              <div className="h-px bg-[#0e1745]/[0.06]" />
+              <div className="h-px bg-[#0e1745]/[0.06] dark:bg-white/[0.08]" />
               <div className="flex items-center gap-2">
-                <span className="text-[11.5px] text-[#0e1745]/60">Costo · 24h</span>
-                <span className="ml-auto font-display text-[18px] font-medium tabular-nums text-[#0e1745]">
+                <span className="text-[11.5px] text-[#0e1745]/60 dark:text-white/60">Costo · 24h</span>
+                <span className="ml-auto font-display text-[18px] font-medium tabular-nums text-[#0e1745] dark:text-white">
                   ${a.cost24h.toFixed(2)}
                 </span>
               </div>
             </CardBody>
-            <div className="flex items-center gap-1 rounded-b-xl border-t border-[#0e1745]/[0.06] bg-[#0e1745]/[0.012] px-3 py-2.5">
+            <div className="flex items-center gap-1 rounded-b-xl border-t border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-[#0e1745]/[0.012] dark:bg-white/[0.02] px-3 py-2.5">
               <ActionButton variant="quiet" icon={FileText}>
                 Prompt
               </ActionButton>
@@ -249,7 +249,7 @@ export function AgentesSection(): React.ReactElement {
             },
             {
               header: 'Fallback',
-              cell: (r) => (r.fallback ? <AgentPill id={r.fallback} /> : <span className="text-[#0e1745]/55">—</span>),
+              cell: (r) => (r.fallback ? <AgentPill id={r.fallback} /> : <span className="text-[#0e1745]/55 dark:text-white/55">—</span>),
               width: '140px',
             },
             {
@@ -286,10 +286,10 @@ export function AgentesSection(): React.ReactElement {
 function Metric({ label, value }: { label: string; value: React.ReactNode }): React.ReactElement {
   return (
     <div>
-      <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-[#0e1745]/50">
+      <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-[#0e1745]/50 dark:text-white/50">
         {label}
       </div>
-      <div className="text-[12.5px] text-[#0e1745]">{value}</div>
+      <div className="text-[12.5px] text-[#0e1745] dark:text-white">{value}</div>
     </div>
   );
 }

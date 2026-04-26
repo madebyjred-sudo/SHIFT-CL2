@@ -126,8 +126,8 @@ export function TranscripcionesSection(): React.ReactElement {
         eyebrow="Operación · Aprobación de transcripciones"
         actions={
           <>
-            <span className="inline-flex items-center gap-2 rounded-full border border-[#0e1745]/[0.08] bg-white px-3 py-1.5 text-[12px] text-[#0e1745]/60">
-              <span className="font-semibold text-[#0e1745]">Auto-aprobar &gt; 95%</span>
+            <span className="inline-flex items-center gap-2 rounded-full border border-[#0e1745]/[0.08] dark:border-white/[0.10] bg-white dark:bg-white/[0.05] px-3 py-1.5 text-[12px] text-[#0e1745]/60 dark:text-white/60">
+              <span className="font-semibold text-[#0e1745] dark:text-white">Auto-aprobar &gt; 95%</span>
               <Toggle on={autoApprove} onChange={setAutoApprove} />
             </span>
             <ActionButton variant="ghost" icon={Filter}>
@@ -148,7 +148,7 @@ export function TranscripcionesSection(): React.ReactElement {
           active={tab}
           onChange={setTab}
         />
-        <span className="text-[11.5px] text-[#0e1745]/50">
+        <span className="text-[11.5px] text-[#0e1745]/50 dark:text-white/50">
           · Ordenado por confianza ↑ · los riesgosos arriba
         </span>
         {queue.isMock && (
@@ -185,17 +185,17 @@ export function TranscripcionesSection(): React.ReactElement {
                     key={it.id}
                     type="button"
                     onClick={() => setOpenId(it.id)}
-                    className={`flex w-full cursor-pointer flex-col gap-1.5 border-l-2 border-t border-[#0e1745]/[0.05] bg-transparent px-4 py-3 text-left first:border-t-0 hover:bg-[#0e1745]/[0.015] ${
+                    className={`flex w-full cursor-pointer flex-col gap-1.5 border-l-2 border-t border-[#0e1745]/[0.05] dark:border-white/[0.05] bg-transparent px-4 py-3 text-left first:border-t-0 hover:bg-[#0e1745]/[0.015] dark:hover:bg-white/[0.04] ${
                       isOpen
-                        ? 'border-l-[#F93549] bg-[rgba(249,53,73,0.04)]'
+                        ? 'border-l-cl2-accent bg-cl2-accent/[0.06] dark:bg-cl2-accent/[0.10]'
                         : 'border-l-transparent'
                     }`}
                   >
                     <div className="flex items-center gap-2">
-                      <span className="font-mono text-[11px] text-[#0e1745]/50">
+                      <span className="font-mono text-[11px] text-[#0e1745]/50 dark:text-white/50">
                         #{it.id.split('-')[1]}
                       </span>
-                      <span className="flex-1 text-[13px] font-semibold text-[#0e1745]">
+                      <span className="flex-1 text-[13px] font-semibold text-[#0e1745] dark:text-white">
                         {it.sesion_label}
                       </span>
                       <Pill
@@ -206,7 +206,7 @@ export function TranscripcionesSection(): React.ReactElement {
                         {it.confidence}%
                       </Pill>
                     </div>
-                    <div className="flex items-center gap-2 text-[11.5px] text-[#0e1745]/55">
+                    <div className="flex items-center gap-2 text-[11.5px] text-[#0e1745]/55 dark:text-white/55">
                       <span className="font-mono">{it.expediente ?? '—'}</span>
                       <span>·</span>
                       <span>{formatDate(it.date)}</span>
@@ -230,13 +230,13 @@ export function TranscripcionesSection(): React.ReactElement {
           <div className="flex flex-col gap-4">
             {detailLoading ? (
               <Card>
-                <CardBody className="flex items-center justify-center gap-2 py-12 text-[#0e1745]/50">
+                <CardBody className="flex items-center justify-center gap-2 py-12 text-[#0e1745]/50 dark:text-white/50">
                   <Loader2 size={16} className="animate-spin" /> Cargando detalle…
                 </CardBody>
               </Card>
             ) : !detail ? (
               <Card>
-                <CardBody className="text-center text-[12.5px] text-[#0e1745]/55">
+                <CardBody className="text-center text-[12.5px] text-[#0e1745]/55 dark:text-white/55">
                   Seleccioná una transcripción para revisarla.
                 </CardBody>
               </Card>
@@ -270,12 +270,12 @@ function DetailPane({ detail, isBusy, onApprove, onReject }: DetailPaneProps): R
         <CardHeader
           title={
             <div className="flex flex-col">
-              <span className="text-[11px] font-normal text-[#0e1745]/50">
+              <span className="text-[11px] font-normal text-[#0e1745]/50 dark:text-white/50">
                 {item.sesion_label} · {item.expediente ?? '—'}
               </span>
               <span className="font-display text-[18px] font-normal tracking-tight">
                 Revisión de transcripción{' '}
-                <span className="font-mono text-[12px] font-normal text-[#0e1745]/50">
+                <span className="font-mono text-[12px] font-normal text-[#0e1745]/50 dark:text-white/50">
                   #{item.id}
                 </span>
               </span>
@@ -308,7 +308,7 @@ function DetailPane({ detail, isBusy, onApprove, onReject }: DetailPaneProps): R
                 En revisión
               </div>
             </div>
-            <div className="mt-2.5 flex justify-between text-[11.5px] text-[#0e1745]/55">
+            <div className="mt-2.5 flex justify-between text-[11.5px] text-[#0e1745]/55 dark:text-white/55">
               <span>{item.source}</span>
               <span>
                 {detail.total_segments.toLocaleString('es-CR')} segmentos ·{' '}
@@ -316,8 +316,8 @@ function DetailPane({ detail, isBusy, onApprove, onReject }: DetailPaneProps): R
               </span>
             </div>
 
-            <div className="mt-3.5 rounded-lg border border-[#0e1745]/[0.06] bg-[#0e1745]/[0.03] px-3 py-2.5">
-              <div className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-[#0e1745]/50">
+            <div className="mt-3.5 rounded-lg border border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-[#0e1745]/[0.03] dark:bg-white/[0.04] px-3 py-2.5">
+              <div className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-[#0e1745]/50 dark:text-white/50">
                 Diarización
               </div>
               <div className="flex flex-col gap-1 text-[12px]">
@@ -327,8 +327,8 @@ function DetailPane({ detail, isBusy, onApprove, onReject }: DetailPaneProps): R
                       className="inline-block h-2 w-2 shrink-0 rounded-sm"
                       style={{ background: s.color }}
                     />
-                    <span className="flex-1 text-[#0e1745]">{s.speaker}</span>
-                    <span className="font-mono text-[11px] text-[#0e1745]/55">
+                    <span className="flex-1 text-[#0e1745] dark:text-white">{s.speaker}</span>
+                    <span className="font-mono text-[11px] text-[#0e1745]/55 dark:text-white/55">
                       {formatDuration(s.total_seconds)}
                     </span>
                   </div>
@@ -340,32 +340,32 @@ function DetailPane({ detail, isBusy, onApprove, onReject }: DetailPaneProps): R
           {/* Segments list */}
           <div>
             <div className="mb-2.5 flex items-center justify-between">
-              <div className="text-[10.5px] font-semibold uppercase tracking-[0.16em] text-[#0e1745]/50">
+              <div className="text-[10.5px] font-semibold uppercase tracking-[0.16em] text-[#0e1745]/50 dark:text-white/50">
                 Segmentos del extracto
               </div>
               <ActionButton variant="quiet" icon={ExternalLink}>
                 Abrir editor
               </ActionButton>
             </div>
-            <div className="border-t border-[#0e1745]/[0.06]">
+            <div className="border-t border-[#0e1745]/[0.06] dark:border-white/[0.06]">
               {detail.segments.map((l, i) => (
                 <div
                   key={i}
-                  className={`grid items-baseline gap-2.5 border-b border-dashed border-[#0e1745]/[0.06] py-1.5 text-[12.5px] last:border-b-0 ${
+                  className={`grid items-baseline gap-2.5 border-b border-dashed border-[#0e1745]/[0.06] dark:border-white/[0.06] py-1.5 text-[12.5px] last:border-b-0 ${
                     l.flagged ? 'rounded bg-[rgba(245,158,11,0.06)] px-2' : ''
                   } ${l.highlighted ? 'rounded bg-[rgba(122,59,71,0.06)] px-2 border-b-0' : ''}`}
                   style={{ gridTemplateColumns: '60px 110px 1fr' }}
                 >
-                  <span className="font-mono text-[11px] font-semibold text-[#7A3B47]">{l.ts}</span>
+                  <span className="font-mono text-[11px] font-semibold text-cl2-burgundy dark:text-[#d8a4ad]">{l.ts}</span>
                   <span
                     className={`text-[11.5px] font-semibold ${
-                      l.flagged ? 'text-[#b45309]' : 'text-[#0e1745]/70'
+                      l.flagged ? 'text-[#b45309]' : 'text-[#0e1745]/70 dark:text-white/70'
                     }`}
                   >
                     {l.speaker}
                   </span>
                   <div>
-                    <span className="leading-relaxed text-[#0e1745]">{l.text}</span>
+                    <span className="leading-relaxed text-[#0e1745] dark:text-white">{l.text}</span>
                     <span
                       className="ml-2 font-mono text-[10px]"
                       style={{
@@ -398,7 +398,7 @@ function DetailPane({ detail, isBusy, onApprove, onReject }: DetailPaneProps): R
         </CardBody>
 
         {/* Footer actions */}
-        <div className="flex items-center gap-2.5 rounded-b-xl border-t border-[#0e1745]/[0.06] bg-[#0e1745]/[0.012] px-[18px] py-3">
+        <div className="flex items-center gap-2.5 rounded-b-xl border-t border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-[#0e1745]/[0.012] dark:bg-white/[0.02] px-[18px] py-3">
           <ActionButton variant="quiet" icon={MessageSquareWarning}>
             Pedir corrección a equipo
           </ActionButton>
@@ -433,15 +433,15 @@ function DetailPane({ detail, isBusy, onApprove, onReject }: DetailPaneProps): R
                 Cita verificable
               </Pill>
             </div>
-            <div className="font-mono text-[11px] font-semibold text-[#7A3B47]">
+            <div className="font-mono text-[11px] font-semibold text-cl2-burgundy dark:text-[#d8a4ad]">
               ▶ {item.excerpt_ts} · {item.speaker}
             </div>
-            <div className="mt-1.5 italic leading-relaxed text-[13px] text-[#0e1745]">
+            <div className="mt-1.5 italic leading-relaxed text-[13px] text-[#0e1745] dark:text-white">
               "{item.excerpt}"
             </div>
           </div>
-          <div className="rounded-[10px] border border-[#0e1745]/[0.08] p-3 text-[12px] text-[#0e1745]/70">
-            <div className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-[#0e1745]/50">
+          <div className="rounded-[10px] border border-[#0e1745]/[0.08] p-3 text-[12px] text-[#0e1745]/70 dark:text-white/70">
+            <div className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-[#0e1745]/50 dark:text-white/50">
               Al aprobar
             </div>
             <ul className="m-0 list-disc pl-4 leading-7">

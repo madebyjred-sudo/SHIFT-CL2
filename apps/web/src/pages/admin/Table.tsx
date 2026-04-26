@@ -33,14 +33,14 @@ interface TableProps<T> {
 
 export function AdminTable<T>(props: TableProps<T>): React.ReactElement {
   return (
-    <div className="overflow-hidden rounded-xl border border-[#0e1745]/[0.06] bg-white shadow-[0_2px_10px_rgba(14,23,69,0.04)]">
+    <div className="overflow-hidden rounded-xl border border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-white dark:bg-white/[0.025] shadow-[0_2px_10px_rgba(14,23,69,0.04)] dark:shadow-[0_2px_10px_rgba(0,0,0,0.20)]">
       <table className="w-full border-collapse text-[13px]">
         <thead>
           <tr>
             {props.columns.map((col, i) => (
               <th
                 key={i}
-                className={`border-b border-[#0e1745]/[0.06] bg-[#0e1745]/[0.015] px-3.5 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-[0.14em] text-[#0e1745]/45 ${
+                className={`border-b border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-[#0e1745]/[0.015] dark:bg-white/[0.02] px-3.5 py-2.5 text-left text-[10.5px] font-semibold uppercase tracking-[0.14em] text-[#0e1745]/45 dark:text-white/45 ${
                   col.align === 'right' ? 'text-right' : ''
                 }`}
                 style={col.width ? { width: col.width } : undefined}
@@ -55,7 +55,7 @@ export function AdminTable<T>(props: TableProps<T>): React.ReactElement {
             <tr>
               <td colSpan={props.columns.length} className="px-4 py-8">
                 {props.empty ?? (
-                  <div className="text-center text-[12.5px] text-[#0e1745]/55">
+                  <div className="text-center text-[12.5px] text-[#0e1745]/55 dark:text-white/55">
                     Sin datos para mostrar.
                   </div>
                 )}
@@ -65,7 +65,7 @@ export function AdminTable<T>(props: TableProps<T>): React.ReactElement {
             props.rows.map((row, idx) => (
               <tr
                 key={props.rowKey(row, idx)}
-                className={`text-[#0e1745] transition-colors hover:bg-[#0e1745]/[0.015] ${
+                className={`text-[#0e1745] dark:text-white/90 transition-colors hover:bg-[#0e1745]/[0.02] dark:hover:bg-white/[0.04] ${
                   props.onRowClick ? 'cursor-pointer' : ''
                 }`}
                 onClick={props.onRowClick ? () => props.onRowClick!(row) : undefined}
@@ -73,7 +73,7 @@ export function AdminTable<T>(props: TableProps<T>): React.ReactElement {
                 {props.columns.map((col, ci) => (
                   <td
                     key={ci}
-                    className={`border-b border-[#0e1745]/[0.05] px-3.5 py-3 align-middle last:border-r-0 ${
+                    className={`border-b border-[#0e1745]/[0.05] dark:border-white/[0.05] px-3.5 py-3 align-middle last:border-r-0 ${
                       col.align === 'right' ? 'text-right' : ''
                     } ${col.cellClassName ?? ''}`.trim()}
                   >

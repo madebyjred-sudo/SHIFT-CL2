@@ -46,14 +46,14 @@ export function AuditoriaSection(): React.ReactElement {
         rows={items}
         empty={
           audit.loading
-            ? <span className="text-[#0e1745]/55">Cargando…</span>
-            : <span className="text-[#0e1745]/55">Sin entradas en el log.</span>
+            ? <span className="text-[#0e1745]/55 dark:text-white/55">Cargando…</span>
+            : <span className="text-[#0e1745]/55 dark:text-white/55">Sin entradas en el log.</span>
         }
         columns={[
           {
             header: 'Cuándo',
             cell: (e) => (
-              <span className="font-mono text-[11.5px] tabular-nums text-[#0e1745]/55">
+              <span className="font-mono text-[11.5px] tabular-nums text-[#0e1745]/55 dark:text-white/55">
                 {formatTs(e.ts)}
               </span>
             ),
@@ -76,12 +76,12 @@ export function AuditoriaSection(): React.ReactElement {
           },
           {
             header: 'Recurso',
-            cell: (e) => <span className="text-[#0e1745]/65">{e.resource}</span>,
+            cell: (e) => <span className="text-[#0e1745]/65 dark:text-white/65">{e.resource}</span>,
           },
           {
             header: 'IP',
             cell: (e) => (
-              <span className="font-mono text-[11px] text-[#0e1745]/55">{e.ip ?? '—'}</span>
+              <span className="font-mono text-[11px] text-[#0e1745]/55 dark:text-white/55">{e.ip ?? '—'}</span>
             ),
             width: '120px',
           },

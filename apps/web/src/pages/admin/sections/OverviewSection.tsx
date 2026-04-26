@@ -225,7 +225,7 @@ export function OverviewSection(): React.ReactElement {
             }
             meta={
               <>
-                <span className="font-semibold text-[#E11D48]">
+                <span className="font-semibold text-cl2-accent-hover dark:text-cl2-accent-soft">
                   {totalPending} pendientes
                 </span>
                 · SLA 24h
@@ -238,7 +238,7 @@ export function OverviewSection(): React.ReactElement {
               return (
                 <CardRow key={i}>
                   <div className="flex items-center gap-3.5">
-                    <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-[#0e1745]/[0.04] text-[#0e1745]">
+                    <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-[#0e1745]/[0.04] dark:bg-white/[0.06] text-[#0e1745] dark:text-white">
                       <Icon size={14} />
                     </span>
                     <div className="min-w-0 flex-1">
@@ -246,11 +246,11 @@ export function OverviewSection(): React.ReactElement {
                         <span className="text-[13px] font-semibold">{row.tab}</span>
                         <Pill kind={row.pillKind}>{row.pill}</Pill>
                       </div>
-                      <div className="mt-0.5 text-[11.5px] text-[#0e1745]/55">
+                      <div className="mt-0.5 text-[11.5px] text-[#0e1745]/55 dark:text-white/55">
                         {row.delta}
                       </div>
                     </div>
-                    <span className="min-w-[28px] text-right font-display text-[22px] font-normal tabular-nums text-[#0e1745]">
+                    <span className="min-w-[28px] text-right font-display text-[22px] font-normal tabular-nums text-[#0e1745] dark:text-white">
                       {row.n}
                     </span>
                     <ActionButton variant="quiet" icon={ArrowRight} />
@@ -304,7 +304,7 @@ export function OverviewSection(): React.ReactElement {
               color="#F43F5E"
               secondary="88 q"
             />
-            <div className="my-2 h-px bg-[#0e1745]/[0.06]" />
+            <div className="my-2 h-px bg-[#0e1745]/[0.06] dark:bg-white/[0.08]" />
             <BarRow name="Latencia P50 (ms)" value={1280} max={3000} color="#10b981" secondary="1.28s" />
             <BarRow name="Latencia P95 (ms)" value={2100} max={3000} color="#f59e0b" secondary="2.10s" />
             <BarRow name="Tasa de error" value={0.4} max={5} color="#ef4444" secondary="0.4%" />
@@ -340,10 +340,10 @@ export function OverviewSection(): React.ReactElement {
                         {a.sev === 'danger' ? 'crítica' : 'aviso'}
                       </Pill>
                     </div>
-                    <div className="mt-1 text-[12px] leading-relaxed text-[#0e1745]/65">
+                    <div className="mt-1 text-[12px] leading-relaxed text-[#0e1745]/65 dark:text-white/65">
                       {a.desc}
                     </div>
-                    <div className="mt-1 font-mono text-[11px] text-[#0e1745]/45">{a.when}</div>
+                    <div className="mt-1 font-mono text-[11px] text-[#0e1745]/45 dark:text-white/45">{a.when}</div>
                   </div>
                   <ActionButton variant="ghost" className="self-start">
                     {a.cta}
@@ -371,15 +371,15 @@ export function OverviewSection(): React.ReactElement {
                   <div className="flex items-center gap-3">
                     <Avatar initials={r.initials} color={r.color} />
                     <div className="min-w-0 flex-1">
-                      <div className="text-[13px] text-[#0e1745]">
+                      <div className="text-[13px] text-[#0e1745] dark:text-white">
                         <strong className="font-semibold">{r.who}</strong>{' '}
-                        <span className="text-[#0e1745]/60">{r.verb}</span> {r.what}
+                        <span className="text-[#0e1745]/60 dark:text-white/60">{r.verb}</span> {r.what}
                       </div>
-                      <div className="mt-0.5 font-mono text-[11px] text-[#0e1745]/45">
+                      <div className="mt-0.5 font-mono text-[11px] text-[#0e1745]/45 dark:text-white/45">
                         {r.when} · 26 abr 2026
                       </div>
                     </div>
-                    <span className="text-[#0e1745]/40">
+                    <span className="text-[#0e1745]/40 dark:text-white/40">
                       <Icon size={14} />
                     </span>
                   </div>

@@ -86,15 +86,15 @@ export function ExpedientesSection(): React.ReactElement {
         rows={rows ?? []}
         empty={
           rows === null
-            ? <span className="text-[#0e1745]/55">Cargando…</span>
-            : <span className="text-[#0e1745]/55">No hay expedientes en la base aún.</span>
+            ? <span className="text-[#0e1745]/55 dark:text-white/55">Cargando…</span>
+            : <span className="text-[#0e1745]/55 dark:text-white/55">No hay expedientes en la base aún.</span>
         }
         onRowClick={(r) => navigate(`/expediente/${r.id}`)}
         columns={[
           {
             header: 'Expediente',
             cell: (r) => (
-              <span className="font-mono font-semibold text-[#7A3B47]">Exp. {r.numero}</span>
+              <span className="font-mono font-semibold text-cl2-burgundy dark:text-[#d8a4ad]">Exp. {r.numero}</span>
             ),
             width: '120px',
           },
@@ -109,19 +109,19 @@ export function ExpedientesSection(): React.ReactElement {
           {
             header: 'Comisión',
             cell: (r) =>
-              r.comision ? <Pill kind="lexa">{r.comision}</Pill> : <span className="text-[#0e1745]/55">—</span>,
+              r.comision ? <Pill kind="lexa">{r.comision}</Pill> : <span className="text-[#0e1745]/55 dark:text-white/55">—</span>,
             width: '160px',
           },
           {
             header: 'Estado',
             cell: (r) =>
-              r.estado ? <Pill kind={estadoKind(r.estado)}>{r.estado}</Pill> : <span className="text-[#0e1745]/55">—</span>,
+              r.estado ? <Pill kind={estadoKind(r.estado)}>{r.estado}</Pill> : <span className="text-[#0e1745]/55 dark:text-white/55">—</span>,
             width: '160px',
           },
           {
             header: 'Última act.',
             cell: (r) => (
-              <span className="tabular-nums text-[#0e1745]/55">
+              <span className="tabular-nums text-[#0e1745]/55 dark:text-white/55">
                 {r.fecha_presentacion
                   ? new Date(r.fecha_presentacion).toLocaleDateString('es-CR', {
                       day: '2-digit', month: 'short', year: 'numeric',
@@ -156,7 +156,7 @@ export function ExpedientesSection(): React.ReactElement {
               <a
                 href={`/expediente/${r.id}`}
                 onClick={(e) => e.stopPropagation()}
-                className="inline-flex items-center gap-1 text-[#0e1745]/65 hover:text-[#0e1745]"
+                className="inline-flex items-center gap-1 text-[#0e1745]/65 dark:text-white/65 hover:text-[#0e1745] dark:hover:text-white"
               >
                 <ExternalLink size={12} />
               </a>

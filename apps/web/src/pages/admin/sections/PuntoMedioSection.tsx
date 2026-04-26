@@ -202,7 +202,7 @@ function ItemRow({
     <Card>
       <CardBody className="flex gap-4">
         <div
-          className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl border border-[#0e1745]/[0.06]"
+          className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl border border-[#0e1745]/[0.06] dark:border-white/[0.06]"
           style={{ background: bg }}
         >
           <Icon size={22} color={accent} strokeWidth={1.6} />
@@ -211,17 +211,17 @@ function ItemRow({
           <div className="mb-1 flex flex-wrap items-center gap-2">
             <Pill kind={isPattern ? 'centinela' : 'lexa'}>{isPattern ? 'Patrón' : 'Consolidación'}</Pill>
             <AgentPill id={agentForCategory as 'lexa' | 'atlas' | 'centinela'} />
-            <span className="font-mono text-[11px] text-[#0e1745]/50">
+            <span className="font-mono text-[11px] text-[#0e1745]/50 dark:text-white/50">
               score {item.confidence_score?.toFixed(2) ?? '—'}
             </span>
             {item.source_insight_count != null && (
-              <span className="text-[11px] text-[#0e1745]/50">· {item.source_insight_count} fuentes</span>
+              <span className="text-[11px] text-[#0e1745]/50 dark:text-white/50">· {item.source_insight_count} fuentes</span>
             )}
           </div>
-          <div className="mb-1 font-display text-[17px] font-medium tracking-tight leading-snug text-[#0e1745]">
+          <div className="mb-1 font-display text-[17px] font-medium tracking-tight leading-snug text-[#0e1745] dark:text-white">
             {item.category ?? 'Insight pendiente'}
           </div>
-          <div className="text-[13px] leading-relaxed text-[#0e1745]/70 whitespace-pre-wrap">{text}</div>
+          <div className="text-[13px] leading-relaxed text-[#0e1745]/70 dark:text-white/70 whitespace-pre-wrap">{text}</div>
           <div className="mt-2 flex items-center gap-2">
             {item.source_insight_count != null && (
               <Pill kind="neutral" icon={Link2}>
@@ -236,7 +236,7 @@ function ItemRow({
             </ActionButton>
           </div>
           {item.last_consolidated_at && (
-            <div className="mt-2 text-[10.5px] text-[#0e1745]/45">
+            <div className="mt-2 text-[10.5px] text-[#0e1745]/45 dark:text-white/45">
               Última consolidación: {new Date(item.last_consolidated_at).toLocaleString('es-CR')}
             </div>
           )}
@@ -260,7 +260,7 @@ function SkeletonRows(): React.ReactElement {
       {Array.from({ length: 3 }).map((_, i) => (
         <div
           key={i}
-          className="h-32 animate-pulse rounded-xl border border-[#0e1745]/[0.05] bg-white"
+          className="h-32 animate-pulse rounded-xl border border-[#0e1745]/[0.05] dark:border-white/[0.05] bg-white dark:bg-white/[0.02]"
         />
       ))}
     </div>

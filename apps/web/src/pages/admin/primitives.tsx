@@ -1,9 +1,14 @@
 /**
  * Reusable visual primitives for the admin console.
  *
- * The design package shipped these as JSX globals; we re-implement them
- * as typed React components here. All the section pages compose from
- * these — keeps each section dumb and focused on its data.
+ * Adopt the existing CL2 token system: light mode uses `bg-white` /
+ * `border-[#0e1745]/[0.06]` / `text-[#0e1745]`; dark mode uses
+ * `bg-white/[0.02]` (faint raise on bg-mesh) / `border-white/[0.06]` /
+ * `text-white`. Pills keep their semantic hues but lean on
+ * semi-transparent backgrounds so they sit on either bg cleanly.
+ *
+ * Coral CTA stays the same in both modes (`bg-cl2-accent` / hover
+ * `bg-cl2-accent-hover`) — the brand voice is loud regardless of mode.
  */
 import { type ReactNode } from 'react';
 import { TrendingUp, TrendingDown, Minus, type LucideIcon } from 'lucide-react';
@@ -15,8 +20,8 @@ export function SectionHeader(props: {
   actions?: ReactNode;
 }): React.ReactElement {
   return (
-    <div className="mb-4 flex items-center justify-between gap-6">
-      <div className="text-[10.5px] font-semibold uppercase tracking-[0.18em] text-[#0e1745]/45">
+    <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+      <div className="text-[10.5px] font-semibold uppercase tracking-[0.18em] text-[#0e1745]/45 dark:text-white/45">
         {props.eyebrow}
       </div>
       {props.actions && <div className="flex shrink-0 items-center gap-2">{props.actions}</div>}
@@ -33,21 +38,20 @@ const BUTTON_BASE =
 
 const BUTTON_VARIANTS: Record<ButtonVariant, string> = {
   coral:
-    'bg-[#F93549] text-white shadow-[0_4px_14px_rgba(249,53,73,0.22)] hover:bg-[#E11D48]',
+    'bg-cl2-accent text-white shadow-[0_4px_14px_rgba(249,53,73,0.22)] hover:bg-cl2-accent-hover',
   ghost:
-    'border-[#0e1745]/[0.10] bg-white text-[#0e1745] hover:bg-[#0e1745]/[0.04]',
+    'border-[#0e1745]/[0.10] dark:border-white/10 bg-white dark:bg-white/[0.05] text-[#0e1745] dark:text-white hover:bg-[#0e1745]/[0.04] dark:hover:bg-white/[0.10]',
   quiet:
-    'bg-transparent px-2.5 py-1.5 font-medium text-[#0e1745]/65 hover:bg-[#0e1745]/[0.04] hover:text-[#0e1745]',
+    'bg-transparent px-2.5 py-1.5 font-medium text-[#0e1745]/65 dark:text-white/65 hover:bg-[#0e1745]/[0.04] dark:hover:bg-white/[0.06] hover:text-[#0e1745] dark:hover:text-white',
   approve:
-    'bg-[#10b981] text-white border-[#0e9b6f] px-5 py-[11px] text-[13.5px] font-bold rounded-[9px] shadow-[0_4px_14px_rgba(16,185,129,0.30)] hover:bg-[#0e9b6f] hover:shadow-[0_6px_18px_rgba(16,185,129,0.42)] hover:-translate-y-px',
+    'bg-emerald-600 dark:bg-emerald-500 text-white border-emerald-700 dark:border-emerald-600 px-4 py-2 text-[13px] font-bold rounded-lg shadow-[0_4px_14px_rgba(16,185,129,0.30)] hover:bg-emerald-700 dark:hover:bg-emerald-400 hover:shadow-[0_6px_18px_rgba(16,185,129,0.42)] hover:-translate-y-px',
   reject:
-    'bg-white text-[#b91c1c] border-[1.5px] border-[#ef4444] px-5 py-[11px] text-[13.5px] font-bold rounded-[9px] shadow-[0_2px_6px_rgba(239,68,68,0.10)] hover:bg-[rgba(239,68,68,0.08)] hover:shadow-[0_4px_12px_rgba(239,68,68,0.18)] hover:-translate-y-px',
+    'bg-white dark:bg-transparent text-rose-700 dark:text-rose-300 border-[1.5px] border-rose-500 dark:border-rose-400/60 px-4 py-2 text-[13px] font-bold rounded-lg shadow-[0_2px_6px_rgba(239,68,68,0.10)] hover:bg-rose-50 dark:hover:bg-rose-500/10 hover:shadow-[0_4px_12px_rgba(239,68,68,0.18)] hover:-translate-y-px',
 };
 
 interface ActionButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
   icon?: LucideIcon;
-  /** Smaller variant for inline list rows. */
   size?: 'md' | 'sm';
 }
 
@@ -61,7 +65,7 @@ export function ActionButton({
 }: ActionButtonProps): React.ReactElement {
   const sizeClass =
     size === 'sm' && (variant === 'approve' || variant === 'reject')
-      ? 'px-3 py-1.5 text-[12px] shadow-[0_2px_6px_rgba(16,185,129,0.22)]'
+      ? 'px-3 py-1 text-[11.5px]'
       : '';
   return (
     <button
@@ -90,16 +94,16 @@ export type PillKind =
   | 'amber';
 
 const PILL_VARIANTS: Record<PillKind, string> = {
-  lexa: 'bg-[rgba(122,59,71,0.07)] text-[#7A3B47] border-[rgba(122,59,71,0.20)]',
-  atlas: 'bg-[rgba(139,110,84,0.08)] text-[#8B6E54] border-[rgba(139,110,84,0.30)]',
-  centinela: 'bg-[rgba(244,63,94,0.07)] text-[#F43F5E] border-[rgba(244,63,94,0.30)]',
-  neutral: 'bg-[#0e1745]/[0.04] text-[#0e1745]/70 border-[#0e1745]/[0.10]',
-  success: 'bg-[rgba(16,185,129,0.10)] text-[#047857] border-[rgba(16,185,129,0.28)]',
-  warn: 'bg-[rgba(245,158,11,0.10)] text-[#b45309] border-[rgba(245,158,11,0.28)]',
-  amber: 'bg-[rgba(245,158,11,0.10)] text-[#b45309] border-[rgba(245,158,11,0.28)]',
-  danger: 'bg-[rgba(239,68,68,0.08)] text-[#b91c1c] border-[rgba(239,68,68,0.28)]',
-  info: 'bg-[rgba(21,52,220,0.07)] text-[#1534dc] border-[rgba(21,52,220,0.22)]',
-  coral: 'bg-[rgba(249,53,73,0.08)] text-[#E11D48] border-[rgba(249,53,73,0.22)]',
+  lexa: 'bg-cl2-burgundy/10 text-cl2-burgundy dark:text-[#d8a4ad] border-cl2-burgundy/30',
+  atlas: 'bg-[#8B6E54]/10 text-[#8B6E54] dark:text-[#d4b48f] border-[#8B6E54]/30',
+  centinela: 'bg-rose-500/10 text-rose-600 dark:text-rose-300 border-rose-500/30',
+  neutral: 'bg-[#0e1745]/[0.06] dark:bg-white/[0.06] text-[#0e1745]/70 dark:text-white/70 border-[#0e1745]/[0.10] dark:border-white/[0.12]',
+  success: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30',
+  warn: 'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/30',
+  amber: 'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/30',
+  danger: 'bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/30',
+  info: 'bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/30',
+  coral: 'bg-cl2-accent/10 text-cl2-accent-hover dark:text-cl2-accent-soft border-cl2-accent/30',
 };
 
 export function Pill(props: {
@@ -134,9 +138,9 @@ export function StatusDot(props: {
 }): React.ReactElement {
   const kind = props.kind ?? 'green';
   const ring =
-    kind === 'green' ? 'shadow-[0_0_0_3px_rgba(16,185,129,0.14)]' :
-    kind === 'amber' ? 'shadow-[0_0_0_3px_rgba(245,158,11,0.14)]' :
-    kind === 'rose'  ? 'shadow-[0_0_0_3px_rgba(239,68,68,0.14)]'  : '';
+    kind === 'green' ? 'shadow-[0_0_0_3px_rgba(16,185,129,0.18)]' :
+    kind === 'amber' ? 'shadow-[0_0_0_3px_rgba(245,158,11,0.18)]' :
+    kind === 'rose'  ? 'shadow-[0_0_0_3px_rgba(239,68,68,0.18)]'  : '';
   return (
     <span
       className={`relative inline-block h-[7px] w-[7px] shrink-0 rounded-full ${ring}`}
@@ -161,7 +165,7 @@ export function Card(props: {
 }): React.ReactElement {
   return (
     <div
-      className={`rounded-xl border border-[#0e1745]/[0.06] bg-white shadow-[0_2px_10px_rgba(14,23,69,0.04)] ${props.className ?? ''}`.trim()}
+      className={`rounded-xl border border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-white dark:bg-white/[0.025] shadow-[0_2px_10px_rgba(14,23,69,0.04)] dark:shadow-[0_2px_10px_rgba(0,0,0,0.20)] ${props.className ?? ''}`.trim()}
     >
       {props.children}
     </div>
@@ -171,18 +175,19 @@ export function Card(props: {
 export function CardHeader(props: {
   title: ReactNode;
   meta?: ReactNode;
-  /** Optional left icon on the title. */
   icon?: LucideIcon;
 }): React.ReactElement {
   const Icon = props.icon;
   return (
-    <div className="flex items-center justify-between gap-3 border-b border-[#0e1745]/[0.06] px-[18px] py-3.5">
-      <h3 className="m-0 flex items-center gap-1.5 text-[13px] font-semibold tracking-[-0.005em] text-[#0e1745]">
+    <div className="flex items-center justify-between gap-3 border-b border-[#0e1745]/[0.06] dark:border-white/[0.06] px-[18px] py-3.5">
+      <h3 className="m-0 flex items-center gap-1.5 text-[13px] font-semibold tracking-[-0.005em] text-[#0e1745] dark:text-white">
         {Icon && <Icon size={13} className="align-middle" />}
         {props.title}
       </h3>
       {props.meta && (
-        <span className="flex items-center gap-2.5 text-[11.5px] text-[#0e1745]/55">{props.meta}</span>
+        <span className="flex items-center gap-2.5 text-[11.5px] text-[#0e1745]/55 dark:text-white/55">
+          {props.meta}
+        </span>
       )}
     </div>
   );
@@ -203,7 +208,7 @@ export function CardRow(props: {
 }): React.ReactElement {
   return (
     <div
-      className={`border-t border-[#0e1745]/[0.05] px-[18px] py-3.5 first:border-t-0 hover:bg-[#0e1745]/[0.015] ${props.className ?? ''}`.trim()}
+      className={`border-t border-[#0e1745]/[0.05] dark:border-white/[0.05] px-[18px] py-3.5 first:border-t-0 hover:bg-[#0e1745]/[0.02] dark:hover:bg-white/[0.03] ${props.className ?? ''}`.trim()}
     >
       {props.children}
     </div>
@@ -223,16 +228,21 @@ export function KPI(props: {
 }): React.ReactElement {
   const dir = props.deltaDir ?? 'up';
   const DeltaIcon = dir === 'up' ? TrendingUp : dir === 'down' ? TrendingDown : Minus;
-  const deltaCls = dir === 'up' ? 'text-[#047857]' : dir === 'down' ? 'text-[#b91c1c]' : 'text-[#0e1745]/55';
+  const deltaCls =
+    dir === 'up' ? 'text-emerald-700 dark:text-emerald-300' :
+    dir === 'down' ? 'text-rose-700 dark:text-rose-300' :
+    'text-[#0e1745]/55 dark:text-white/55';
   return (
-    <div className="relative overflow-hidden rounded-xl border border-[#0e1745]/[0.06] bg-white px-[18px] pb-[18px] pt-4 shadow-[0_2px_10px_rgba(14,23,69,0.04)]">
-      <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-[#0e1745]/50">
+    <div className="relative overflow-hidden rounded-xl border border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-white dark:bg-white/[0.025] px-[18px] pb-[18px] pt-4 shadow-[0_2px_10px_rgba(14,23,69,0.04)] dark:shadow-[0_2px_10px_rgba(0,0,0,0.20)]">
+      <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.16em] text-[#0e1745]/50 dark:text-white/50">
         {props.label}
       </div>
-      <div className="mt-1.5 font-display text-[30px] font-normal leading-[1.1] tracking-tight tabular-nums text-[#0e1745]">
+      <div className="mt-1.5 font-display text-[28px] sm:text-[30px] font-normal leading-[1.1] tracking-tight tabular-nums text-[#0e1745] dark:text-white">
         {props.value}
         {props.unit && (
-          <span className="ml-0.5 font-sans text-[14px] text-[#0e1745]/55">{props.unit}</span>
+          <span className="ml-0.5 font-sans text-[14px] text-[#0e1745]/55 dark:text-white/55">
+            {props.unit}
+          </span>
         )}
       </div>
       {props.delta && (
@@ -261,7 +271,7 @@ function Sparkline(props: { data: number[]; color?: string }): React.ReactElemen
     .join(' ');
   return (
     <svg
-      className="pointer-events-none absolute bottom-2.5 right-3 h-[28px] w-[78px] opacity-65"
+      className="pointer-events-none absolute bottom-2.5 right-3 h-[28px] w-[78px] opacity-70"
       viewBox={`0 0 ${w} ${h}`}
       preserveAspectRatio="none"
     >
@@ -285,7 +295,7 @@ export function Toggle(props: {
   coral?: boolean;
   label?: string;
 }): React.ReactElement {
-  const onBg = props.coral ? 'bg-[#F93549]' : 'bg-[#10b981]';
+  const onBg = props.coral ? 'bg-cl2-accent' : 'bg-emerald-500';
   return (
     <button
       type="button"
@@ -294,7 +304,7 @@ export function Toggle(props: {
       aria-label={props.label}
       onClick={() => props.onChange(!props.on)}
       className={`relative h-5 w-9 shrink-0 rounded-full transition-colors duration-150 ${
-        props.on ? onBg : 'bg-[#0e1745]/15'
+        props.on ? onBg : 'bg-[#0e1745]/15 dark:bg-white/15'
       }`}
     >
       <span
@@ -364,16 +374,16 @@ export function BarRow(props: {
   const pct = Math.min(100, (props.value / max) * 100);
   return (
     <div className="flex items-center gap-2.5 py-2 text-[12px]">
-      <div className="flex w-[130px] items-center gap-2 text-[#0e1745]/70">
+      <div className="flex w-[140px] items-center gap-2 text-[#0e1745]/70 dark:text-white/70">
         <span>{props.name}</span>
       </div>
-      <div className="relative h-[6px] flex-1 overflow-hidden rounded bg-[#0e1745]/[0.06]">
+      <div className="relative h-[6px] flex-1 overflow-hidden rounded bg-[#0e1745]/[0.06] dark:bg-white/[0.08]">
         <div
-          className="absolute inset-y-0 left-0 rounded opacity-80"
+          className="absolute inset-y-0 left-0 rounded opacity-85"
           style={{ width: `${pct}%`, background: props.color ?? '#F93549' }}
         />
       </div>
-      <div className="w-16 text-right font-semibold tabular-nums text-[#0e1745]">
+      <div className="w-16 text-right font-semibold tabular-nums text-[#0e1745] dark:text-white">
         {props.secondary ?? props.value}
       </div>
     </div>
@@ -388,7 +398,7 @@ export function Tabs<T extends string>(props: {
   onChange: (next: T) => void;
 }): React.ReactElement {
   return (
-    <div className="inline-flex gap-0.5 rounded-full border border-[#0e1745]/[0.06] bg-[#0e1745]/[0.04] p-[3px]">
+    <div className="inline-flex gap-0.5 rounded-full border border-[#0e1745]/[0.06] dark:border-white/[0.08] bg-[#0e1745]/[0.04] dark:bg-white/[0.04] p-[3px]">
       {props.options.map((opt) => {
         const isActive = props.active === opt.id;
         return (
@@ -398,8 +408,8 @@ export function Tabs<T extends string>(props: {
             onClick={() => props.onChange(opt.id)}
             className={`rounded-full px-3.5 py-1.5 text-[12px] tracking-[-0.005em] transition-colors ${
               isActive
-                ? 'bg-white font-semibold text-[#0e1745] shadow-[0_1px_3px_rgba(14,23,69,0.06)]'
-                : 'font-medium text-[#0e1745]/65 hover:text-[#0e1745]'
+                ? 'bg-white dark:bg-white/[0.12] font-semibold text-[#0e1745] dark:text-white shadow-[0_1px_3px_rgba(14,23,69,0.06)]'
+                : 'font-medium text-[#0e1745]/65 dark:text-white/65 hover:text-[#0e1745] dark:hover:text-white'
             }`}
           >
             {opt.label}
@@ -410,7 +420,7 @@ export function Tabs<T extends string>(props: {
   );
 }
 
-// ─── Eyebrow + Display heading ───────────────────────────────────────
+// ─── Display heading ───────────────────────────────────────
 
 export function DisplayHeading(props: {
   children: ReactNode;
@@ -418,7 +428,7 @@ export function DisplayHeading(props: {
 }): React.ReactElement {
   return (
     <h1
-      className={`m-0 font-display text-[28px] font-normal leading-[1.1] tracking-tight text-[#0e1745] ${props.className ?? ''}`.trim()}
+      className={`m-0 font-display text-[26px] sm:text-[28px] font-normal leading-[1.1] tracking-tight text-[#0e1745] dark:text-white ${props.className ?? ''}`.trim()}
     >
       {props.children}
     </h1>
@@ -435,10 +445,10 @@ export function EmptyState(props: {
 }): React.ReactElement {
   const Icon = props.icon;
   return (
-    <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-[#0e1745]/15 bg-white px-6 py-12 text-center">
-      <Icon size={28} strokeWidth={1.5} className="text-[#0e1745]/40" />
-      <div className="font-display text-[18px] text-[#0e1745]">{props.title}</div>
-      <div className="max-w-md text-[12.5px] leading-relaxed text-[#0e1745]/60">
+    <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-[#0e1745]/15 dark:border-white/15 bg-white/40 dark:bg-white/[0.02] px-6 py-12 text-center">
+      <Icon size={28} strokeWidth={1.5} className="text-[#0e1745]/40 dark:text-white/40" />
+      <div className="font-display text-[18px] text-[#0e1745] dark:text-white">{props.title}</div>
+      <div className="max-w-md text-[12.5px] leading-relaxed text-[#0e1745]/60 dark:text-white/60">
         {props.description}
       </div>
       {props.action}

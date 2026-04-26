@@ -100,9 +100,9 @@ export function ConfigSection(): React.ReactElement {
             ].map((m) => (
               <div key={m.label} className="flex items-center gap-3">
                 <div className="flex-1">
-                  <div className="text-[12px] text-[#0e1745]/60">{m.label}</div>
-                  <div className="font-mono text-[12.5px] font-semibold text-[#0e1745]">{m.value}</div>
-                  <div className="text-[11px] text-[#0e1745]/50">{m.sec}</div>
+                  <div className="text-[12px] text-[#0e1745]/60 dark:text-white/60">{m.label}</div>
+                  <div className="font-mono text-[12.5px] font-semibold text-[#0e1745] dark:text-white">{m.value}</div>
+                  <div className="text-[11px] text-[#0e1745]/50 dark:text-white/50">{m.sec}</div>
                 </div>
                 <ActionButton variant="ghost" icon={Pencil}>
                   Editar
@@ -128,7 +128,7 @@ export function ConfigSection(): React.ReactElement {
                 <div className="flex items-center gap-3">
                   <div className="flex-1">
                     <div className="text-[13px] font-semibold">{f.ttl}</div>
-                    <div className="mt-0.5 text-[11.5px] text-[#0e1745]/55">{f.desc}</div>
+                    <div className="mt-0.5 text-[11.5px] text-[#0e1745]/55 dark:text-white/55">{f.desc}</div>
                   </div>
                   <Toggle on={flags[f.k as keyof Flags]} onChange={() => flip(f.k as keyof Flags)} coral />
                 </div>
@@ -153,11 +153,11 @@ export function ConfigSection(): React.ReactElement {
         {/* Build & entorno */}
         <Card>
           <CardHeader title="Build & entorno" meta={build.isMock ? 'mock' : 'producción'} />
-          <CardBody className="font-mono text-[11.5px] leading-relaxed text-[#0e1745]">
+          <CardBody className="font-mono text-[11.5px] leading-relaxed text-[#0e1745] dark:text-white">
             <div>
-              <span className="text-[#0e1745]/45">$</span> cl2 release info
+              <span className="text-[#0e1745]/45 dark:text-white/45">$</span> cl2 release info
             </div>
-            <div className="mt-1.5 pl-3 text-[#0e1745]/70">
+            <div className="mt-1.5 pl-3 text-[#0e1745]/70 dark:text-white/70">
               <Row k="version" v={build.data?.version ?? '—'} />
               <Row k="build" v={build.data?.build ?? '—'} />
               <Row
@@ -190,8 +190,8 @@ export function ConfigSection(): React.ReactElement {
 function Row(props: { k: string; v: string }): React.ReactElement {
   return (
     <div className="flex items-baseline gap-3">
-      <span className="w-24 shrink-0 text-[#0e1745]/55">{props.k}</span>
-      <span className="text-[#0e1745]">{props.v}</span>
+      <span className="w-24 shrink-0 text-[#0e1745]/55 dark:text-white/55">{props.k}</span>
+      <span className="text-[#0e1745] dark:text-white">{props.v}</span>
     </div>
   );
 }
