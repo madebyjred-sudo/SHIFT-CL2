@@ -565,6 +565,19 @@ function TranscriptPanel({
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const lastClickedIndexRef = useRef<number | null>(null);
 
+  // Track if the user has ever discovered the multi-select shortcut so
+  // we can hide the hint after first use. Persisted to localStorage so
+  // power users don't see the tip on every load.
+  const [didMultiSelect, setDidMultiSelect] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem('cl2.transcript.didMultiSelect') === '1';
+  });
+  const markDiscovered = () => {
+    if (didMultiSelect) return;
+    setDidMultiSelect(true);
+    localStorage.setItem('cl2.transcript.didMultiSelect', '1');
+  };
+
   const toggleOne = (idx: number) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -572,6 +585,7 @@ function TranscriptPanel({
       else next.add(idx);
       return next;
     });
+    markDiscovered();
   };
 
   const selectRange = (anchorIdx: number, headIdx: number) => {
@@ -591,6 +605,7 @@ function TranscriptPanel({
       }
       return next;
     });
+    markDiscovered();
   };
 
   const handleSegmentClick = (
@@ -754,6 +769,21 @@ function TranscriptPanel({
             </div>
           </div>
         </div>
+        {/*
+          Discoverability hint for the multi-select gesture. Renders only
+          while the user has never used shift/cmd+click in this browser.
+          Disappears the first time they do, persisted in localStorage so
+          power users don't get nagged on every visit. Sub-key style:
+          tiny, italic, low contrast — present but not loud.
+        */}
+        {!didMultiSelect && transcript && segments.length > 1 && (
+          <div className="mt-1.5 text-[10.5px] italic text-[#0e1745]/45 dark:text-white/40 flex items-center gap-1.5">
+            <span className="inline-flex items-center font-mono not-italic px-1 py-px rounded text-[9.5px] bg-[#0e1745]/[0.05] dark:bg-white/[0.06] border border-[#0e1745]/[0.06] dark:border-white/[0.08]">
+              shift
+            </span>
+            <span>+ clic en un segmento para seleccionar varios y mandarlos a Lexa</span>
+          </div>
+        )}
       </div>
       <div ref={listRef} className="flex-1 min-h-0 overflow-y-auto px-1 py-2">
         {segments.length === 0 ? (
@@ -792,11 +822,9 @@ function TranscriptPanel({
                     transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)',
                   }}
                 >
-                  <button
-                    type="button"
-                    onClick={(e) => handleSegmentClick(e, seg)}
+                  <div
                     className={cn(
-                      'group w-full text-left px-3 py-2.5 transition-all duration-300',
+                      'group/seg relative w-full transition-all duration-300',
                       isSelected
                         // Selected wins visually over active so the user
                         // sees the picks they accumulated for context.
@@ -805,45 +833,87 @@ function TranscriptPanel({
                           ? 'bg-cl2-burgundy/[0.08] dark:bg-cl2-accent/[0.10] ring-1 ring-inset ring-cl2-burgundy/30 dark:ring-cl2-accent/30 shadow-[inset_2px_0_0_var(--color-cl2-accent)]'
                           : 'hover:bg-cl2-accent/5',
                     )}
-                    title={
-                      isSelected
-                        ? 'Clic normal: ir al segundo · cmd+clic: quitar · shift+clic: rango'
-                        : 'Clic: ir al segundo · cmd+clic: agregar · shift+clic: rango'
-                    }
                   >
-                    <div className="flex items-start gap-3">
-                      <span
-                        className={cn(
-                          'shrink-0 mt-0.5 text-[10px] font-mono tabular-nums transition-colors',
-                          isSelected
-                            ? 'text-cl2-accent font-semibold'
-                            : isActive
-                              ? 'text-cl2-accent font-semibold'
-                              : 'text-gray-400 group-hover:text-cl2-accent',
-                        )}
-                      >
-                        {fmtClock(seg.start)}
-                      </span>
-                      <p
-                        className={cn(
-                          'flex-1 text-[13px] leading-snug transition-colors',
-                          isActive
-                            ? 'text-[#0e1745] dark:text-white font-medium'
-                            : 'text-gray-700 dark:text-gray-300',
-                        )}
-                      >
-                        {seg.text}
-                      </p>
-                      {isSelected && (
+                    <button
+                      type="button"
+                      onClick={(e) => handleSegmentClick(e, seg)}
+                      className="block w-full text-left px-3 py-2.5"
+                      title={
+                        isSelected
+                          ? 'Clic normal: ir al segundo · cmd+clic: quitar · shift+clic: rango'
+                          : 'Clic: ir al segundo · cmd+clic: agregar · shift+clic: rango'
+                      }
+                    >
+                      <div className="flex items-start gap-3">
                         <span
-                          aria-hidden
-                          className="shrink-0 mt-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full bg-cl2-accent text-white"
+                          className={cn(
+                            'shrink-0 mt-0.5 text-[10px] font-mono tabular-nums transition-colors',
+                            isSelected
+                              ? 'text-cl2-accent font-semibold'
+                              : isActive
+                                ? 'text-cl2-accent font-semibold'
+                                : 'text-gray-400 group-hover/seg:text-cl2-accent',
+                          )}
                         >
-                          <CheckIcon size={9} strokeWidth={3} />
+                          {fmtClock(seg.start)}
                         </span>
-                      )}
-                    </div>
-                  </button>
+                        <p
+                          className={cn(
+                            'flex-1 text-[13px] leading-snug transition-colors pr-7',
+                            isActive
+                              ? 'text-[#0e1745] dark:text-white font-medium'
+                              : 'text-gray-700 dark:text-gray-300',
+                          )}
+                        >
+                          {seg.text}
+                        </p>
+                        {isSelected && (
+                          <span
+                            aria-hidden
+                            className="shrink-0 mt-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full bg-cl2-accent text-white"
+                          >
+                            <CheckIcon size={9} strokeWidth={3} />
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                    {/*
+                      Per-segment "Enviar a Lexa" — only on hover, only
+                      when nothing else is selected (otherwise the
+                      floating action bar takes over). Sits absolute
+                      on the right rail so it doesn't push layout.
+                      onMouseDown stopPropagation prevents the click
+                      from bubbling into the row's seek handler.
+                    */}
+                    {onSendToLexa && !isSelected && selected.size === 0 && (
+                      <button
+                        type="button"
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSendToLexa(`[${fmtClock(seg.start)}] ${seg.text}`);
+                        }}
+                        title="Enviar este segmento a Lexa"
+                        className={cn(
+                          'absolute right-2 top-1/2 -translate-y-1/2',
+                          'inline-flex items-center gap-1 px-1.5 py-1 rounded-md',
+                          'text-[10px] font-medium',
+                          'border border-[#0e1745]/[0.10] dark:border-white/[0.10]',
+                          'bg-white/85 dark:bg-[#231f1f]/90 backdrop-blur-sm',
+                          'text-[#0e1745]/70 dark:text-white/70',
+                          'hover:text-cl2-accent hover:border-cl2-accent/40 hover:bg-cl2-accent/[0.06]',
+                          'opacity-0 group-hover/seg:opacity-100 focus-visible:opacity-100 transition-all duration-150',
+                          // Don't disturb focus-mode blur — the hover
+                          // affordance is opt-in by mouse, no need to
+                          // force visibility through the dim.
+                        )}
+                        aria-label="Enviar este segmento a Lexa"
+                      >
+                        <Sparkles size={10} strokeWidth={2.2} />
+                        <span className="hidden sm:inline">A Lexa</span>
+                      </button>
+                    )}
+                  </div>
                 </li>
               );
             })}

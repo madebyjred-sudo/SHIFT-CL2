@@ -112,10 +112,15 @@ export function MessageRenderer({
   /** Optional: enables clickable timecodes inside the message body. */
   onSeek?: (seconds: number) => void;
 }) {
-  // Linkify timecodes only on assistant messages within a scoped session
-  // (where seeking the player makes sense). User messages stay untouched.
+  // Linkify timecodes whenever onSeek is wired — both for the
+  // assistant's citations AND for prefilled user messages that came
+  // from "Enviar a Lexa" in the transcript / resumen panes (those
+  // include bracketed timecodes the user expects to click back into
+  // the player). The `onSeek` prop itself acts as the opt-in: it's
+  // only passed when the chat is scoped to a session viewer, so the
+  // generic /chat surface stays untouched.
   const wrap = (children: React.ReactNode): React.ReactNode =>
-    !isUser && onSeek ? linkifyTimecodes(children, onSeek) : children;
+    onSeek ? linkifyTimecodes(children, onSeek) : children;
 
   return (
     <div className={cn("markdown-body relative group", isUser ? "text-current" : "text-current")}>
