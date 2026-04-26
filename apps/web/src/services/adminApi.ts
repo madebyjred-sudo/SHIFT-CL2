@@ -197,7 +197,23 @@ export const fetchFlags              = () => get<{ flags: FeatureFlags }>('/flag
 export const patchFlag               = (key: string, value: unknown) =>
   send<{ ok: true; key: string; value: unknown }>('PATCH', `/flags/${encodeURIComponent(key)}`, { value });
 
-export const fetchWatchlist          = () => get<{ ids: number[] }>('/watchlist');
+export const fetchWatchlist          = async () => {
+  // Watchlist is best-effort — never block the Expedientes section on
+  // a transient auth/schema hiccup. On error, return an empty bundle
+  // so the page renders with all toggles off; the user can still
+  // toggle individual rows (which hits POST and that path has its
+  // own error handling).
+  try {
+    return await get<{ ids: number[] }>('/watchlist');
+  } catch {
+    return {
+      ok: true as const,
+      mock: false,
+      generated_at: new Date().toISOString(),
+      data: { ids: [] as number[] },
+    };
+  }
+};
 export const toggleWatchlist         = (id: number, action: 'add' | 'remove') =>
   send<{ ok: true }>('POST', `/watchlist/${id}`, { action });
 

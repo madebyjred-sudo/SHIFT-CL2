@@ -35,6 +35,10 @@ export interface PendingBundle {
   pending_consolidations_count: number;
   pending_patterns: PendingItem[];
   pending_patterns_count: number;
+  /** True when the BFF couldn't reach Cerebro and returned an empty
+   *  bundle. UI should show a banner instead of "no hay items". */
+  degraded?: boolean;
+  degraded_reason?: string;
 }
 
 async function authHeaders(extra: HeadersInit = {}): Promise<HeadersInit> {

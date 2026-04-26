@@ -114,15 +114,54 @@ export interface PendingReviewBundle {
   pending_patterns_count: number;
 }
 
+/** Empty bundle returned when the upstream is degraded so the UI can
+ *  render "Cerebro está procesando, refrescá en un minuto" instead of
+ *  flashing 502 errors. The admin route already calls
+ *  invalidateRagCache after a review, so a momentary read failure here
+ *  doesn't poison the chat path. */
+const EMPTY_BUNDLE: PendingReviewBundle = {
+  pending_consolidations: [],
+  pending_consolidations_count: 0,
+  pending_patterns: [],
+  pending_patterns_count: 0,
+};
+
+let lastListInflight: Promise<PendingReviewBundle> | null = null;
+const LIST_TIMEOUT_MS = 6_000;
+const LIST_DEDUPE_MS = 1_500;
+let lastListAt = 0;
+
 export async function listPendingReviews(): Promise<PendingReviewBundle> {
-  return withTimeout(
+  // Dedupe: if we just kicked off a fetch <1.5s ago and it's still in
+  // flight, return that promise. Stops the front-end's auto-refetch
+  // loop from stacking 5 concurrent calls onto an already-slow Cerebro.
+  if (lastListInflight && Date.now() - lastListAt < LIST_DEDUPE_MS) {
+    return lastListInflight;
+  }
+  lastListAt = Date.now();
+  lastListInflight = withTimeout(
     async (signal) => {
       const res = await fetch(`${CEREBRO_BASE_URL}/punto-medio/review`, { signal });
       if (!res.ok) throw new Error(`punto-medio review ${res.status}`);
       return (await res.json()) as PendingReviewBundle;
     },
-    { ms: 8_000, label: 'punto-medio:review_list' },
-  );
+    { ms: LIST_TIMEOUT_MS, label: 'punto-medio:review_list' },
+  ).catch((err) => {
+    // Don't propagate timeouts as exceptions — the queue is informational
+    // and the chat path doesn't depend on it. Return empty + log.
+    if ((err as Error).message?.includes('timed out')) {
+      // eslint-disable-next-line no-console
+      console.warn('[punto-medio] review list timed out, returning empty bundle');
+      return EMPTY_BUNDLE;
+    }
+    throw err;
+  });
+  try {
+    return await lastListInflight;
+  } finally {
+    // Clear after a tick so the dedupe window holds.
+    setTimeout(() => { lastListInflight = null; }, LIST_DEDUPE_MS);
+  }
 }
 
 export async function reviewItem(

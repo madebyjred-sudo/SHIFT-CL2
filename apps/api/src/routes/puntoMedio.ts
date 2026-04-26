@@ -45,11 +45,19 @@ puntoMedioRouter.get('/pending', async (req, res) => {
     res.json({ ok: true, ...bundle });
   } catch (err) {
     req.log.error('punto_medio_list_failed', { error: (err as Error).message });
-    res.status(502).json({
-      ok: false,
-      error: 'cerebro_unavailable',
-      detail: 'no se pudo conectar a Punto Medio en Cerebro',
-      request_id: req.requestId,
+    // Soft-degrade: 200 with empty bundle + `degraded: true` so the UI
+    // shows an informational banner instead of cascading console errors.
+    // Cerebro Railway sometimes blocks for several seconds during the
+    // consolidation cron — the operator data is intact, just temporarily
+    // unreachable. Better UX than a flashing 502.
+    res.json({
+      ok: true,
+      degraded: true,
+      degraded_reason: (err as Error).message ?? 'cerebro_unavailable',
+      pending_consolidations: [],
+      pending_consolidations_count: 0,
+      pending_patterns: [],
+      pending_patterns_count: 0,
     });
   }
 });

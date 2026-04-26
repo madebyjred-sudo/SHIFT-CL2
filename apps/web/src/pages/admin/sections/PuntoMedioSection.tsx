@@ -200,6 +200,22 @@ export function PuntoMedioSection(): React.ReactElement {
         )}
       </div>
 
+      {bundle?.degraded && (
+        <Card className="mb-3 border-amber-500/40 bg-amber-500/[0.06] dark:bg-amber-500/[0.10]">
+          <div className="flex items-start gap-3 px-[18px] py-3">
+            <ScrollText size={16} className="mt-0.5 shrink-0 text-amber-700 dark:text-amber-300" />
+            <div className="flex-1 text-[12.5px] text-amber-800 dark:text-amber-200">
+              <strong className="font-semibold">Cola temporalmente no disponible.</strong>{' '}
+              Cerebro está procesando la consolidación nocturna. Tus aprobaciones
+              previas están vivas (status persistido). Refrescá en un minuto.
+            </div>
+            <ActionButton variant="ghost" onClick={() => void reload()}>
+              Reintentar
+            </ActionButton>
+          </div>
+        </Card>
+      )}
+
       {!bundle ? (
         <SkeletonRows />
       ) : tab === 'live' ? (

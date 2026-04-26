@@ -366,6 +366,9 @@ adminRouter.get('/watchlist', async (req, res) => {
   try {
     const user = await getUserFromRequest(req);
     if (!user) {
+      // Anonymous → empty list (UI knows how to render "no hay alertas").
+      // We don't 401 because the watchlist is a soft personalization, not
+      // a critical surface — every other section degrades gracefully.
       res.json(live({ ids: [] as number[] }));
       return;
     }
@@ -373,9 +376,34 @@ adminRouter.get('/watchlist', async (req, res) => {
       .from('expedientes_watchlist')
       .select('expediente_id')
       .eq('user_id', user.id);
-    if (error) throw new Error(error.message);
+    if (error) {
+      // Specific error from PostgREST. Common case during the demo:
+      // table just got created and the schema cache hadn't propagated
+      // when the first query landed → schema_cache_miss. Restart of the
+      // PostgREST instance fixes it; retry on a 30s window also works.
+      req.log?.warn('admin/watchlist supabase error', {
+        message: error.message,
+        code: (error as { code?: string }).code,
+        hint: (error as { hint?: string }).hint,
+      });
+      // Soft-degrade: empty list + the original message in the response
+      // body (dev only — Express in prod truncates).
+      res.json({
+        ok: true,
+        mock: false,
+        degraded: true,
+        degraded_reason: error.message,
+        generated_at: new Date().toISOString(),
+        data: { ids: [] as number[] },
+      });
+      return;
+    }
     res.json(live({ ids: (data ?? []).map((r) => r.expediente_id as number) }));
   } catch (err) {
+    req.log?.error('admin/watchlist threw', {
+      message: (err as Error).message,
+      stack: (err as Error).stack,
+    });
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
 });
