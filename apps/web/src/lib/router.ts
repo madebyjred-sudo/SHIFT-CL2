@@ -54,3 +54,39 @@ export function matchExpedienteNumero(path: string): string | null {
 export function isAdminPuntoMedio(path: string): boolean {
   return /^\/admin\/punto-medio\/?$/.test(path);
 }
+
+/**
+ * The admin console lives under /admin (with a sidebar nav) and exposes
+ * one route per section. `matchAdminSection` returns the section id when
+ * the path is /admin/<section>, or null if not an admin path. Exact path
+ * /admin (no section) defaults to 'overview' downstream.
+ */
+export type AdminSection =
+  | 'overview'
+  | 'transcripciones'
+  | 'agentes'
+  | 'punto-medio'
+  | 'sesiones'
+  | 'expedientes'
+  | 'usuarios'
+  | 'auditoria'
+  | 'config';
+
+const ADMIN_SECTIONS: ReadonlyArray<AdminSection> = [
+  'overview',
+  'transcripciones',
+  'agentes',
+  'punto-medio',
+  'sesiones',
+  'expedientes',
+  'usuarios',
+  'auditoria',
+  'config',
+];
+
+export function matchAdminSection(path: string): AdminSection | null {
+  if (/^\/admin\/?$/.test(path)) return 'overview';
+  const m = path.match(/^\/admin\/([a-z-]+)\/?$/);
+  if (!m) return null;
+  return ADMIN_SECTIONS.includes(m[1] as AdminSection) ? (m[1] as AdminSection) : null;
+}

@@ -8,12 +8,12 @@ import { ErrorBoundary } from './components/error-boundary';
 import { SupabaseAuthView } from './components/SupabaseAuthView';
 import { AuthCallback } from './components/AuthCallback';
 import { useSupabaseStore } from './store/useSupabaseStore';
-import { useRoute, matchSesionId, matchExpedienteNumero, isAdminPuntoMedio } from './lib/router';
+import { useRoute, matchSesionId, matchExpedienteNumero, matchAdminSection } from './lib/router';
 import { SesionesListPage } from './pages/SesionesListPage';
 import { SesionViewPage } from './pages/SesionViewPage';
 import { SubirSesionPage } from './pages/SubirSesionPage';
 import { ExpedienteViewPage } from './pages/ExpedienteViewPage';
-import { AdminPuntoMedioPage } from './pages/AdminPuntoMedioPage';
+import { AdminApp } from './pages/admin/AdminApp';
 import { cn } from '@/lib/utils';
 
 export default function App() {
@@ -53,6 +53,7 @@ export default function App() {
 
   const sesionId = matchSesionId(path);
   const expedienteNumero = matchExpedienteNumero(path);
+  const adminSection = matchAdminSection(path);
 
   return (
     <ErrorBoundary>
@@ -66,8 +67,8 @@ export default function App() {
             <SesionViewPage sesionId={sesionId} />
           ) : expedienteNumero ? (
             <ExpedienteViewPage numero={Number(expedienteNumero)} />
-          ) : isAdminPuntoMedio(path) ? (
-            <AdminPuntoMedioPage />
+          ) : adminSection ? (
+            <AdminApp section={adminSection} />
           ) : (
           <div className="h-screen flex flex-col bg-gray-50 dark:bg-mesh text-gray-900 dark:text-white font-sans relative overflow-hidden transition-colors duration-500">
             {/* Pixel dotted overlay — barely visible */}
