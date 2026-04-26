@@ -23,11 +23,15 @@ const OR_BASE = 'https://openrouter.ai/api/v1';
 const SCRIPT_TIMEOUT_MS = 60_000;
 
 export interface PodcastSegment {
-  /** Single host for P1 — kept as a field so we can extend to dialogue (host/guest) later. */
-  speaker: 'host';
+  /**
+   * 'host' = anchor / interviewer voice (uses row.voice_id).
+   * 'guest' = analyst / expert voice (uses PODCAST_VOICE_GUEST_ID env).
+   * Single-voice modes only emit 'host' segments.
+   */
+  speaker: 'host' | 'guest';
   text: string;
   /** Optional emotion hint for v3 audio tags. Ignored on multilingual_v2. */
-  emotion?: 'neutral' | 'thoughtful' | 'serious' | 'curious';
+  emotion?: 'neutral' | 'thoughtful' | 'serious' | 'curious' | 'excited' | 'sceptical';
 }
 
 export interface PodcastScript {
@@ -130,15 +134,15 @@ function buildScriptSystemPrompt(
   charsBudget: number,
 ): string {
   const minutes = Math.round((durationS / 60) * 10) / 10;
-  const tone =
-    style === 'informativo'
-      ? 'Tono informativo, profesional, directo. Como un briefing de radio pública.'
-      : 'Tono conversacional, accesible, con calidez. Como una entrevista relajada.';
+  if (style === 'conversacional') return buildDialoguePrompt(minutes, charsBudget);
+  return buildMonologuePrompt(minutes, charsBudget);
+}
 
+function buildMonologuePrompt(minutes: number, charsBudget: number): string {
   return [
     'Sos Lexa, asesora legislativa de CL2. Escribís el guion de un mini-podcast narrado a una sola voz (host).',
     `Duración objetivo: ${minutes} minutos (~${charsBudget} caracteres totales en los segmentos).`,
-    tone,
+    'Tono informativo, profesional, directo. Como un briefing de radio pública.',
     '',
     'REGLAS DEL GUION:',
     '- Español de Costa Rica neutro: "vos" no "tú", "acá" no "aquí". Plenario, fracción, expediente, comisión, dictamen — terminología real.',
@@ -153,6 +157,38 @@ function buildScriptSystemPrompt(
     '  "title": "Título corto editorial (máximo 80 caracteres)",',
     '  "segments": [',
     '    { "speaker": "host", "text": "...", "emotion": "neutral|thoughtful|serious|curious" }',
+    '  ]',
+    '}',
+    'Devolvé SOLO el JSON, sin texto adicional, sin markdown, sin ```.',
+  ].join('\n');
+}
+
+function buildDialoguePrompt(minutes: number, charsBudget: number): string {
+  return [
+    'Estás escribiendo el guion de un mini-podcast en formato ENTREVISTA entre dos personas:',
+    '- HOST: anchor / conductora del podcast. Hace preguntas, contextualiza, cierra cada segmento. Voz cálida, periodística.',
+    '- GUEST: Lexa, asesora legislativa de CL2. Responde con datos del archivo, cita expedientes/artículos, mantiene autoridad técnica sin sonar acartonada.',
+    '',
+    `Duración objetivo: ${minutes} minutos (~${charsBudget} caracteres totales sumando ambas voces).`,
+    'Tono conversacional, accesible, con calidez. Pensá en una sección de "Dateline" con dos personas, no un monólogo cortado.',
+    '',
+    'REGLAS DEL GUION:',
+    '- Empezá con HOST presentando el tema en 1-2 oraciones — sin saludo formal, directo al gancho.',
+    '- Alterná HOST → GUEST → HOST → GUEST. Segmentos de 1-3 oraciones cada uno (40-200 caracteres). Pausas entre ideas, ritmo de podcast.',
+    '- HOST puede repreguntar, repetir un dato para énfasis, dudar abiertamente ("¿espera, eso quiere decir que...?"). GUEST responde con precisión, sin condescender.',
+    '- Cerrá con HOST formulando la implicación política o la pregunta abierta, no con un resumen seco.',
+    '- Español de Costa Rica neutro: "vos" no "tú", "acá" no "aquí". Plenario, fracción, expediente, comisión, dictamen.',
+    '- Cada afirmación factual de GUEST basada en el material fuente. Si no aparece, no lo decís.',
+    '- Cuando GUEST cite un expediente o artículo, en voz alta y natural: "expediente veintidós mil novecientos dieciocho", "artículo ciento trece del Reglamento". Sin corchetes, sin números técnicos crudos.',
+    '- Sin AI hype, sin "inteligencia artificial", sin "soy un asistente" — GUEST se llama Lexa y punto.',
+    '- Emociones disponibles para audio tags v3: neutral, thoughtful, serious, curious, excited, sceptical. Usalas con moderación, no en cada segmento.',
+    '',
+    'FORMATO DE SALIDA — JSON estricto:',
+    '{',
+    '  "title": "Título corto editorial (máximo 80 caracteres)",',
+    '  "segments": [',
+    '    { "speaker": "host", "text": "...", "emotion": "curious" },',
+    '    { "speaker": "guest", "text": "...", "emotion": "thoughtful" }',
     '  ]',
     '}',
     'Devolvé SOLO el JSON, sin texto adicional, sin markdown, sin ```.',
@@ -188,13 +224,14 @@ function validateScript(raw: unknown): PodcastScript {
     const seg = s as Record<string, unknown>;
     const text = typeof seg.text === 'string' ? seg.text.trim() : '';
     if (!text) continue;
+    const speaker: PodcastSegment['speaker'] =
+      seg.speaker === 'guest' ? 'guest' : 'host';
     const emotion = (() => {
       const e = typeof seg.emotion === 'string' ? seg.emotion : 'neutral';
-      return ['neutral', 'thoughtful', 'serious', 'curious'].includes(e)
-        ? (e as PodcastSegment['emotion'])
-        : 'neutral';
+      const allowed = ['neutral', 'thoughtful', 'serious', 'curious', 'excited', 'sceptical'];
+      return allowed.includes(e) ? (e as PodcastSegment['emotion']) : 'neutral';
     })();
-    validated.push({ speaker: 'host', text, emotion });
+    validated.push({ speaker, text, emotion });
     total += text.length;
   }
   if (validated.length === 0) throw new Error('script: no valid segments');

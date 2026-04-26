@@ -143,6 +143,10 @@ export async function generateMonologue(args: MonologueArgs): Promise<Buffer> {
  * fine for Costa Rica neutral Spanish.
  *
  * Env names match the names exposed to the client so audit is trivial.
+ *
+ * In dialogue mode (style='conversacional'), `voice_id` selected here
+ * is the HOST; the GUEST uses PODCAST_VOICE_GUEST_ID (env-fixed, not
+ * exposed to the client UI).
  */
 export interface WhitelistedVoice {
   id: string;
@@ -167,4 +171,94 @@ export function whitelistedVoices(): WhitelistedVoice[] {
 
 export function isVoiceWhitelisted(id: string): boolean {
   return whitelistedVoices().some((v) => v.id === id);
+}
+
+/** Guest voice ID for dialogue mode. Fallback to the second whitelist entry. */
+export function guestVoiceId(): string {
+  return process.env.PODCAST_VOICE_GUEST_ID ?? whitelistedVoices()[1]?.id ?? whitelistedVoices()[0].id;
+}
+
+/**
+ * Model selection. `eleven_v3` understands inline audio tags like
+ * [thoughtful]; `eleven_multilingual_v2` ignores them. We default to
+ * v3 only when explicitly opted-in via env, since v3 may be flagged
+ * as preview/limited on some accounts and we don't want to silently
+ * regress mp3 quality if the model isn't enabled.
+ */
+export function pickTtsModel(opts: { dialogue: boolean }): string {
+  if (opts.dialogue && process.env.PODCAST_DIALOGUE_MODEL) {
+    return process.env.PODCAST_DIALOGUE_MODEL;
+  }
+  return process.env.PODCAST_MODEL ?? 'eleven_multilingual_v2';
+}
+
+/**
+ * Wrap a segment text with a v3 audio tag if the model supports it.
+ * No-op for multilingual_v2 — emotion tags don't bleed because
+ * multilingual_v2 silently drops bracketed text unless it matches
+ * SSML which we don't use.
+ */
+export function applyEmotionTag(text: string, emotion: string | undefined, model: string): string {
+  if (!emotion || emotion === 'neutral') return text;
+  if (!/v3/.test(model)) return text;
+  // v3 expects the tag at the very start of the line.
+  return `[${emotion}] ${text}`;
+}
+
+// ─── Speech-to-Text (Scribe) ──────────────────────────────────────────
+//
+// ElevenLabs Scribe is the cheap STT tier (~$0.40/hour ≈ $0.0067/min) —
+// the right choice for "voice → prompt" UX where we only need the text
+// back to stuff into the textarea. We pass language_code='spa' explicitly
+// because the auto-detect step adds latency and Costa Rica use is 100%
+// Spanish.
+//
+// Cost guardrails on the caller side:
+//   - audio capped at 25MB at the multer layer (≈25 min of webm/opus)
+//   - tag_audio_events=false → cheaper tier, no laughter/[applause] tags
+//   - timestamps_granularity='none' → less data shipped back
+//
+// Returns just the transcript text. If you need word-level timestamps
+// later (e.g., to highlight while playing back), bump granularity here.
+const STT_TIMEOUT_MS = 60_000;
+
+export async function transcribeAudio(audio: Buffer, mimeType: string): Promise<string> {
+  const form = new FormData();
+  // ElevenLabs accepts webm/ogg/mp3/m4a/wav — pass through whatever
+  // MediaRecorder gave us. Filename is cosmetic on their side but the
+  // mime in the Blob is what they sniff for codec.
+  const blob = new Blob([audio], { type: mimeType || 'audio/webm' });
+  const ext = mimeType.includes('webm') ? 'webm'
+    : mimeType.includes('ogg') ? 'ogg'
+    : mimeType.includes('mp3') ? 'mp3'
+    : mimeType.includes('mp4') ? 'm4a'
+    : 'wav';
+  form.append('file', blob, `recording.${ext}`);
+  form.append('model_id', 'scribe_v1');
+  form.append('language_code', 'spa');
+  form.append('tag_audio_events', 'false');
+  form.append('timestamps_granularity', 'none');
+
+  const res = await withTimeout(
+    () => fetch(`${EL_BASE}/v1/speech-to-text`, {
+      method: 'POST',
+      headers: { 'xi-api-key': key() },
+      body: form,
+    }),
+    { ms: STT_TIMEOUT_MS, label: 'elevenlabs:stt' },
+  );
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    logger.warn('elevenlabs_stt_failed', {
+      status: res.status,
+      bytes: audio.length,
+      mimeType,
+      detail: detail.slice(0, 300),
+    });
+    throw new Error(`elevenlabs stt ${res.status}: ${detail.slice(0, 200)}`);
+  }
+
+  const json = await res.json() as { text?: string };
+  return (json.text ?? '').trim();
 }

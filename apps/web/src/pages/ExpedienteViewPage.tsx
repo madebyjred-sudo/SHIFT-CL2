@@ -15,7 +15,8 @@
  *   └──────────────────────┴──────────────────────┘
  */
 import { useEffect, useState, type MouseEvent } from 'react';
-import { ArrowLeft, Download, ExternalLink, FileText, Gavel, Calendar, Users, Building2, Scale } from 'lucide-react';
+import { ArrowLeft, Download, ExternalLink, FileText, Gavel, Calendar, Headphones, Users, Building2, Scale } from 'lucide-react';
+import { PodcastModal } from '@/components/podcasts/PodcastModal';
 import { TopDock } from '@/components/top-dock';
 import { navigate } from '@/lib/router';
 import { fetchExpediente, resolveDocUrl, type Expediente, type ExpedienteDoc } from '@/services/expedientesApi';
@@ -49,6 +50,7 @@ function tipoLabel(tipo: string): { label: string; cls: string } {
 export function ExpedienteViewPage({ numero }: Props) {
   const [exp, setExp] = useState<Expediente | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [podcastOpen, setPodcastOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -105,6 +107,16 @@ export function ExpedienteViewPage({ numero }: Props) {
               {exp?.titulo ?? 'Cargando…'}
             </h1>
           </div>
+          <button
+            type="button"
+            onClick={() => setPodcastOpen(true)}
+            disabled={!exp}
+            title="Generar podcast — narrado por Lexa"
+            className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-cl2-burgundy/10 text-cl2-burgundy dark:bg-cl2-accent/15 dark:text-cl2-accent-soft hover:bg-cl2-burgundy/15 dark:hover:bg-cl2-accent/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Headphones size={13} />
+            Generar podcast
+          </button>
           {exp?.url_detalle && (
             <a
               href={exp.url_detalle}
@@ -118,6 +130,15 @@ export function ExpedienteViewPage({ numero }: Props) {
           )}
         </div>
       </div>
+      {exp && (
+        <PodcastModal
+          open={podcastOpen}
+          onClose={() => setPodcastOpen(false)}
+          source_type="expediente"
+          source_id={String(exp.id)}
+          source_title={`Exp. ${exp.numero}${exp.titulo ? ' — ' + exp.titulo : ''}`}
+        />
+      )}
 
       <main className="relative z-20 flex-1 min-h-0 max-w-[1400px] w-full mx-auto px-4 sm:px-6 md:px-8 py-4 overflow-y-auto">
         <div className="grid grid-cols-1 md:grid-cols-[40fr_60fr] gap-4 lg:gap-6">

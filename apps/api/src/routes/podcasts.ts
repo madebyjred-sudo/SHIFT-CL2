@@ -25,6 +25,9 @@ import {
   generateMonologue,
   whitelistedVoices,
   isVoiceWhitelisted,
+  guestVoiceId,
+  pickTtsModel,
+  applyEmotionTag,
 } from '../services/elevenlabsClient.js';
 import { generatePodcastScript, type PodcastScript } from '../services/podcastScript.js';
 import { uploadPodcastAudio, signPodcastAudio } from '../services/podcastStorage.js';
@@ -312,11 +315,23 @@ async function runWorker(podcastId: string, userId: string): Promise<void> {
       })
       .eq('id', podcastId);
 
-    // Step 3: TTS — concat per-segment mp3 buffers.
+    // Step 3: TTS — concat per-segment mp3 buffers. Dialogue mode picks
+    // a different voice per speaker and uses v3 if enabled (so emotion
+    // tags actually render). Monologue mode uses host voice + multilingual_v2.
+    const isDialogue = r.style === 'conversacional';
+    const modelId = pickTtsModel({ dialogue: isDialogue });
+    const guestId = guestVoiceId();
     const buffers: Buffer[] = [];
     for (let i = 0; i < script.segments.length; i++) {
       const seg = script.segments[i];
-      const mp3 = await generateMonologue({ voiceId: r.voice_id, text: seg.text });
+      const useGuest = isDialogue && seg.speaker === 'guest';
+      const voiceForSegment = useGuest ? guestId : r.voice_id;
+      const text = applyEmotionTag(seg.text, seg.emotion, modelId);
+      const mp3 = await generateMonologue({
+        voiceId: voiceForSegment,
+        text,
+        modelId,
+      });
       buffers.push(mp3);
       const pct = 30 + Math.round(((i + 1) / script.segments.length) * 50);
       await supa().from('podcasts').update({ progress: pct }).eq('id', podcastId);

@@ -42,6 +42,12 @@ export type PodcastStatus =
   | 'cancelled';
 
 export type PodcastSourceType = 'sesion' | 'expediente' | 'chat';
+/**
+ * 'informativo' = single host narrating a briefing. Compact, factual.
+ * 'conversacional' = host + analyst dialogue. More dynamic, slightly
+ * longer per duration target since two speakers exchange shorter
+ * segments. Dialogue mode uses the v3 ElevenLabs model when available.
+ */
 export type PodcastStyle = 'informativo' | 'conversacional';
 
 export interface PodcastRow {
