@@ -154,28 +154,86 @@ export interface WhitelistedVoice {
   description: string;
 }
 
-export function whitelistedVoices(): WhitelistedVoice[] {
+/**
+ * Resolve whitelisted voices for the podcast UI.
+ *
+ * Priority:
+ *   1. Explicit env vars PODCAST_VOICE_HOST_ID / PODCAST_VOICE_GUEST_ID
+ *      → use those; fastest path, no extra API call.
+ *   2. No env vars → call listVoices() (cached 24h) and map the first
+ *      N voices from the account into host/analyst slots so the UI
+ *      always has valid IDs regardless of which voices the account has.
+ *
+ * This avoids hardcoding public-library voice IDs that may not exist
+ * in every ElevenLabs account.
+ */
+export async function resolveWhitelistedVoices(): Promise<WhitelistedVoice[]> {
+  const envHost = process.env.PODCAST_VOICE_HOST_ID;
+  const envGuest = process.env.PODCAST_VOICE_GUEST_ID;
+
+  if (envHost && envGuest) {
+    return [
+      {
+        id: envHost,
+        label: 'Anfitriona',
+        description: 'Voz cálida y conversacional. Buena para resúmenes y briefings.',
+      },
+      {
+        id: envGuest,
+        label: 'Analista',
+        description: 'Voz neutra y autoritativa. Buena para análisis técnico.',
+      },
+    ];
+  }
+
+  // Fetch real voices from the account.
+  const accountVoices = await listVoices();
+  if (accountVoices.length === 0) {
+    throw new Error('No voices found in ElevenLabs account. Add at least one voice to your library.');
+  }
+
+  // If only host env is set, pair with second account voice for guest.
+  const hostVoice = envHost
+    ? accountVoices.find((v) => v.voice_id === envHost) ?? accountVoices[0]
+    : accountVoices[0];
+  const guestVoice = envGuest
+    ? accountVoices.find((v) => v.voice_id === envGuest) ?? accountVoices[1] ?? accountVoices[0]
+    : accountVoices[1] ?? accountVoices[0];
+
   return [
     {
-      id: process.env.PODCAST_VOICE_HOST_ID ?? 'EXAVITQu4vr4xnSDxMAY',
-      label: 'Anfitriona',
+      id: hostVoice.voice_id,
+      label: envHost ? 'Anfitriona' : hostVoice.name,
       description: 'Voz cálida y conversacional. Buena para resúmenes y briefings.',
     },
     {
-      id: process.env.PODCAST_VOICE_GUEST_ID ?? 'JBFqnCBsd6RMkjVDRZzb',
-      label: 'Analista',
+      id: guestVoice.voice_id,
+      label: envGuest ? 'Analista' : guestVoice.name,
       description: 'Voz neutra y autoritativa. Buena para análisis técnico.',
     },
   ];
 }
 
-export function isVoiceWhitelisted(id: string): boolean {
-  return whitelistedVoices().some((v) => v.id === id);
+/** Sync access kept only for backwards compat — returns empty when env vars absent. */
+export function whitelistedVoices(): WhitelistedVoice[] {
+  const envHost = process.env.PODCAST_VOICE_HOST_ID;
+  const envGuest = process.env.PODCAST_VOICE_GUEST_ID;
+  if (!envHost || !envGuest) return [];
+  return [
+    { id: envHost, label: 'Anfitriona', description: 'Voz cálida y conversacional.' },
+    { id: envGuest, label: 'Analista', description: 'Voz neutra y autoritativa.' },
+  ];
 }
 
-/** Guest voice ID for dialogue mode. Fallback to the second whitelist entry. */
-export function guestVoiceId(): string {
-  return process.env.PODCAST_VOICE_GUEST_ID ?? whitelistedVoices()[1]?.id ?? whitelistedVoices()[0].id;
+export async function isVoiceWhitelisted(id: string): Promise<boolean> {
+  const voices = await resolveWhitelistedVoices();
+  return voices.some((v) => v.id === id);
+}
+
+/** Guest voice ID for dialogue mode. */
+export async function guestVoiceId(): Promise<string> {
+  const voices = await resolveWhitelistedVoices();
+  return voices[1]?.id ?? voices[0].id;
 }
 
 /**

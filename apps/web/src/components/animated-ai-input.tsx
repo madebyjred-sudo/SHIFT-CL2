@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Info,
@@ -12,8 +12,18 @@ import {
   FileText,
   Headphones,
   Loader2,
+  Layers,
+  BookOpen,
+  Bot,
+  MessageSquare,
+  Hammer,
+  Pencil,
+  Copy as CopyIcon,
+  CheckCircle2,
 } from 'lucide-react';
 import { PodcastModal } from '@/components/podcasts/PodcastModal';
+import { SendToWorkspaceModal } from '@/components/SendToWorkspaceModal';
+import type { ImportSource } from '@/services/workspaceApi';
 
 import { cn } from '@/lib/utils';
 import { TextLoop } from '@/components/ui/text-loop';
@@ -35,8 +45,11 @@ import { ThinkingIndicator } from './ThinkingIndicator';
 import { SuggestChips } from './SuggestChips';
 import { CitationCards } from './CitationCards';
 import { ConfidenceBadge } from './ConfidenceBadge';
-import { streamChat } from '@/services/chatStream';
+import { streamChat, streamWorkspaceTurn, type WorkspaceActionPayload } from '@/services/chatStream';
 import { uploadPdf } from '@/services/uploadPdf';
+import type { WorkspaceNode } from '@/services/workspaceApi';
+import { WorkspacePickerModal } from '@/components/WorkspacePickerModal';
+import { supabase } from '@/lib/supabase';
 
 function useAutoResizeTextarea(
   ref: React.RefObject<HTMLTextAreaElement | null>,
@@ -84,38 +97,70 @@ const getAgentBestUses = (agent: Agent) => {
   }
 };
 
-interface AnimatedAiInputProps {
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+export interface AnimatedAiInputProps {
   onOpenHistory?: () => void;
   /**
-   * Optional binding to a legacy plenaria. When set, every turn sent from
-   * this input includes `scope.legacy_session_id` in the request body — the
-   * BFF then injects session metadata as a system message (server-side) and
-   * tags the persisted conversation with the scope id, so the sidebar can
-   * group "Sesión #N — …" chats above general ones.
-   *
-   * Implementation: see docs/issues/001-session-scoped-chat-production.md.
+   * Optional binding to a plenaria (kind='session') or workspace
+   * (kind='workspace'). When workspace scope is set, turns are sent to
+   * /api/workspace/:id/turn instead of /api/chat/stream.
    */
   scope?: ChatScope;
-  /** Optional placeholder override (e.g. "Preguntá sobre esta sesión..."). */
+  /** Optional placeholder override. */
   placeholder?: string;
   /**
-   * Optional seek handler — when provided, timecodes mentioned in assistant
-   * messages (e.g. "(15:10)" or "1:57:26") become clickable buttons that call
-   * this with the parsed seconds. Used in SesionViewPage to drive the
-   * YouTube iframe seek.
+   * Optional seek handler — timecodes in assistant messages become clickable
+   * and call this with parsed seconds. Used in SesionViewPage.
    */
   onSeek?: (seconds: number) => void;
   /**
-   * Optional prefill — the parent can stuff a draft message into the
-   * composer (e.g. "Send to Lexa" from the transcript or resumen
-   * panels). The `nonce` lets the parent re-fire even if the text is
-   * the same; we react to `nonce` changes, not to text. Same pattern
-   * as `seekToken` in SesionViewPage.
+   * Optional prefill — parent can push a draft into the composer. The `nonce`
+   * lets the parent re-fire even when text is identical.
    */
   prefill?: { text: string; nonce: number } | null;
+
+  // ── Workspace-scope props (all optional; main chat doesn't pass them) ──
+
+  /** Hoja titles for the workspace — used to help the server route intent. */
+  hojaTitles?: Array<{ id: string; title: string; subtitle?: string | null }>;
+  /**
+   * Called when the user clicks the X on the selected-node chip, so the
+   * parent (WorkspaceCanvasPage) can deselect the node.
+   */
+  onClearSelection?: () => void;
+  /**
+   * Called when the server resolves the intent to 'build' or 'edit_*'.
+   * The parent materializes new nodes on the canvas or patches existing ones.
+   */
+  onWorkspaceAction?: (action: {
+    intent: 'build' | 'edit_selected' | 'edit_by_match';
+    nodes?: WorkspaceNode[];
+    node_id?: string;
+    new_content?: string;
+    target_match_confidence?: number;
+  }) => void;
 }
 
-export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, prefill }: AnimatedAiInputProps) {
+// ─── Manual intent options ───────────────────────────────────────────────────
+// Labels live in MODE_INTENT_OPTIONS (bottom of file) for the
+// segmented toolbar. The radio-group + Auto/Manual pill that used to
+// reference MANUAL_INTENT_LABELS were consolidated into one control.
+
+type ManualIntent = 'chat' | 'build' | 'edit_selected';
+
+// ─── Component ────────────────────────────────────────────────────────────────
+
+export function AnimatedAiInput({
+  onOpenHistory,
+  scope,
+  placeholder,
+  onSeek,
+  prefill,
+  hojaTitles,
+  onClearSelection,
+  onWorkspaceAction,
+}: AnimatedAiInputProps) {
   const {
     currentMessages: messages,
     currentSessionId,
@@ -132,6 +177,8 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
     updateMessage,
     attachedDoc,
     setAttachedDoc,
+    attachedWorkspace,
+    setAttachedWorkspace,
     adoptServerSessionId,
     setSessionScope,
   } = useChat();
@@ -141,36 +188,23 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   useAutoResizeTextarea(textareaRef, value);
 
-  // The chat-podcast button is only meaningful once the conversation
-  // has at least one assistant turn with content — otherwise there's
-  // nothing to script. Computed locally to avoid useless re-renders
-  // each token append.
   const hasAssistantContent = messages.some(
     (m) => m.role === 'assistant' && m.content.trim().length > 0,
   );
 
-  // Prefill plumbing — react to nonce changes, not to text. The parent
-  // (SesionViewPage) bumps the nonce every time it wants to push a new
-  // draft into the composer (e.g. "Send to Lexa" from the transcript).
-  // We replace the existing draft on purpose: if the user already had
-  // typed something, sending a new selection trumps it. They'd usually
-  // be sending a fresh question with a fresh context anyway.
+  // ── Prefill plumbing ───────────────────────────────────────────────────────
   const lastPrefillNonceRef = useRef<number | null>(null);
   useEffect(() => {
     if (!prefill) return;
     if (lastPrefillNonceRef.current === prefill.nonce) return;
     lastPrefillNonceRef.current = prefill.nonce;
     setValue(prefill.text);
-    // Move caret to the end after React paints. requestAnimationFrame
-    // ensures the textarea has rendered the new value before we touch
-    // selectionStart/End.
     requestAnimationFrame(() => {
       const el = textareaRef.current;
       if (!el) return;
       el.focus();
       const end = el.value.length;
       el.setSelectionRange(end, end);
-      // Scroll the caret into view in case the prefill is long.
       el.scrollTop = el.scrollHeight;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -183,8 +217,44 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
   const abortControllerRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // ── Adjuntar dropdown ──────────────────────────────────────────────────────
+  const [isAttachOpen, setIsAttachOpen] = useState(false);
+  const [isWorkspacePickerOpen, setIsWorkspacePickerOpen] = useState(false);
+  // "Send AI response to workspace" flow. The button under each
+  // assistant bubble sets `sendToWsSource` (the message + its prompt
+  // + agent context), which mounts the modal. Modal handles the
+  // workspace pick / create + import. After close we clear the source
+  // so the next save starts fresh.
+  const [sendToWsSource, setSendToWsSource] = useState<ImportSource | null>(null);
+  const [isAttachingWorkspace, setIsAttachingWorkspace] = useState(false);
+
+  // ── Workspace mode state ───────────────────────────────────────────────────
+  const isWorkspaceScope = scope?.kind === 'workspace';
+  const workspaceId = isWorkspaceScope ? scope.workspace_id : undefined;
+
+  const [workspaceMode, setWorkspaceMode] = useState<'auto' | 'manual'>(() => {
+    if (!isWorkspaceScope) return 'auto';
+    try {
+      const stored = localStorage.getItem(`hoja-mode-${scope.workspace_id}`);
+      return stored === 'manual' ? 'manual' : 'auto';
+    } catch {
+      return 'auto';
+    }
+  });
+
+  const [manualIntent, setManualIntent] = useState<ManualIntent>('chat');
+
+  // Persist mode choice
+  useEffect(() => {
+    if (!isWorkspaceScope) return;
+    try {
+      localStorage.setItem(`hoja-mode-${scope.workspace_id}`, workspaceMode);
+    } catch { /* ignore */ }
+  }, [workspaceMode, isWorkspaceScope, scope]);
+
   const handlePickFile = () => {
     setUploadError(null);
+    setIsAttachOpen(false);
     fileInputRef.current?.click();
   };
 
@@ -204,6 +274,45 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
     }
   };
 
+  const handlePickWorkspace = () => {
+    setIsAttachOpen(false);
+    setIsWorkspacePickerOpen(true);
+  };
+
+  const handleWorkspacePicked = async (ws: import('@/services/workspaceApi').Workspace) => {
+    setIsAttachingWorkspace(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      const res = await fetch(`/api/workspace/${ws.id}/attach-context`, {
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = await res.json() as {
+        ok: boolean;
+        full_md: string;
+        hoja_count: number;
+        total_chars: number;
+        truncated: boolean;
+      };
+      setAttachedWorkspace({
+        id: ws.id,
+        title: ws.title,
+        hoja_count: body.hoja_count,
+        total_chars: body.total_chars,
+        truncated: body.truncated,
+        full_md: body.full_md,
+      });
+    } catch (err: any) {
+      setUploadError(err?.message ?? 'No se pudo adjuntar el workspace');
+    } finally {
+      setIsAttachingWorkspace(false);
+    }
+  };
+
   const agentInfo = AGENT_INFO[selectedAgent];
   const AgentIcon = AGENT_ICONS[agentInfo.icon];
 
@@ -216,7 +325,10 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
   }, [messages, isLoading]);
 
   useEffect(() => {
-    const close = () => setIsAgentSelectorOpen(false);
+    const close = () => {
+      setIsAgentSelectorOpen(false);
+      setIsAttachOpen(false);
+    };
     document.addEventListener('click', close);
     return () => document.removeEventListener('click', close);
   }, []);
@@ -227,6 +339,7 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
     abortControllerRef.current = null;
   };
 
+  // ── Submit ─────────────────────────────────────────────────────────────────
   const handleSubmit = async () => {
     if (isLoading) {
       handleStop();
@@ -236,19 +349,29 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
 
     const activeSessionId = currentSessionId || Date.now().toString();
     const userTrimmed = value.trim();
+
+    // Build query prefix for attachments
     const docPrefix = attachedDoc
       ? `[Documento adjunto: ${attachedDoc.filename}, ${attachedDoc.pages}p, ${attachedDoc.chars} chars${attachedDoc.truncated ? ' — truncado' : ''}]\n\n${attachedDoc.text}\n\n---\n\n`
       : '';
-    // Session scope is sent server-side as `scope.legacy_session_id`, not as
-    // a prefix on `query`. Keeps messages.content clean and stops resending
-    // the same metadata block on every turn. See docs/issues/001.
-    const queryForAgent = `${docPrefix}${userTrimmed}`;
+    const wsPrefix = attachedWorkspace
+      ? `[Workspace adjunto: "${attachedWorkspace.title}", ${attachedWorkspace.hoja_count} hojas, ${attachedWorkspace.total_chars} chars${attachedWorkspace.truncated ? ' — truncado' : ''}]\n\n${attachedWorkspace.full_md}\n\n---\n\n`
+      : '';
+
+    const queryForAgent = `${docPrefix}${wsPrefix}${userTrimmed}`;
+
+    // User bubble display label
+    let userBubbleContent = userTrimmed;
+    if (attachedDoc) {
+      userBubbleContent = `📎 ${attachedDoc.filename} (${attachedDoc.pages}p)\n\n${userTrimmed}`;
+    } else if (attachedWorkspace) {
+      userBubbleContent = `📋 Workspace adjunto: "${attachedWorkspace.title}"\n\n${userTrimmed}`;
+    }
+
     const userMessage: Message = {
       id: Date.now().toString(),
       role: 'user',
-      content: attachedDoc
-        ? `📎 ${attachedDoc.filename} (${attachedDoc.pages}p)\n\n${userTrimmed}`
-        : userTrimmed,
+      content: userBubbleContent,
     };
     const assistantId = (Date.now() + 1).toString();
     const assistantMessage: Message = {
@@ -262,87 +385,168 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
     addMessage(userMessage, activeSessionId);
     addMessage(assistantMessage, activeSessionId);
 
-    // Tag the session with its scope (idempotent). Lives in localStorage so
-    // the sidebar can group "Sesión #N" chats without re-fetching scope.
-    if (scope) setSessionScope(activeSessionId, scope);
+    if (scope?.kind === 'session') setSessionScope(activeSessionId, scope);
 
     setValue('');
     setAttachedDoc(null);
+    setAttachedWorkspace(null);
     setIsLoading(true);
     abortControllerRef.current = new AbortController();
 
     let buffer = '';
 
     try {
-      await streamChat({
-        agentId: selectedAgent,
-        query: queryForAgent,
-        conversationId: activeSessionId,
-        deepInsight,
-        scope: scope ? { legacy_session_id: scope.legacy_session_id } : undefined,
-        signal: abortControllerRef.current.signal,
-        onChunk: (chunk) => {
-          if (chunk.type === 'token' && typeof chunk.payload === 'string') {
-            buffer += chunk.payload;
-            updateMessage(assistantId, { content: buffer }, activeSessionId);
-          } else if (chunk.type === 'citation' && Array.isArray(chunk.payload)) {
-            updateMessage(
-              assistantId,
-              { citations: chunk.payload as ChunkCitation[] },
-              activeSessionId,
-            );
-          } else if (chunk.type === 'conversation') {
-            const payload = chunk.payload as
-              | { id?: string; scope_legacy_session_id?: number | null }
-              | undefined;
-            if (payload?.id) {
-              adoptServerSessionId(activeSessionId, payload.id);
-              // Reconcile the local scope with what the server actually
-              // persisted — covers the case where the server spawned a fresh
-              // thread because the existing one had a different scope.
-              if (
-                scope &&
-                typeof payload.scope_legacy_session_id === 'number' &&
-                payload.scope_legacy_session_id === scope.legacy_session_id
-              ) {
-                setSessionScope(payload.id, scope);
-              }
-            }
-          } else if (chunk.type === 'confidence') {
-            const payload = chunk.payload as
-              | { score?: number; level?: 'high' | 'medium' | 'low'; rationale?: string }
-              | undefined;
-            if (payload && typeof payload.score === 'number' && payload.level) {
+      // ── Workspace scope path ─────────────────────────────────────────────
+      if (scope?.kind === 'workspace') {
+        const forcedIntent =
+          workspaceMode === 'manual'
+            ? (manualIntent as 'chat' | 'build' | 'edit_selected')
+            : undefined;
+
+        await streamWorkspaceTurn({
+          workspaceId: scope.workspace_id,
+          query: queryForAgent,
+          selectedNodeId: scope.selected_node_id,
+          hojaTitles: hojaTitles ?? [],
+          deepInsight,
+          mode: workspaceMode,
+          forcedIntent,
+          signal: abortControllerRef.current.signal,
+          onChunk: (chunk) => {
+            if (chunk.type === 'token' && typeof chunk.payload === 'string') {
+              buffer += chunk.payload;
+              updateMessage(assistantId, { content: buffer }, activeSessionId);
+            } else if (chunk.type === 'workspace_action') {
+              const p = chunk.payload as WorkspaceActionPayload;
+              const intentLabel = p.intent === 'build'
+                ? 'Construir hojas'
+                : p.intent === 'edit_selected'
+                  ? 'Editar hoja seleccionada'
+                  : 'Editar hoja';
+              const actionBody = p.intent === 'build'
+                ? `_Hojas generadas — ver canvas._`
+                : `_Hoja actualizada — ver canvas._`;
               updateMessage(
                 assistantId,
                 {
-                  confidence: {
-                    score: payload.score,
-                    level: payload.level,
-                    rationale: payload.rationale ?? '',
-                  },
+                  content: `**Detecté: ${intentLabel}**\n\n${actionBody}`,
                 },
                 activeSessionId,
               );
+              // Fire parent callback for canvas mutation
+              if (onWorkspaceAction) {
+                onWorkspaceAction({
+                  intent: p.intent,
+                  nodes: p.nodes,
+                  node_id: p.node_id,
+                  new_content: p.new_content,
+                  target_match_confidence: p.target_match_confidence,
+                });
+              }
+            } else if (chunk.type === 'citation' && Array.isArray(chunk.payload)) {
+              updateMessage(
+                assistantId,
+                { citations: chunk.payload as ChunkCitation[] },
+                activeSessionId,
+              );
+            } else if (chunk.type === 'error') {
+              const payload = chunk.payload as
+                | { code?: string; message?: string }
+                | string
+                | undefined;
+              const message =
+                typeof payload === 'string'
+                  ? payload
+                  : payload?.message ?? 'Ocurrió un error procesando tu consulta.';
+              updateMessage(
+                assistantId,
+                { content: buffer + (buffer ? '\n\n' : '') + `_${message}_` },
+                activeSessionId,
+              );
             }
-          } else if (chunk.type === 'error') {
-            // Backend emits { code, message } objects; tolerate string for safety.
-            const payload = chunk.payload as
-              | { code?: string; message?: string }
-              | string
-              | undefined;
-            const message =
-              typeof payload === 'string'
-                ? payload
-                : payload?.message ?? 'Ocurrió un error procesando tu consulta.';
+          },
+          onIntent: ({ intent, target_node_id }) => {
+            // Surface intent info on the assistant message for rendering a pill
             updateMessage(
               assistantId,
-              { content: buffer + (buffer ? '\n\n' : '') + `_${message}_` },
+              {
+                // Use agentActive to carry intent info (re-purposed field)
+                agentActive: `intent:${intent}${target_node_id ? `:${target_node_id}` : ''}`,
+              },
               activeSessionId,
             );
-          }
-        },
-      });
+          },
+        });
+      } else {
+        // ── General / session scope path (UNTOUCHED) ──────────────────────
+        await streamChat({
+          agentId: selectedAgent,
+          query: queryForAgent,
+          conversationId: activeSessionId,
+          deepInsight,
+          scope: scope?.kind === 'session'
+            ? { kind: 'session', legacy_session_id: scope.legacy_session_id, label: scope.label }
+            : undefined,
+          signal: abortControllerRef.current.signal,
+          onChunk: (chunk) => {
+            if (chunk.type === 'token' && typeof chunk.payload === 'string') {
+              buffer += chunk.payload;
+              updateMessage(assistantId, { content: buffer }, activeSessionId);
+            } else if (chunk.type === 'citation' && Array.isArray(chunk.payload)) {
+              updateMessage(
+                assistantId,
+                { citations: chunk.payload as ChunkCitation[] },
+                activeSessionId,
+              );
+            } else if (chunk.type === 'conversation') {
+              const payload = chunk.payload as
+                | { id?: string; scope_legacy_session_id?: number | null }
+                | undefined;
+              if (payload?.id) {
+                adoptServerSessionId(activeSessionId, payload.id);
+                if (
+                  scope?.kind === 'session' &&
+                  typeof payload.scope_legacy_session_id === 'number' &&
+                  payload.scope_legacy_session_id === scope.legacy_session_id
+                ) {
+                  setSessionScope(payload.id, scope);
+                }
+              }
+            } else if (chunk.type === 'confidence') {
+              const payload = chunk.payload as
+                | { score?: number; level?: 'high' | 'medium' | 'low'; rationale?: string }
+                | undefined;
+              if (payload && typeof payload.score === 'number' && payload.level) {
+                updateMessage(
+                  assistantId,
+                  {
+                    confidence: {
+                      score: payload.score,
+                      level: payload.level,
+                      rationale: payload.rationale ?? '',
+                    },
+                  },
+                  activeSessionId,
+                );
+              }
+            } else if (chunk.type === 'error') {
+              const payload = chunk.payload as
+                | { code?: string; message?: string }
+                | string
+                | undefined;
+              const message =
+                typeof payload === 'string'
+                  ? payload
+                  : payload?.message ?? 'Ocurrió un error procesando tu consulta.';
+              updateMessage(
+                assistantId,
+                { content: buffer + (buffer ? '\n\n' : '') + `_${message}_` },
+                activeSessionId,
+              );
+            }
+          },
+        });
+      }
     } catch (error: any) {
       if (error.name !== 'AbortError') {
         updateMessage(
@@ -368,6 +572,19 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
     }
   };
 
+  // ── Workspace scope derived values ─────────────────────────────────────────
+  const selectedNodeId = isWorkspaceScope ? scope.selected_node_id : null;
+  const selectedNodeTitle = selectedNodeId
+    ? hojaTitles?.find((h) => h.id === selectedNodeId)?.title ?? 'Hoja seleccionada'
+    : null;
+
+  // ── Resolved placeholder ───────────────────────────────────────────────────
+  const resolvedPlaceholder = placeholder
+    ? placeholder
+    : isWorkspaceScope
+      ? `Preguntá sobre "${scope.workspace_title}"…`
+      : `Pregunta a ${agentInfo.name} sobre actas, mociones, votaciones…`;
+
   return (
     <div
       className={cn(
@@ -375,46 +592,78 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
         !hasInteracted ? 'justify-center items-center' : 'justify-end',
       )}
     >
-      {/* Panel Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-black/5 dark:border-white/10 shrink-0">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div
-            className="w-2 h-2 rounded-full"
-            style={{ backgroundColor: agentInfo.color, boxShadow: `0 0 10px ${agentInfo.color}` }}
-          />
-          <div className="min-w-0">
-            <p className="font-display text-[15px] leading-tight font-medium text-[#0e1745] dark:text-white truncate">
-              {agentInfo.name} <span className="text-[#0e1745]/40 dark:text-white/40 italic font-normal">activo</span>
-            </p>
-            <p className="text-[10px] text-[#0e1745]/45 dark:text-white/45 truncate">
-              {agentInfo.role} · Cada respuesta incluye cita verificable
-            </p>
+      {/* ── Panel Header ──────────────────────────────────────────────────── */}
+      {!isWorkspaceScope && (
+        <div className="flex items-center justify-between px-4 py-3 border-b border-black/5 dark:border-white/10 shrink-0">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div
+              className="w-2 h-2 rounded-full"
+              style={{ backgroundColor: agentInfo.color, boxShadow: `0 0 10px ${agentInfo.color}` }}
+            />
+            <div className="min-w-0">
+              <p className="font-display text-[15px] leading-tight font-medium text-[#0e1745] dark:text-white truncate">
+                {agentInfo.name} <span className="text-[#0e1745]/40 dark:text-white/40 italic font-normal">activo</span>
+              </p>
+              <p className="text-[10px] text-[#0e1745]/45 dark:text-white/45 truncate">
+                {agentInfo.role} · Cada respuesta incluye cita verificable
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1">
+            {hasAssistantContent && currentSessionId && (
+              <button
+                type="button"
+                onClick={() => setPodcastOpen(true)}
+                title="Convertir esta conversación en podcast"
+                aria-label="Generar podcast de esta conversación"
+                className="p-2 rounded-lg text-cl2-burgundy dark:text-cl2-accent-soft hover:bg-cl2-burgundy/[0.06] dark:hover:bg-cl2-accent/[0.10] transition-colors"
+              >
+                <Headphones className="w-4 h-4" />
+              </button>
+            )}
+            {onOpenHistory && (
+              <button
+                onClick={onOpenHistory}
+                className="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors lg:hidden"
+                aria-label="Historial"
+              >
+                <Info className="w-4 h-4 text-[#0e1745]/50 dark:text-white/50" />
+              </button>
+            )}
           </div>
         </div>
+      )}
 
-        <div className="flex items-center gap-1">
-          {hasAssistantContent && currentSessionId && (
-            <button
-              type="button"
-              onClick={() => setPodcastOpen(true)}
-              title="Convertir esta conversación en podcast"
-              aria-label="Generar podcast de esta conversación"
-              className="p-2 rounded-lg text-cl2-burgundy dark:text-cl2-accent-soft hover:bg-cl2-burgundy/[0.06] dark:hover:bg-cl2-accent/[0.10] transition-colors"
-            >
-              <Headphones className="w-4 h-4" />
-            </button>
-          )}
-          {onOpenHistory && (
-            <button
-              onClick={onOpenHistory}
-              className="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors lg:hidden"
-              aria-label="Historial"
-            >
-              <Info className="w-4 h-4 text-[#0e1745]/50 dark:text-white/50" />
-            </button>
+      {/* ── Workspace header: workspace chip + selected-hoja chip ─────────── */}
+      {isWorkspaceScope && (
+        <div className="flex items-center gap-2 px-4 py-2.5 border-b border-black/5 dark:border-white/10 shrink-0 flex-wrap">
+          {/* Workspace pill */}
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11.5px] font-medium bg-cl2-burgundy/10 text-cl2-burgundy dark:text-cl2-accent-soft border border-cl2-burgundy/20">
+            <Layers className="w-3 h-3 shrink-0" />
+            {scope.workspace_title}
+          </span>
+
+          {/* Selected hoja pill */}
+          {selectedNodeTitle && (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11.5px] font-medium bg-cl2-accent/10 text-cl2-accent border border-cl2-accent/20">
+              <BookOpen className="w-3 h-3 shrink-0" />
+              <span className="max-w-[140px] truncate">{selectedNodeTitle}</span>
+              {onClearSelection && (
+                <button
+                  type="button"
+                  onClick={onClearSelection}
+                  aria-label="Deseleccionar hoja"
+                  className="ml-0.5 hover:bg-cl2-accent/20 rounded-full p-0.5 transition-colors"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </span>
           )}
         </div>
-      </div>
+      )}
+
       <PodcastModal
         open={podcastOpen}
         onClose={() => setPodcastOpen(false)}
@@ -423,9 +672,9 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
         source_title="Conversación con Lexa"
       />
 
-      {/* Hero intro — morphing text */}
+      {/* ── Hero intro ────────────────────────────────────────────────────── */}
       <AnimatePresence>
-        {messages.length === 0 && !value && (
+        {messages.length === 0 && !value && !isWorkspaceScope && (
           <div className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full flex flex-col items-center gap-4 px-4">
             <motion.h1
               initial={{ opacity: 0, y: 15, filter: 'blur(6px)' }}
@@ -448,16 +697,13 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
         )}
       </AnimatePresence>
 
-      {/* Chat messages */}
+      {/* ── Chat messages ─────────────────────────────────────────────────── */}
       {hasInteracted && (
         <div className="flex-1 w-full relative mb-2 px-3 flex flex-col min-h-0">
           {messages.length > 0 && (
             <div className="flex-1 overflow-y-auto scrollbar-hide flex flex-col gap-5 pb-6 pt-2">
               <AnimatePresence initial={false}>
                 {messages.map((msg, idx) => {
-                  // Skip empty assistant placeholder while streaming —
-                  // ThinkingIndicator below owns that state. Otherwise the
-                  // agent name renders twice (badge + indicator).
                   const isEmptyStreamingPlaceholder =
                     msg.role === 'assistant' &&
                     !msg.content &&
@@ -465,55 +711,105 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
                     isLoading;
                   if (isEmptyStreamingPlaceholder) return null;
                   return (
-                  <motion.div
-                    key={msg.id}
-                    initial={{ opacity: 0, y: 20, scale: 0.95 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    className={cn(
-                      'w-full flex',
-                      msg.role === 'user' ? 'justify-end' : 'justify-start',
-                    )}
-                  >
-                    {msg.role === 'user' ? (
-                      <div className="max-w-[80%] bg-blue-600/20 border border-blue-500/30 text-[#0e1745] dark:text-white rounded-2xl rounded-tr-sm p-chat-bubble text-[14px] leading-relaxed">
-                        <MessageRenderer content={msg.content} isUser={true} />
-                      </div>
-                    ) : (
-                      <div className="w-full flex flex-col items-start gap-4">
-                        <div className="w-full bg-white/60 dark:bg-white/5 backdrop-blur-md border border-white/50 dark:border-white/10 rounded-2xl p-chat-bubble text-[#0e1745] dark:text-white/90 leading-relaxed shadow-sm">
-                          <div className="mb-4">
-                            <AgentBadge agentId={msg.agent || msg.agentActive} />
+                    <motion.div
+                      key={msg.id}
+                      initial={{ opacity: 0, y: 20, scale: 0.95 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      className={cn(
+                        'w-full flex',
+                        msg.role === 'user' ? 'justify-end' : 'justify-start',
+                      )}
+                    >
+                      {msg.role === 'user' ? (
+                        <div className="max-w-[80%] bg-blue-600/20 border border-blue-500/30 text-[#0e1745] dark:text-white rounded-2xl rounded-tr-sm p-chat-bubble text-[14px] leading-relaxed">
+                          <MessageRenderer content={msg.content} isUser={true} />
+                        </div>
+                      ) : (
+                        <div className="w-full flex flex-col items-start gap-4">
+                          <div className="w-full bg-white/60 dark:bg-white/5 backdrop-blur-md border border-white/50 dark:border-white/10 rounded-2xl p-chat-bubble text-[#0e1745] dark:text-white/90 leading-relaxed shadow-sm">
+                            {/* Intent pill for workspace turns */}
+                            {msg.agentActive && msg.agentActive.startsWith('intent:') && !isWorkspaceScope && null}
+                            {msg.agentActive && msg.agentActive.startsWith('intent:') && isWorkspaceScope && (() => {
+                              const parts = msg.agentActive.split(':');
+                              const intentName = parts[1];
+                              if (intentName === 'chat') return null;
+                              const label = intentName === 'build'
+                                ? 'Construir hojas'
+                                : intentName === 'edit_selected'
+                                  ? 'Editar hoja seleccionada'
+                                  : 'Editar hoja';
+                              return (
+                                <div className="mb-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-cl2-burgundy/10 text-cl2-burgundy border border-cl2-burgundy/20">
+                                  <Sparkles className="w-3 h-3" />
+                                  Detecté: {label}
+                                </div>
+                              );
+                            })()}
+                            {!isWorkspaceScope && (
+                              <div className="mb-4">
+                                <AgentBadge
+                                  agentId={
+                                    msg.agent ??
+                                    (msg.agentActive?.startsWith('intent:') ? undefined : msg.agentActive)
+                                  }
+                                />
+                              </div>
+                            )}
+                            <div className="text-[14px] opacity-90">
+                              <MessageRenderer
+                                content={
+                                  msg.content || (isLoading ? '▍' : '')
+                                }
+                                onSeek={onSeek}
+                              />
+                            </div>
+                            {msg.citations && msg.citations.length > 0 && (
+                              <CitationCards citations={msg.citations} />
+                            )}
+                            {msg.confidence && (
+                              <ConfidenceBadge confidence={msg.confidence} />
+                            )}
                           </div>
-                          <div className="text-[14px] opacity-90">
-                            <MessageRenderer
-                              content={
-                                msg.content || (isLoading ? '▍' : '')
-                              }
-                              onSeek={onSeek}
+                          {/* Action row — only on completed assistant
+                              messages with content. Currently:
+                                · Save to workspace (always)
+                                · Copy raw markdown (utility)
+                              The intent here is "operate on this
+                              specific reply", separate from the chat-
+                              level controls. Streaming bubbles skip
+                              this row to avoid jitter while content
+                              renders. */}
+                          {msg.content.trim().length > 0 && !(isLoading && msg === messages[messages.length - 1]) && (
+                            <MessageActions
+                              message={msg}
+                              precedingPrompt={(() => {
+                                // Most recent user message before this one.
+                                const myIdx = messages.findIndex((m) => m.id === msg.id);
+                                for (let i = myIdx - 1; i >= 0; i--) {
+                                  if (messages[i].role === 'user') return messages[i].content;
+                                }
+                                return undefined;
+                              })()}
+                              onSendToWorkspace={(src) => setSendToWsSource(src)}
                             />
-                          </div>
-                          {msg.citations && msg.citations.length > 0 && (
-                            <CitationCards citations={msg.citations} />
                           )}
-                          {msg.confidence && (
-                            <ConfidenceBadge confidence={msg.confidence} />
+                          {!isWorkspaceScope && (
+                            <SuggestChips
+                              visible={
+                                msg === messages[messages.length - 1] &&
+                                msg.role === 'assistant' &&
+                                !isLoading &&
+                                !value.trim()
+                              }
+                              onSelect={(question) => {
+                                setValue(question);
+                                textareaRef.current?.focus();
+                              }}
+                            />
                           )}
                         </div>
-                        <SuggestChips
-                          visible={
-                            msg === messages[messages.length - 1] &&
-                            msg.role === 'assistant' &&
-                            !isLoading &&
-                            !value.trim()
-                          }
-                          onSelect={(question) => {
-                            setValue(question);
-                            textareaRef.current?.focus();
-                          }}
-                        />
-                      </div>
-                    )}
-                  </motion.div>
+                      )}
+                    </motion.div>
                   );
                 })}
                 {isLoading && messages[messages.length - 1]?.content === '' && (
@@ -526,7 +822,7 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
         </div>
       )}
 
-      {/* Input */}
+      {/* ── Input ─────────────────────────────────────────────────────────── */}
       <div className="w-full mt-auto shrink-0 relative px-4 pb-6">
         <div className="relative w-full rounded-2xl border border-[#0e1745]/[0.10] dark:border-white/[0.065] shadow-[0_4px_20px_rgba(14,23,69,0.065)] dark:shadow-[0_4px_20px_rgba(0,0,0,0.19)]">
           <input
@@ -536,15 +832,18 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
             className="hidden"
             onChange={handleFileChange}
           />
+
+          {/* ── Attachment pills ──────────────────────────────────────────── */}
           <AnimatePresence initial={false}>
-            {(attachedDoc || isUploading || uploadError) && (
+            {(attachedDoc || attachedWorkspace || isUploading || isAttachingWorkspace || uploadError) && (
               <motion.div
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: 'auto' }}
                 exit={{ opacity: 0, height: 0 }}
                 className="overflow-hidden"
               >
-                <div className="flex items-center gap-2 px-4 pt-3">
+                <div className="flex items-center gap-2 px-4 pt-3 flex-wrap">
+                  {/* PDF attachment pill */}
                   {isUploading ? (
                     <span className="inline-flex items-center gap-2 text-[12px] text-[#0e1745]/60 dark:text-white/60 px-3 py-1.5 rounded-full border border-black/10 dark:border-white/15 bg-white/40 dark:bg-white/[0.04]">
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -576,7 +875,37 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
                         <X className="w-3 h-3" />
                       </button>
                     </span>
-                  ) : uploadError ? (
+                  ) : null}
+
+                  {/* Workspace attachment pill */}
+                  {isAttachingWorkspace ? (
+                    <span className="inline-flex items-center gap-2 text-[12px] text-[#0e1745]/60 dark:text-white/60 px-3 py-1.5 rounded-full border border-black/10 dark:border-white/15 bg-white/40 dark:bg-white/[0.04]">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Cargando workspace…
+                    </span>
+                  ) : attachedWorkspace ? (
+                    <span className="inline-flex items-center gap-2 text-[12px] px-3 py-1.5 rounded-full border border-cl2-burgundy/25 bg-cl2-burgundy/8 text-cl2-burgundy dark:text-cl2-accent-soft max-w-full">
+                      <Layers className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate max-w-[200px]" title={attachedWorkspace.title}>
+                        {attachedWorkspace.title}
+                      </span>
+                      <span className="text-[10.5px] opacity-70 shrink-0">
+                        {attachedWorkspace.hoja_count} hoja{attachedWorkspace.hoja_count !== 1 ? 's' : ''}
+                        {attachedWorkspace.truncated ? ' · trunc' : ''}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setAttachedWorkspace(null)}
+                        aria-label="Quitar workspace"
+                        className="ml-1 hover:bg-cl2-burgundy/15 rounded-full p-0.5 transition-colors"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  ) : null}
+
+                  {/* Upload error */}
+                  {uploadError && (
                     <span className="inline-flex items-center gap-2 text-[12px] text-red-500 px-3 py-1.5 rounded-full border border-red-500/30 bg-red-500/5">
                       <X className="w-3.5 h-3.5" />
                       {uploadError}
@@ -589,11 +918,12 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
                         <X className="w-3 h-3" />
                       </button>
                     </span>
-                  ) : null}
+                  )}
                 </div>
               </motion.div>
             )}
           </AnimatePresence>
+
           <div className="relative z-10 flex flex-col w-full">
             <div className="relative w-full overflow-hidden">
               <textarea
@@ -604,105 +934,105 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
                   if (!hasInteracted) setHasInteracted(true);
                 }}
                 onKeyDown={handleKeyDown}
-                placeholder={placeholder ?? `Pregunta a ${agentInfo.name} sobre actas, mociones, votaciones…`}
+                placeholder={resolvedPlaceholder}
                 className="w-full resize-none outline-none min-h-[48px] max-h-[200px] text-body leading-relaxed p-5 pb-3 relative z-10 scrollbar-hide bg-transparent text-[#0e1745] dark:text-white placeholder-black/30 dark:placeholder-white/30"
                 rows={1}
                 disabled={isLoading}
                 spellCheck={false}
               />
             </div>
+
             <div className="flex items-center justify-between px-5 pb-4 pt-2 w-full gap-2">
               <div className="flex items-center gap-1.5 flex-wrap min-w-0">
-                {/* Agent selector */}
-                <div className="relative">
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setIsAgentSelectorOpen(!isAgentSelectorOpen);
-                    }}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium rounded-pill transition-all border text-white border-transparent"
-                    style={{ backgroundColor: agentInfo.color }}
-                  >
-                    {React.createElement(AgentIcon, { className: 'w-3.5 h-3.5' })}
-                    <span className="max-w-[120px] truncate">{agentInfo.name}</span>
-                    <ChevronDown className="w-3 h-3 opacity-70" />
-                  </button>
-                  <AnimatePresence>
-                    {isAgentSelectorOpen && (
-                      <motion.div
-                        initial={{ opacity: 0, y: 8 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: 8 }}
-                        className="absolute left-0 bottom-full mb-2 w-72 max-h-[400px] overflow-y-auto bg-white dark:bg-[#2d2828] border border-gray-200 dark:border-white/10 rounded-xl shadow-xl z-50 p-2"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <div className="flex items-center justify-between px-3 py-2 border-b border-gray-200 dark:border-white/10 mb-2">
-                          <span className="text-[10px] font-semibold text-gray-400 dark:text-white/40 uppercase tracking-wider">
-                            CL2 · 3 Agentes
-                          </span>
-                          <Users className="w-3 h-3 text-gray-400 dark:text-white/40" />
-                        </div>
-                        {ALL_AGENTS.map((agent) => {
-                          const info = AGENT_INFO[agent];
-                          const AIcomp = AGENT_ICONS[info.icon];
-                          const isSel = selectedAgent === agent;
-                          return (
-                            <button
-                              key={agent}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setSelectedAgent(agent);
-                                setIsAgentSelectorOpen(false);
-                              }}
-                              className={cn(
-                                'w-full flex items-center gap-2 px-3 py-2 text-[12px] rounded-lg transition-all',
-                                isSel
-                                  ? 'bg-gray-100 dark:bg-white/10 font-medium'
-                                  : 'hover:bg-gray-50 dark:hover:bg-white/5',
-                              )}
-                            >
-                              <div
-                                className="w-6 h-6 rounded-md flex items-center justify-center"
-                                style={{
-                                  backgroundColor: `${info.color}20`,
-                                  color: info.color,
+                {/* Agent selector — hidden in workspace scope */}
+                {!isWorkspaceScope && (
+                  <div className="relative">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setIsAgentSelectorOpen(!isAgentSelectorOpen);
+                      }}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium rounded-pill transition-all border text-white border-transparent"
+                      style={{ backgroundColor: agentInfo.color }}
+                    >
+                      {React.createElement(AgentIcon, { className: 'w-3.5 h-3.5' })}
+                      <span className="max-w-[120px] truncate">{agentInfo.name}</span>
+                      <ChevronDown className="w-3 h-3 opacity-70" />
+                    </button>
+                    <AnimatePresence>
+                      {isAgentSelectorOpen && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 8 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: 8 }}
+                          className="absolute left-0 bottom-full mb-2 w-72 max-h-[400px] overflow-y-auto bg-white dark:bg-[#2d2828] border border-gray-200 dark:border-white/10 rounded-xl shadow-xl z-50 p-2"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <div className="flex items-center justify-between px-3 py-2 border-b border-gray-200 dark:border-white/10 mb-2">
+                            <span className="text-[10px] font-semibold text-gray-400 dark:text-white/40 uppercase tracking-wider">
+                              CL2 · 3 Agentes
+                            </span>
+                            <Users className="w-3 h-3 text-gray-400 dark:text-white/40" />
+                          </div>
+                          {ALL_AGENTS.map((agent) => {
+                            const info = AGENT_INFO[agent];
+                            const AIcomp = AGENT_ICONS[info.icon];
+                            const isSel = selectedAgent === agent;
+                            return (
+                              <button
+                                key={agent}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedAgent(agent);
+                                  setIsAgentSelectorOpen(false);
                                 }}
+                                className={cn(
+                                  'w-full flex items-center gap-2 px-3 py-2 text-[12px] rounded-lg transition-all',
+                                  isSel
+                                    ? 'bg-gray-100 dark:bg-white/10 font-medium'
+                                    : 'hover:bg-gray-50 dark:hover:bg-white/5',
+                                )}
                               >
-                                <AIcomp className="w-3 h-3" />
-                              </div>
-                              <div className="flex-1 text-left">
                                 <div
-                                  className={cn(
-                                    'font-medium text-[12px]',
-                                    isSel
-                                      ? 'text-gray-900 dark:text-white'
-                                      : 'text-gray-700 dark:text-white/70',
-                                  )}
+                                  className="w-6 h-6 rounded-md flex items-center justify-center"
+                                  style={{
+                                    backgroundColor: `${info.color}20`,
+                                    color: info.color,
+                                  }}
                                 >
-                                  {info.name}
+                                  <AIcomp className="w-3 h-3" />
                                 </div>
-                                <div className="text-[10px] text-gray-400 dark:text-white/40 truncate">
-                                  {info.role}
+                                <div className="flex-1 text-left">
+                                  <div
+                                    className={cn(
+                                      'font-medium text-[12px]',
+                                      isSel
+                                        ? 'text-gray-900 dark:text-white'
+                                        : 'text-gray-700 dark:text-white/70',
+                                    )}
+                                  >
+                                    {info.name}
+                                  </div>
+                                  <div className="text-[10px] text-gray-400 dark:text-white/40 truncate">
+                                    {info.role}
+                                  </div>
                                 </div>
-                              </div>
-                              {isSel && (
-                                <div
-                                  className="w-1.5 h-1.5 rounded-full"
-                                  style={{ backgroundColor: info.color }}
-                                />
-                              )}
-                            </button>
-                          );
-                        })}
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </div>
+                                {isSel && (
+                                  <div
+                                    className="w-1.5 h-1.5 rounded-full"
+                                    style={{ backgroundColor: info.color }}
+                                  />
+                                )}
+                              </button>
+                            );
+                          })}
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+                )}
 
-                {/* Deep Insight — premium tier toggle.
-                    Activates LightRAG graph traversal + Opus 4.7 synthesis.
-                    Subtle by design: same button as before, only the title
-                    tooltip surfaces the cost trade-off. */}
+                {/* Deep Insight */}
                 <ShinyButton
                   active={deepInsight}
                   onClick={(e) => {
@@ -716,28 +1046,78 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
                   Deep Insight
                 </ShinyButton>
 
-                {/* Attach file — PDF upload */}
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handlePickFile();
-                  }}
-                  disabled={isUploading || isLoading}
-                  className="flex items-center justify-center h-8 w-8 rounded-full border border-black/10 dark:border-white/15 text-[#0e1745]/55 dark:text-white/55 hover:text-[#0e1745] dark:hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                  aria-label="Adjuntar PDF"
-                  title="Adjuntar PDF (máx 25MB)"
-                >
-                  {isUploading ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <Paperclip className="w-3.5 h-3.5" />
-                  )}
-                </button>
+                {/* Mode + intent — single segmented toolbar.
+                    Old layout had two separate UI pieces: an
+                    Auto/Manual pill on this row + a radio group below
+                    when Manual. Consolidated into 4 mutually-exclusive
+                    segments. Auto = automatic routing; the other three
+                    pin manual mode with a specific intent. Saves a
+                    full row of vertical space and removes a layout
+                    shift when the user toggles. */}
+                {isWorkspaceScope && (
+                  <ModeIntentToolbar
+                    mode={workspaceMode}
+                    intent={manualIntent}
+                    onChange={(next) => {
+                      if (next === 'auto') {
+                        setWorkspaceMode('auto');
+                      } else {
+                        setWorkspaceMode('manual');
+                        setManualIntent(next);
+                      }
+                    }}
+                  />
+                )}
 
-                {/* Voice → prompt (ElevenLabs Scribe via /api/voice/transcribe).
-                    Append to existing draft instead of replacing — lets the
-                    user dictate multiple sentences across separate clicks. */}
+                {/* Adjuntar dropdown — replaces simple Paperclip */}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setIsAttachOpen(!isAttachOpen);
+                    }}
+                    disabled={isUploading || isAttachingWorkspace || isLoading}
+                    className="flex items-center justify-center h-8 w-8 rounded-full border border-black/10 dark:border-white/15 text-[#0e1745]/55 dark:text-white/55 hover:text-[#0e1745] dark:hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    aria-label="Adjuntar"
+                    title="Adjuntar PDF o Workspace"
+                  >
+                    {(isUploading || isAttachingWorkspace) ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Paperclip className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+
+                  <AnimatePresence>
+                    {isAttachOpen && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: 4 }}
+                        className="absolute left-0 bottom-full mb-2 w-44 bg-white dark:bg-[#2d2828] border border-gray-200 dark:border-white/10 rounded-xl shadow-xl z-50 p-1 overflow-hidden"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <button
+                          className="w-full flex items-center gap-2 px-3 py-2 text-[12.5px] rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 text-[#0e1745] dark:text-white transition-colors"
+                          onClick={handlePickFile}
+                        >
+                          <FileText className="w-3.5 h-3.5 text-[#8B6E54]" />
+                          PDF
+                        </button>
+                        <button
+                          className="w-full flex items-center gap-2 px-3 py-2 text-[12.5px] rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 text-[#0e1745] dark:text-white transition-colors"
+                          onClick={handlePickWorkspace}
+                        >
+                          <Layers className="w-3.5 h-3.5 text-cl2-burgundy" />
+                          Workspace
+                        </button>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+
+                {/* Voice input */}
                 <VoiceInput
                   accent={agentInfo.color}
                   disabled={isLoading}
@@ -745,16 +1125,14 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
                     setValue((prev) => {
                       const trimmed = prev.trim();
                       if (!trimmed) return text;
-                      // Glue with a space if the previous fragment didn't
-                      // end in punctuation, otherwise just join.
                       const sep = /[.!?…]\s*$/.test(trimmed) ? ' ' : ' ';
                       return `${trimmed}${sep}${text}`;
                     });
-                    // Re-focus the textarea so the user can keep editing
                     requestAnimationFrame(() => textareaRef.current?.focus());
                   }}
                 />
               </div>
+
               <button
                 onClick={handleSubmit}
                 className={cn(
@@ -763,12 +1141,8 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
                     ? 'text-white hover:scale-105 shadow-raised'
                     : 'bg-gray-200 dark:bg-white/10 text-gray-400 dark:text-white/30 cursor-not-allowed',
                 )}
-                // Active state uses the selected agent's accent so the send
-                // CTA matches the agent identity (was hardcoded shift-primary
-                // electric blue — replaced 2026-04-26 to keep the chrome
-                // visually coherent with the agent rail).
                 style={value.trim() || isLoading
-                  ? { backgroundColor: agentInfo.color }
+                  ? { backgroundColor: isWorkspaceScope ? '#7A3B47' : agentInfo.color }
                   : undefined}
                 disabled={!value.trim() && !isLoading}
                 aria-label={isLoading ? 'Detener' : 'Enviar'}
@@ -780,12 +1154,227 @@ export function AnimatedAiInput({ onOpenHistory, scope, placeholder, onSeek, pre
                 )}
               </button>
             </div>
+
+            {/* (Manual intent radio removed — consolidated into the
+                ModeIntentToolbar above the textarea.) */}
           </div>
         </div>
         <p className="text-[10px] text-[#0e1745]/30 dark:text-white/30 mt-2 text-center tracking-wide">
           La IA puede cometer errores, lea bien las respuestas — CL2 1.0.0 by Shiftlab
         </p>
       </div>
+
+      {/* ── Workspace picker modal ─────────────────────────────────────────── */}
+      <WorkspacePickerModal
+        open={isWorkspacePickerOpen}
+        onClose={() => setIsWorkspacePickerOpen(false)}
+        onPick={handleWorkspacePicked}
+      />
+
+      {/* "Save AI reply to workspace" — opens whenever a per-message
+          action button sets sendToWsSource. Single shared modal so
+          opening one closes any prior one (the source is the only
+          state that varies). */}
+      <SendToWorkspaceModal
+        open={sendToWsSource !== null}
+        onClose={() => setSendToWsSource(null)}
+        sources={sendToWsSource ? [sendToWsSource] : []}
+        summary="Respuesta de Lexa"
+      />
+    </div>
+  );
+}
+
+// ─── Per-message action row ─────────────────────────────────────────
+//
+// Renders below each completed assistant message bubble. Currently:
+//   · "Guardar en workspace" — opens SendToWorkspaceModal with a
+//     `chat`-typed source whose payload includes the response HTML +
+//     the most recent user prompt for context.
+//   · "Copiar" — copies the raw markdown/text to clipboard.
+//
+// The reason this is its own component (vs inlining in the bubble
+// JSX): keeping the markdown→html conversion + clipboard state local
+// stops re-renders of one bubble's actions from cascading into the
+// other bubbles in the list.
+function MessageActions({
+  message,
+  precedingPrompt,
+  onSendToWorkspace,
+}: {
+  message: { id: string; content: string; agent?: Agent; agentActive?: string };
+  precedingPrompt?: string;
+  onSendToWorkspace: (src: ImportSource) => void;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  // Convert the message's markdown-ish content to a minimal HTML
+  // payload for the workspace import endpoint. We don't run a full
+  // markdown parser here — just paragraph splits + inline formatting
+  // hints. The server's sanitizer accepts the result either way and
+  // TipTap's parseHTML handles whatever structure survives.
+  const buildHtmlPayload = useCallback((): string => {
+    const md = message.content.trim();
+    // If the model returned HTML already (rare but possible via tool
+    // outputs), pass it through. Otherwise paragraphize.
+    if (/^<[a-z][^>]*>/i.test(md)) return md;
+    const escape = (s: string) =>
+      s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const inline = (s: string) =>
+      escape(s)
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/(^|[^*])\*([^\s*][^*]*[^\s*])\*(?!\*)/g, '$1<em>$2</em>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+    return md
+      .split(/\n{2,}/)
+      .map((para) => para.trim())
+      .filter(Boolean)
+      .map((para) => {
+        // Heading shortcuts: ## / ###
+        const h2 = para.match(/^#{2}\s+(.+)$/);
+        if (h2) return `<h2>${inline(h2[1])}</h2>`;
+        const h3 = para.match(/^#{3}\s+(.+)$/);
+        if (h3) return `<h3>${inline(h3[1])}</h3>`;
+        // Bullet block (each line starts with "- ")
+        if (/^(?:- .+\n?)+$/.test(para)) {
+          const items = para.split('\n').map((l) => l.replace(/^- /, '')).filter(Boolean);
+          return `<ul>${items.map((it) => `<li>${inline(it)}</li>`).join('')}</ul>`;
+        }
+        return `<p>${inline(para).replace(/\n/g, '<br>')}</p>`;
+      })
+      .join('');
+  }, [message.content]);
+
+  const handleSend = () => {
+    const agentName =
+      typeof message.agent === 'object' && message.agent
+        ? (message.agent as unknown as { name?: string }).name ?? 'Lexa'
+        : 'Lexa';
+    onSendToWorkspace({
+      type: 'chat',
+      payload: {
+        html: buildHtmlPayload(),
+        prompt: precedingPrompt,
+        agent: agentName,
+        timestamp: new Date().toISOString(),
+      },
+    });
+  };
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // older browsers — silent
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-1 px-1 -mt-2">
+      <button
+        type="button"
+        onClick={handleSend}
+        title="Guardar esta respuesta en un workspace"
+        className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium text-[#0e1745]/55 dark:text-white/55 hover:text-cl2-burgundy dark:hover:text-[#d8a4ad] hover:bg-cl2-burgundy/[0.06] dark:hover:bg-cl2-accent/[0.10] transition-colors"
+      >
+        <Layers size={11} />
+        Guardar en workspace
+      </button>
+      <button
+        type="button"
+        onClick={handleCopy}
+        title={copied ? 'Copiado' : 'Copiar texto'}
+        className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium text-[#0e1745]/55 dark:text-white/55 hover:text-[#0e1745] dark:hover:text-white hover:bg-[#0e1745]/[0.05] dark:hover:bg-white/[0.05] transition-colors"
+      >
+        {copied ? <CheckCircle2 size={11} className="text-emerald-600 dark:text-emerald-400" /> : <CopyIcon size={11} />}
+        {copied ? 'Copiado' : 'Copiar'}
+      </button>
+    </div>
+  );
+}
+
+// ─── Mode + intent toolbar ──────────────────────────────────────────
+//
+// Segmented control that replaces the old "Auto/Manual pill + Manual
+// intent radio group". 4 mutually-exclusive segments:
+//
+//   Auto       → mode='auto'
+//   Pregunta   → mode='manual', intent='chat'
+//   Construir  → mode='manual', intent='build'
+//   Editar     → mode='manual', intent='edit_selected'
+//
+// Only the current segment shows its label (collapsed pill); the
+// others render as compact icons. This keeps horizontal footprint
+// small in narrow chat panels while still letting the user see what's
+// active at a glance. The collapsed pill expands on hover for
+// discoverability.
+
+type ModeOrIntent = 'auto' | ManualIntent;
+
+interface ModeIntentToolbarProps {
+  mode: 'auto' | 'manual';
+  intent: ManualIntent;
+  onChange: (next: ModeOrIntent) => void;
+}
+
+// Mini-icon set from lucide-react. Picked for semantic clarity:
+//   Bot          → "auto" (automated assistant)
+//   MessageSquare → free chat / question
+//   Hammer       → "build" hojas via Arquitecta
+//   Pencil       → edit the selected hoja
+const MODE_INTENT_OPTIONS: Array<{
+  value: ModeOrIntent;
+  label: string;
+  Icon: React.ElementType;
+  title: string;
+}> = [
+  { value: 'auto',          label: 'Auto',      Icon: Bot,           title: 'Auto — Lexa decide cómo responder' },
+  { value: 'chat',          label: 'Pregunta',  Icon: MessageSquare, title: 'Manual: pregunta libre' },
+  { value: 'build',         label: 'Construir', Icon: Hammer,        title: 'Manual: construir hojas (Arquitecta)' },
+  { value: 'edit_selected', label: 'Editar',    Icon: Pencil,        title: 'Manual: editar la hoja seleccionada' },
+];
+
+function ModeIntentToolbar({ mode, intent, onChange }: ModeIntentToolbarProps) {
+  const active: ModeOrIntent = mode === 'auto' ? 'auto' : intent;
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Modo de respuesta"
+      className="inline-flex items-center gap-0.5 rounded-pill p-0.5 bg-[#0e1745]/[0.04] dark:bg-white/[0.06] border border-[#0e1745]/[0.06] dark:border-white/[0.08]"
+    >
+      {MODE_INTENT_OPTIONS.map((opt) => {
+        const isActive = active === opt.value;
+        const Icon = opt.Icon;
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            role="radio"
+            aria-checked={isActive}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!isActive) onChange(opt.value);
+            }}
+            title={opt.title}
+            className={cn(
+              'inline-flex items-center gap-1 rounded-full text-[11.5px] font-medium leading-none transition-all',
+              // Active = full pill with label + icon. Inactive =
+              // compact icon-only. Tooltip surfaces the label.
+              isActive
+                ? opt.value === 'auto'
+                  ? 'px-2.5 py-1 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 shadow-sm'
+                  : 'px-2.5 py-1 bg-cl2-burgundy/[0.10] dark:bg-cl2-accent/[0.18] text-cl2-burgundy dark:text-[#d8a4ad] shadow-sm'
+                : 'px-1.5 py-1 text-[#0e1745]/55 dark:text-white/55 hover:text-[#0e1745] dark:hover:text-white hover:bg-[#0e1745]/[0.04] dark:hover:bg-white/[0.06]',
+            )}
+          >
+            <Icon className="w-3 h-3" strokeWidth={2.2} aria-hidden />
+            {isActive && <span>{opt.label}</span>}
+          </button>
+        );
+      })}
     </div>
   );
 }

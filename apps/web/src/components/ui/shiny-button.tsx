@@ -7,6 +7,7 @@ interface ShinyButtonProps {
   className?: string
   active?: boolean
   ariaLabel?: string
+  title?: string
 }
 
 export function ShinyButton({
@@ -15,6 +16,7 @@ export function ShinyButton({
   className = "",
   active = false,
   ariaLabel,
+  title,
 }: ShinyButtonProps) {
   return (
     <button
@@ -22,6 +24,7 @@ export function ShinyButton({
       onClick={onClick}
       aria-pressed={active}
       aria-label={ariaLabel}
+      title={title}
       className={cn(active ? "shiny-cta shiny-cta--on" : "shiny-cta shiny-cta--off", className)}
     >
       <span>{children}</span>

@@ -1,0 +1,83 @@
+# syntax=docker/dockerfile:1.6
+#
+# Production image for apps/web (Vite SPA served by nginx with /api proxy).
+# Build context = repo root.
+#
+# Why nginx instead of two domains:
+#   Single origin (cl2-v2.agentescl2.com) means zero CORS headache.
+#   nginx proxies /api/* to the API Cloud Run service (URL via env var).
+#   SSE works because we disable proxy_buffering on /api.
+#
+# Build:
+#   docker build \
+#     --build-arg VITE_SUPABASE_URL=https://xxx.supabase.co \
+#     --build-arg VITE_SUPABASE_PUBLISHABLE_KEY=eyJ... \
+#     -t cl2-v2-web -f infra/deploy/Dockerfile.web .
+#
+# Run:
+#   docker run --rm -p 8080:8080 \
+#     -e API_BASE_URL=https://cl2-v2-api-xxx-uc.a.run.app \
+#     cl2-v2-web
+
+# ──────────────────────────────────────────────────────────────────────
+# Stage 1 — workspace deps
+# ──────────────────────────────────────────────────────────────────────
+FROM node:20-alpine AS deps
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+COPY apps/web/package.json apps/web/package.json
+COPY packages/shared-types/package.json packages/shared-types/package.json
+COPY packages/ui-kit/package.json packages/ui-kit/package.json
+
+RUN npm ci --workspaces --include-workspace-root --no-audit --no-fund
+
+# ──────────────────────────────────────────────────────────────────────
+# Stage 2 — build the SPA. VITE_* args are baked into the bundle here,
+# so we receive them as build-args (NOT runtime envs — Vite is static).
+# ──────────────────────────────────────────────────────────────────────
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+# Build-time only — public Supabase URL + anon key get bundled into the
+# JS that ships to browsers (anon key is meant to be public, RLS does
+# the actual security at the DB layer).
+ARG VITE_SUPABASE_URL
+ARG VITE_SUPABASE_PUBLISHABLE_KEY
+ENV VITE_SUPABASE_URL=$VITE_SUPABASE_URL
+ENV VITE_SUPABASE_PUBLISHABLE_KEY=$VITE_SUPABASE_PUBLISHABLE_KEY
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY package.json package-lock.json tsconfig*.json ./
+COPY apps/web ./apps/web
+COPY packages/shared-types ./packages/shared-types
+COPY packages/ui-kit ./packages/ui-kit
+
+RUN npm run build --workspace=apps/web
+
+# ──────────────────────────────────────────────────────────────────────
+# Stage 3 — nginx serving static + proxying /api.
+# ──────────────────────────────────────────────────────────────────────
+FROM nginx:alpine AS runner
+
+# Copy the built SPA
+COPY --from=builder /app/apps/web/dist /usr/share/nginx/html
+
+# nginx:alpine has /docker-entrypoint.sh that runs envsubst on
+# /etc/nginx/templates/*.template at startup, so API_BASE_URL gets
+# substituted into the conf at container start (Cloud Run env injection).
+COPY infra/deploy/nginx.conf.template /etc/nginx/templates/default.conf.template
+
+# Derives API_HOST from API_BASE_URL before envsubst runs. The .envsh
+# extension makes nginx's docker-entrypoint SOURCE this file (so the
+# exported var is visible to the next entrypoint script that does
+# envsubst on /etc/nginx/templates/*.template).
+COPY infra/deploy/10-derive-api-host.envsh /docker-entrypoint.d/10-derive-api-host.envsh
+RUN chmod +x /docker-entrypoint.d/10-derive-api-host.envsh
+
+# Default; Cloud Run will override.
+ENV API_BASE_URL=http://localhost:3001
+# Cloud Run requires PORT 8080 by default; nginx listens there.
+ENV PORT=8080
+
+EXPOSE 8080

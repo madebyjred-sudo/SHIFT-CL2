@@ -3,6 +3,7 @@ import type { CerebroRequest, CerebroStreamChunk } from '@shift-cl2/shared-types
 import { openRouterStream } from '../services/openRouterClient.js';
 import { getAgent } from '../services/agentLoader.js';
 import { getUserIdFromRequest } from '../services/auth.js';
+import { requireQuota, logAiCall } from '../services/aiQuota.js';
 import { ResilienceError } from '../services/resilience.js';
 import { estimateConfidence } from '../services/confidence.js';
 import {
@@ -68,6 +69,23 @@ chatRouter.post('/stream', async (req, res) => {
     // override read failures are non-fatal — default to enabled.
   }
 
+  // Auth + quota MUST happen before SSE headers flush — once we
+  // commit Content-Type: text/event-stream the response is locked
+  // into 200 and we can't return a real 401/429.
+  const userId = await getUserIdFromRequest(req);
+  if (!userId) {
+    res.status(401).json({ ok: false, error: 'auth_required', message: 'Iniciá sesión para chatear con Lexa.' });
+    return;
+  }
+  const quotaCheck = await requireQuota(userId, 'chat.stream', res);
+  if (quotaCheck === 'denied') {
+    // requireQuota already wrote the 429 JSON response.
+    return;
+  }
+  // Log the call up-front so abuse via cancelled connections still
+  // counts toward the daily cap.
+  void logAiCall(userId, 'chat.stream', { agent: body.agent_id, deep_insight: body.deep_insight ?? false });
+
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -76,11 +94,6 @@ chatRouter.post('/stream', async (req, res) => {
   const send = (chunk: CerebroStreamChunk | { type: string; payload?: unknown }) => {
     res.write(`data: ${JSON.stringify(chunk)}\n\n`);
   };
-
-  // --- Auth + persistence setup -----------------------------------------
-  // Anonymous traffic is allowed (the stream still works) — we just skip
-  // persistence. This keeps local dev / unauthed smoke tests working.
-  const userId = await getUserIdFromRequest(req);
   const agent = getAgent(body.agent_id);
   const deepInsight = body.deep_insight ?? false;
   const modelUsed =

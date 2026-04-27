@@ -1,4 +1,5 @@
 import React from "react";
+import * as Sentry from '@sentry/react';
 
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -20,6 +21,15 @@ export class ErrorBoundary extends React.Component<
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
     console.error("[ErrorBoundary] Uncaught error:", error, errorInfo);
+    // Pipe to Sentry so production crashes get a real ticket. The
+    // init at main.tsx is a no-op when DSN isn't set, so this is
+    // safe to call unconditionally.
+    if (import.meta.env.VITE_SENTRY_DSN) {
+      Sentry.withScope((scope) => {
+        scope.setContext('react', { componentStack: errorInfo.componentStack ?? null });
+        Sentry.captureException(error);
+      });
+    }
   }
 
   handleReload = () => {

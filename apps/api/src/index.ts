@@ -12,6 +12,23 @@ for (const path of candidates) {
   if (existsSync(path)) config({ path, override: false });
 }
 
+// Sentry MUST be initialized before importing express so its
+// auto-instrumentation can wrap the framework. No-op when SENTRY_DSN
+// isn't set (local dev) — production sets it via env.
+import * as Sentry from '@sentry/node';
+if (process.env.SENTRY_DSN) {
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.SENTRY_ENV ?? process.env.NODE_ENV ?? 'production',
+    // Sample modestly — error events always fire, but we don't need
+    // performance traces on every request at this scale.
+    tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE ?? 0.1),
+    // Pull the deploy SHA in if the env provides one (Railway/Vercel
+    // expose it). Helps tie errors to a specific build.
+    release: process.env.RAILWAY_DEPLOYMENT_ID ?? process.env.GIT_COMMIT_SHA,
+  });
+}
+
 import express from 'express';
 import cors from 'cors';
 import { agentsRouter } from './routes/agents.js';
@@ -25,6 +42,8 @@ import { puntoMedioRouter } from './routes/puntoMedio.js';
 import { adminRouter } from './routes/admin.js';
 import { silRouter } from './routes/sil.js';
 import { workspaceRouter } from './routes/workspace.js';
+import { conversationsRouter } from './routes/conversations.js';
+import { voiceRouter } from './routes/voice.js';
 import { publicDemoRouter } from './routes/publicDemo.js';
 import { podcastsRouter } from './routes/podcasts.js';
 import { requestContext } from './middleware/requestContext.js';
@@ -108,6 +127,13 @@ app.use(
   workspaceRouter,
 );
 app.use(
+  // Chat history — sidebar hydration + multi-device read across the
+  // user's persisted conversations. Read-heavy, low write volume.
+  '/api/conversations',
+  rateLimit({ bucket: 'conversations', max: 240, windowMs: 60_000 }),
+  conversationsRouter,
+);
+app.use(
   // Public demo chat — anonymous traffic from /landing. Tight per-IP
   // burst cap layered on top of the route's own 5-prompts-per-24h hard
   // limit (defense in depth: this stops scripted bursts; the inner cap
@@ -124,9 +150,24 @@ app.use(
   rateLimit({ bucket: 'podcasts', max: 60, windowMs: 60_000 }),
   podcastsRouter,
 );
+app.use(
+  // Voice → prompt. Tight cap because each request hits ElevenLabs
+  // (paid). 30/min/user covers heavy dictation; abuse hits the cap.
+  '/api/voice',
+  rateLimit({ bucket: 'voice', max: 30, windowMs: 60_000 }),
+  voiceRouter,
+);
 
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
   req.log?.error('unhandled', { error: err.message, stack: err.stack });
+  // Pipe to Sentry too — JSON logs go to stdout, but Sentry is the
+  // place that pages on regressions. Tag with request id so the
+  // log line and the Sentry event line up 1:1.
+  if (process.env.SENTRY_DSN) {
+    Sentry.captureException(err, {
+      tags: { request_id: String(req.requestId ?? 'unknown'), route: req.path },
+    });
+  }
   res.status(500).json({ ok: false, error: 'internal_error', request_id: req.requestId });
 });
 

@@ -1,0 +1,27 @@
+# cloudbuild-api.yaml — build api image with proper Dockerfile path.
+#
+# Invoked by deploy-api.sh via `gcloud builds submit`.
+# Build context = repo root.
+
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '${_IMAGE}'
+      - '-f'
+      - 'infra/deploy/Dockerfile.api'
+      - '.'
+
+images:
+  - '${_IMAGE}'
+
+options:
+  # Bump if builds OOM with default 1vCPU 4GB
+  machineType: 'E2_HIGHCPU_8'
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _IMAGE: 'us-central1-docker.pkg.dev/sincere-burner-475520-g7/cl2/cl2-v2-api:latest'
+
+timeout: '1200s'

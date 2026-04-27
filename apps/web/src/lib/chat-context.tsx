@@ -3,6 +3,21 @@ import { Scale, FileText, Radar } from 'lucide-react';
 import type { UploadedDoc } from '@/services/uploadPdf';
 
 // ═══════════════════════════════════════════════════════════════
+// AttachedWorkspace — workspace context attached to a chat turn.
+// Mirrors AttachedDoc but carries the markdown export from
+// /api/workspace/:id/attach-context, prepended to the query.
+// ═══════════════════════════════════════════════════════════════
+export interface AttachedWorkspace {
+  id: string;
+  title: string;
+  hoja_count: number;
+  total_chars: number;
+  truncated: boolean;
+  /** Full markdown export returned by attach-context. Prepended to query. */
+  full_md: string;
+}
+
+// ═══════════════════════════════════════════════════════════════
 // CL2 AGENT ROSTER — 3 Legislative Agents
 // ═══════════════════════════════════════════════════════════════
 
@@ -115,22 +130,25 @@ export type Message = {
 };
 
 /**
- * Optional binding from a chat session to a legacy plenaria.
+ * Discriminated union for chat scope. Two variants:
  *
- * Set when the conversation was started from `/sesiones/:id`. The sidebar
- * uses this to group "scoped" chats above "general" chats. The label is
- * cached locally so the sidebar can render the group header without
- * re-fetching session metadata on every mount.
+ * • session   — scoped to a legacy plenaria (SesionViewPage). Sends
+ *               `legacy_session_id` to the BFF so it injects session
+ *               metadata as a system message and groups the chat in the
+ *               sidebar under "Sesión #N".
  *
- * Server is the source of truth (`conversations.scope_legacy_session_id`);
- * this local copy is for UX only — first message hydrates it from the
- * `conversation` SSE chunk, subsequent loads read it from localStorage.
+ * • workspace — scoped to a Hojas workspace (WorkspaceCanvasPage). Sends
+ *               `workspace_id` (+ optional `selected_node_id`) to the
+ *               /api/workspace/:id/turn endpoint for intent-routed turns.
  */
-export type ChatScope = {
-  legacy_session_id: number;
-  /** Display label for the sidebar group header, e.g. "Sesión #71". */
-  label: string;
-};
+export type ChatScope =
+  | { kind: 'session'; legacy_session_id: number; label: string }
+  | {
+      kind: 'workspace';
+      workspace_id: string;
+      workspace_title: string;
+      selected_node_id: string | null;
+    };
 
 export type ChatSession = {
   id: string;
@@ -153,6 +171,7 @@ interface ChatContextType {
   deepInsight: boolean;
   tenantId: string;
   attachedDoc: UploadedDoc | null;
+  attachedWorkspace: AttachedWorkspace | null;
 
   setCurrentSessionId: (id: string | null) => void;
   setSelectedModel: (model: Model) => void;
@@ -162,6 +181,7 @@ interface ChatContextType {
   setDeepInsight: (enabled: boolean) => void;
   setTenantId: (tenantId: string) => void;
   setAttachedDoc: (doc: UploadedDoc | null) => void;
+  setAttachedWorkspace: (ws: AttachedWorkspace | null) => void;
 
   addMessage: (message: Message, explicitSessionId?: string) => void;
   updateMessage: (id: string, patch: Partial<Message>, explicitSessionId?: string) => void;
@@ -170,7 +190,7 @@ interface ChatContextType {
   /** Replace a local-timestamp session id with the canonical server UUID
    *  emitted by the API on first turn. Idempotent. */
   adoptServerSessionId: (localId: string, serverId: string) => void;
-  /** Tag a session with a plenaria scope. Idempotent — overwrites if set. */
+  /** Tag a session with a scope. Idempotent — overwrites if set. */
   setSessionScope: (sessionId: string, scope: ChatScope | null) => void;
 }
 
@@ -179,6 +199,71 @@ const ChatContext = createContext<ChatContextType | undefined>(undefined);
 interface ChatProviderProps {
   children: React.ReactNode;
   defaultTenantId?: string;
+}
+
+/**
+ * Merge a fresh list of conversations from the server into the local
+ * sidebar state. Rules:
+ *   - Server is source of truth for: title, updatedAt, scope (legacy
+ *     plenaria id), agent_id.
+ *   - Local is source of truth for: messages[] (already-loaded threads
+ *     keep their body so the user doesn't lose their place mid-scroll).
+ *   - Sessions in local but NOT in server: kept (probably never sent —
+ *     temp Date.now() id, or BFF was down when the user chatted).
+ *   - Sessions in server but NOT in local: added as stubs with empty
+ *     `messages[]`; lazy-loaded when the user clicks them.
+ * The result is sorted by updatedAt desc so the sidebar order is stable.
+ */
+function mergeServerIntoLocal(
+  local: ChatSession[],
+  server: Array<{
+    id: string;
+    agent_id: string;
+    title: string;
+    scope_legacy_session_id: number | null;
+    updated_at: string;
+  }>,
+  defaultModel: Model,
+): ChatSession[] {
+  const localById = new Map(local.map((s) => [s.id, s]));
+  const merged: ChatSession[] = [];
+  const seen = new Set<string>();
+
+  for (const s of server) {
+    seen.add(s.id);
+    const existing = localById.get(s.id);
+    const updatedAt = Date.parse(s.updated_at);
+    const scope: ChatScope | undefined = s.scope_legacy_session_id != null
+      ? { kind: 'session', legacy_session_id: s.scope_legacy_session_id, label: `Sesión #${s.scope_legacy_session_id}` }
+      : existing?.scope;
+    if (existing) {
+      merged.push({
+        ...existing,
+        title: s.title || existing.title,
+        updatedAt: Number.isFinite(updatedAt) ? updatedAt : existing.updatedAt,
+        agent: (s.agent_id as Agent) || existing.agent,
+        scope,
+      });
+    } else {
+      // New stub — messages will lazy-load when user clicks
+      merged.push({
+        id: s.id,
+        title: s.title || 'Nueva conversación',
+        updatedAt: Number.isFinite(updatedAt) ? updatedAt : Date.now(),
+        messages: [],
+        model: defaultModel,
+        agent: (s.agent_id as Agent) || 'lexa',
+        scope,
+      });
+    }
+  }
+  // Local-only sessions (probably temp ids never persisted, or BFF was
+  // down when the user chatted) — keep them so we don't lose work.
+  for (const s of local) {
+    if (!seen.has(s.id)) merged.push(s);
+  }
+  merged.sort((a, b) => b.updatedAt - a.updatedAt);
+  return merged;
 }
 
 export function ChatProvider({ children, defaultTenantId = 'cl2' }: ChatProviderProps) {
@@ -192,13 +277,29 @@ export function ChatProvider({ children, defaultTenantId = 'cl2' }: ChatProvider
   const [deepInsight, setDeepInsight] = useState(false);
   const [tenantId, setTenantId] = useState<string>(defaultTenantId);
   const [attachedDoc, setAttachedDoc] = useState<UploadedDoc | null>(null);
+  const [attachedWorkspace, setAttachedWorkspace] = useState<AttachedWorkspace | null>(null);
 
   const handleSetSelectedAgent = (agent: Agent) => {
     setSelectedAgent(agent);
     setSelectedModel(AGENT_MODEL_MAP[agent]);
   };
 
+  // ── Hydrate sessions: localStorage cache → then refresh from server ──
+  //
+  // Two-pass strategy so the sidebar paints instantly without a network
+  // round-trip on every page load, while still being correct across
+  // devices / cleared caches:
+  //
+  //   Pass 1: read `cl2_sessions` from localStorage (offline-first feel)
+  //   Pass 2: GET /api/conversations and merge with what we already had
+  //
+  // The merge keeps any locally-loaded `messages[]` (so a thread the
+  // user already opened doesn't lose its body), but refreshes title /
+  // updatedAt / scope from server-of-truth. New sessions from server
+  // come in as stubs (empty messages); they're lazy-loaded the first
+  // time the user clicks them via the effect below.
   useEffect(() => {
+    // Pass 1: localStorage cache
     const saved = localStorage.getItem('cl2_sessions');
     if (saved) {
       try {
@@ -207,11 +308,77 @@ export function ChatProvider({ children, defaultTenantId = 'cl2' }: ChatProvider
         console.error('Failed to parse chat sessions', e);
       }
     }
+
+    // Pass 2: refresh from server. Lazy-imported so SSR / no-auth paths
+    // (the public landing demo) don't pull this code.
+    let cancelled = false;
+    (async () => {
+      try {
+        const { listConversations } = await import('@/services/conversationsApi');
+        const serverItems = await listConversations({ limit: 100 });
+        if (cancelled) return;
+        setSessions((local) => mergeServerIntoLocal(local, serverItems, selectedModel));
+      } catch {
+        // No auth, no network, or BFF down — silently keep localStorage
+        // as the source. The sidebar still works for the user's existing
+        // session; the multi-device merge happens on the next reload.
+      }
+    })();
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     localStorage.setItem('cl2_sessions', JSON.stringify(sessions));
   }, [sessions]);
+
+  // ── Lazy-load messages when a server-side stub is opened ────────────
+  //
+  // When the user clicks a thread that came from the server-list pass,
+  // its `messages[]` is empty. Fetch them on demand. We mark `_loaded`
+  // on the session so we don't re-fetch on every re-render.
+  useEffect(() => {
+    if (!currentSessionId) return;
+    const sess = sessions.find((s) => s.id === currentSessionId);
+    if (!sess) return;
+    // Skip if already loaded (has messages, or marked loaded)
+    if (sess.messages.length > 0 || (sess as ChatSession & { _loaded?: boolean })._loaded) return;
+    // Skip non-server ids (Date.now() strings — those are pure client
+    // sessions never persisted yet)
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(currentSessionId)) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const { getConversationMessages, serverMessageToClient } = await import(
+          '@/services/conversationsApi'
+        );
+        const rows = await getConversationMessages(currentSessionId);
+        if (cancelled) return;
+        const mapped = rows.map(serverMessageToClient);
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === currentSessionId
+              ? ({ ...s, messages: mapped, _loaded: true } as ChatSession & { _loaded: boolean })
+              : s,
+          ),
+        );
+      } catch {
+        // Mark as loaded anyway so we don't loop on a 404'd thread
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === currentSessionId
+              ? ({ ...s, _loaded: true } as ChatSession & { _loaded: boolean })
+              : s,
+          ),
+        );
+      }
+    })();
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentSessionId]);
 
   const currentSession = sessions.find((s) => s.id === currentSessionId);
   const currentMessages = currentSession?.messages || [];
@@ -268,16 +435,34 @@ export function ChatProvider({ children, defaultTenantId = 'cl2' }: ChatProvider
 
   const updateMessage = (id: string, patch: Partial<Message>, explicitSessionId?: string) => {
     const targetSessionId = explicitSessionId || currentSessionId;
-    setSessions((prev) =>
-      prev.map((s) => {
-        if (s.id !== targetSessionId) return s;
-        return {
-          ...s,
-          messages: s.messages.map((m) => (m.id === id ? { ...m, ...patch } : m)),
+    setSessions((prev) => {
+      // Fast path: targeted session exists and contains the message.
+      const targetIdx = prev.findIndex((s) => s.id === targetSessionId);
+      if (targetIdx >= 0 && prev[targetIdx].messages.some((m) => m.id === id)) {
+        const next = prev.slice();
+        next[targetIdx] = {
+          ...prev[targetIdx],
+          messages: prev[targetIdx].messages.map((m) =>
+            m.id === id ? { ...m, ...patch } : m,
+          ),
           updatedAt: Date.now(),
         };
-      }),
-    );
+        return next;
+      }
+      // Fallback: caller's sessionId is stale (typical after the BFF
+      // sends a `conversation` chunk that triggered adoptServerSessionId,
+      // which renamed the session in-place). Locate the message by id
+      // across all sessions and patch wherever it lives.
+      return prev.map((s) =>
+        s.messages.some((m) => m.id === id)
+          ? {
+              ...s,
+              messages: s.messages.map((m) => (m.id === id ? { ...m, ...patch } : m)),
+              updatedAt: Date.now(),
+            }
+          : s,
+      );
+    });
   };
 
   const adoptServerSessionId = (localId: string, serverId: string) => {
@@ -330,6 +515,7 @@ export function ChatProvider({ children, defaultTenantId = 'cl2' }: ChatProvider
         deepInsight,
         tenantId,
         attachedDoc,
+        attachedWorkspace,
         setCurrentSessionId: handleSetCurrentSessionId,
         setSelectedModel,
         setSelectedAgent: handleSetSelectedAgent,
@@ -338,6 +524,7 @@ export function ChatProvider({ children, defaultTenantId = 'cl2' }: ChatProvider
         setDeepInsight,
         setTenantId,
         setAttachedDoc,
+        setAttachedWorkspace,
         addMessage,
         updateMessage,
         createNewSession,

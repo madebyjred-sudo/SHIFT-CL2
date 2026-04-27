@@ -12,16 +12,36 @@
  *
  * No ReactFlow <Handle> edges — Phase 0 is a free-form board, not a DAG.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NodeResizer, useReactFlow } from '@xyflow/react';
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
+// Format extensions used by the floating docx-style toolbar
+// (HojaFormatMenu) and editor quality-of-life:
+//   Underline / Highlight  — marks for subrayar + reteñir
+//   Link                    — auto-link URLs + clickable anchors
+//   TaskList / TaskItem     — interactive checkbox to-do lists
+//   TextAlign               — left/center/right/justify on headings + paragraphs
+//   Typography              — smart quotes, dashes, arrows ("..." → "…", "->" → →)
+//   CharacterCount          — exposed via storage; future word-count UI
+import Underline from '@tiptap/extension-underline';
+import Highlight from '@tiptap/extension-highlight';
+import Link from '@tiptap/extension-link';
+import TaskList from '@tiptap/extension-task-list';
+import TaskItem from '@tiptap/extension-task-item';
+import TextAlign from '@tiptap/extension-text-align';
+import Typography from '@tiptap/extension-typography';
+import CharacterCount from '@tiptap/extension-character-count';
 import {
-  GripHorizontal, Trash2, Download, Mic, Palette, Check,
+  GripHorizontal, Trash2, Download, Copy, Palette, Check,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { updateNode, exportNode, type NodeColor, type WorkspaceNode } from '@/services/workspaceApi';
 import { VoiceCaptureModal } from './VoiceCaptureModal';
+import { createSlashExtension, type SlashItem } from './HojaSlashExtension';
+import { SilCitePickerModal } from './SilCitePickerModal';
+import { LexaInlineModal, TEMPLATES, type TemplateKind } from './LexaInlineModal';
+import type { Editor as TiptapEditor, Range as TiptapRange } from '@tiptap/react';
 
 // ─── Color themes ─────────────────────────────────────────────────────
 const COLOR_THEMES: Record<NodeColor, { wrapper: string; header: string; dot: string }> = {
@@ -49,15 +69,143 @@ export function HojaNode({ id, data, selected }: { id: string; data: HojaNodeDat
   const [subtitle, setSubtitle] = useState(data.subtitle ?? '');
   const [color, setColor] = useState<NodeColor>((data.color as NodeColor) ?? 'default');
   const [showPalette, setShowPalette] = useState(false);
-  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  // Wall-clock of the last successful save. Drives the relative
+  // "guardado hace 4 s" label below the header chrome — much more
+  // legible than the previous tiny opacity-0 transition that the
+  // user couldn't see actually firing.
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
+  // Tick state lifts a 1-Hz refresh on the relative-time label so
+  // "hace 4 s" → "hace 5 s" without re-saving.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (lastSavedAt === null) return;
+    const id = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [lastSavedAt]);
   const [voiceAppendOpen, setVoiceAppendOpen] = useState(false);
+  const [copyState, setCopyState] = useState<'idle' | 'copied'>('idle');
+
+  // Slash command state — drives the SIL picker, the Lexa inline prompt
+  // and the template picker. The pending range tracks where in the
+  // editor the slash trigger fired so we can restore the cursor and
+  // insert content at the right spot when a modal commits.
+  const [silPickerOpen, setSilPickerOpen] = useState(false);
+  const [lexaInlineOpen, setLexaInlineOpen] = useState(false);
+  const [lexaAnchor, setLexaAnchor] = useState<{ top: number; left: number } | null>(null);
+  const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
+  const pendingEditorRef = useRef<TiptapEditor | null>(null);
+  const pendingRangeRef = useRef<TiptapRange | null>(null);
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initialMd = (data.content as { md?: string } | undefined)?.md ?? '';
 
+  // ── Slash command runner ─────────────────────────────────────────
+  // Wired into the TipTap extension via the factory below. Fired when
+  // the user picks an item from the slash popup. We stash the editor +
+  // range so modal commits can resume insertion at the right location.
+  const runSlashCommand = useCallback((item: SlashItem, args: { editor: TiptapEditor; range: TiptapRange }) => {
+    pendingEditorRef.current = args.editor;
+    pendingRangeRef.current = args.range;
+
+    if (item.key === 'cite') {
+      setSilPickerOpen(true);
+      return;
+    }
+    if (item.key === 'lexa') {
+      // Capture the current caret rect for floating-popup anchoring
+      const sel = window.getSelection();
+      const r = sel?.rangeCount ? sel.getRangeAt(0).getBoundingClientRect() : null;
+      setLexaAnchor(r ? { top: r.bottom + 6, left: r.left } : { top: 200, left: 200 });
+      setLexaInlineOpen(true);
+      return;
+    }
+    if (item.key === 'template') {
+      setTemplatePickerOpen(true);
+      return;
+    }
+    if (item.key === 'voz') {
+      // Open the existing VoiceCaptureModal (append mode) so the user
+      // can dictate and have the transcript inserted at the end of the
+      // editor's content.
+      setVoiceAppendOpen(true);
+      return;
+    }
+    if (item.key === 'resumen' || item.key === 'expandir') {
+      // Pull the entire current document as context, ask /transform to
+      // either summarize it (resumen) or expand the last paragraph
+      // (expandir). We re-use the pending range as the insert point.
+      const ed = args.editor;
+      const allText = ed.getText().trim();
+      const lastPara = allText.split(/\n\s*\n/).pop() ?? allText;
+      const action = item.key === 'resumen' ? 'summarize' : 'expand';
+      const sourceText = item.key === 'resumen' ? allText : lastPara;
+      if (!sourceText.trim()) {
+        ed.chain().focus().insertContent('_(escribí algo primero para que Lexa pueda trabajar)_').run();
+        return;
+      }
+      // Mark a placeholder while we wait, then replace
+      ed.chain().focus().insertContent({ type: 'paragraph', content: [{ type: 'text', text: '⏳ Lexa está pensando…' }] }).run();
+      const placeholderRange = ed.state.selection;
+      import('@/services/workspaceApi').then(async ({ transformText }) => {
+        try {
+          const r = await transformText(workspaceId, { selection: sourceText, action });
+          ed.chain().focus()
+            .deleteRange({ from: placeholderRange.from - '⏳ Lexa está pensando…'.length - 1, to: placeholderRange.to })
+            .insertContent({
+              type: 'paragraph',
+              content: [{ type: 'text', text: r.text }],
+            })
+            .run();
+          // Save shape: API only accepts `content` at top level (the
+          // PATCH allow-list rejects bare `md`). Plain getText also
+          // strips marks/headings/lists — getHTML round-trips through
+          // TipTap's parseHTML rules on next load.
+          scheduleSave({ content: { md: ed.getHTML() } });
+        } catch {
+          // Leave the placeholder; user can manually edit
+        }
+      });
+    }
+  }, [workspaceId]);
+
+  // The factory closes over `runSlashCommand` so we recreate the
+  // extension if the callback identity changes. useMemo to avoid a new
+  // extension instance per render (would re-init the suggestion plugin).
+  const slashExtension = useMemo(() => createSlashExtension({ onRun: runSlashCommand }), [runSlashCommand]);
+
   // ── TipTap editor ────────────────────────────────────────────────
   const editor = useEditor({
-    extensions: [StarterKit],
+    extensions: [
+      StarterKit,
+      slashExtension,
+      Underline,
+      // multicolor=true so each highlight click can set a different
+      // color (yellow / green / pink / blue) via setHighlight({color}).
+      Highlight.configure({ multicolor: true }),
+      // Link: open in new tab + auto-link pasted URLs. We allow target
+      // _blank so legislative source URLs open out-of-app cleanly.
+      Link.configure({
+        openOnClick: false, // editor click should NOT navigate (steals from typing)
+        autolink: true,
+        linkOnPaste: true,
+        HTMLAttributes: { target: '_blank', rel: 'noopener noreferrer nofollow' },
+      }),
+      // TextAlign applies textAlign attr to heading/paragraph nodes.
+      // Toolbar wires keyboard equivalents via execCommand justify*.
+      TextAlign.configure({ types: ['heading', 'paragraph'] }),
+      // Task list: interactive checkboxes inside hojas. Useful for
+      // action items / follow-ups in legislative briefings.
+      TaskList,
+      TaskItem.configure({ nested: true }),
+      // Typography: smart-quote and arrow auto-replacements. Subtle
+      // editorial polish ("..." → …, "->" → →, "(c)" → ©).
+      Typography,
+      // CharacterCount: exposes editor.storage.characterCount.{characters,words}.
+      // No UI yet — keeping it loaded so a future "300-700 word" hint
+      // can read the count without re-instantiating the editor.
+      CharacterCount,
+    ],
     content: initialMd
       ? `<p>${initialMd.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}</p>`
       : '',
@@ -67,11 +215,26 @@ export function HojaNode({ id, data, selected }: { id: string; data: HojaNodeDat
       },
     },
     onUpdate: ({ editor }) => {
-      scheduleSave({ md: editor.getText() });
+      // CRITICAL: this was the body-loss bug. Old shape was
+      // `{ md: editor.getText() }` — top-level `md` is NOT in the
+      // PATCH allow-list (server only accepts `content`), so every
+      // edit was silently dropped server-side. Title/subtitle saved
+      // because they ARE in the allow-list. Switch to:
+      //   { content: { md: editor.getHTML() } }
+      // - `content` lands in the JSONB column (allow-list keeps it).
+      // - getHTML() preserves headings/marks/lists/highlights/links/
+      //   tasks/text-align so a refresh round-trips the formatting,
+      //   not just plain text.
+      scheduleSave({ content: { md: editor.getHTML() } });
     },
   });
 
   // ── Auto-save helper ─────────────────────────────────────────────
+  // Debounced 800ms — fast enough that the user sees "guardado" within
+  // a second of pausing, slow enough to coalesce a rapid burst of
+  // keystrokes into one PATCH. On success we also record `lastSavedAt`
+  // so the header chrome can render "guardado hace N s" continuously
+  // (not just a 2-second flash).
   const scheduleSave = useCallback((patch: Parameters<typeof updateNode>[2]) => {
     if (saveTimer.current) clearTimeout(saveTimer.current);
     setSaveState('saving');
@@ -79,9 +242,9 @@ export function HojaNode({ id, data, selected }: { id: string; data: HojaNodeDat
       try {
         await updateNode(workspaceId, id, patch);
         setSaveState('saved');
-        setTimeout(() => setSaveState('idle'), 2000);
+        setLastSavedAt(Date.now());
       } catch {
-        setSaveState('idle');
+        setSaveState('error');
       }
     }, 800);
   }, [workspaceId, id]);
@@ -149,14 +312,18 @@ export function HojaNode({ id, data, selected }: { id: string; data: HojaNodeDat
 
         {/* Actions */}
         <div className="flex items-center gap-1 shrink-0">
-          {/* Save indicator */}
-          <span className={cn(
-            'text-[10px] font-medium transition-opacity duration-300',
-            saveState === 'idle' ? 'opacity-0' : 'opacity-100',
-            saveState === 'saved' ? 'text-emerald-500' : 'text-[#0e1745]/40 dark:text-white/40',
-          )}>
-            {saveState === 'saving' ? 'guardando…' : saveState === 'saved' ? <Check className="w-3 h-3 inline" /> : ''}
-          </span>
+          {/* Save indicator — visible whenever we have any save state.
+              States:
+                saving → "Guardando…" (burgundy, no icon)
+                saved (with timestamp) → "✓ hace N s/m"
+                error → "⚠ no guardó" (rose)
+              The timestamp re-renders every second via the interval at
+              the top of the component, so the user sees the freshness
+              decay without re-saving. */}
+          <SaveIndicator
+            state={saveState}
+            lastSavedAt={lastSavedAt}
+          />
 
           {/* Color palette */}
           <div className="relative">
@@ -181,13 +348,25 @@ export function HojaNode({ id, data, selected }: { id: string; data: HojaNodeDat
             )}
           </div>
 
-          {/* Voice append — push-to-record then append transcript to body */}
+          {/* Copy body to clipboard. Voice dictation moved to slash command
+              `/voz` inside the editor — keeps the header light and lets the
+              user trigger voice exactly where they're already typing. */}
           <button
-            onClick={(e) => { e.stopPropagation(); setVoiceAppendOpen(true); }}
-            className="p-1.5 rounded-lg hover:bg-cl2-burgundy/10 dark:hover:bg-cl2-accent/15 transition-colors text-[#0e1745]/50 dark:text-white/50 hover:text-cl2-burgundy dark:hover:text-cl2-accent-soft"
-            title="Agregar al body por voz"
+            onClick={async (e) => {
+              e.stopPropagation();
+              const text = editor?.getText() ?? '';
+              try {
+                await navigator.clipboard.writeText(text);
+                setCopyState('copied');
+                setTimeout(() => setCopyState('idle'), 1500);
+              } catch { /* clipboard blocked — silent */ }
+            }}
+            className="p-1.5 rounded-lg hover:bg-black/8 dark:hover:bg-white/10 transition-colors text-[#0e1745]/50 dark:text-white/50"
+            title={copyState === 'copied' ? '¡Copiado!' : 'Copiar contenido'}
           >
-            <Mic className="w-3.5 h-3.5" />
+            {copyState === 'copied'
+              ? <Check className="w-3.5 h-3.5 text-emerald-500" />
+              : <Copy className="w-3.5 h-3.5" />}
           </button>
 
           {/* Export MD */}
@@ -235,9 +414,149 @@ export function HojaNode({ id, data, selected }: { id: string; data: HojaNodeDat
           // Save right away so the user doesn't lose it on accidental
           // close (debounced auto-save would catch it anyway, but this
           // makes the "saved" indicator pop confirming the action).
-          scheduleSave({ content: { md: editor.getText() } });
+          scheduleSave({ content: { md: editor.getHTML() } });
         }}
       />
+
+      {/* ── /cite — SIL picker modal ────────────────────────────── */}
+      <SilCitePickerModal
+        open={silPickerOpen}
+        onClose={() => setSilPickerOpen(false)}
+        onPick={(it) => {
+          const ed = pendingEditorRef.current ?? editor;
+          if (!ed) return;
+          // Insert a markdown-style link. StarterKit doesn't include the
+          // Link mark by default but TipTap renders bracketed links as
+          // plain text; the DOCX exporter parses [text](url) into proper
+          // hyperlinks. Good enough for the demo. We could add the Link
+          // extension later for in-editor click-to-open behavior.
+          const numero = it.numero;
+          const slug = numero.replace(/[^\d]/g, '');
+          const text = `[Exp. N° ${numero}](/expediente/${slug})`;
+          ed.chain().focus().insertContent({
+            type: 'text',
+            text: text + ' ',
+          }).run();
+          scheduleSave({ content: { md: ed.getHTML() } });
+        }}
+      />
+
+      {/* ── /lexa — inline prompt modal ─────────────────────────── */}
+      <LexaInlineModal
+        workspaceId={workspaceId}
+        open={lexaInlineOpen}
+        anchor={lexaAnchor}
+        onClose={() => setLexaInlineOpen(false)}
+        onAccept={(text) => {
+          const ed = pendingEditorRef.current ?? editor;
+          if (!ed) return;
+          ed.chain().focus().insertContent({
+            type: 'paragraph',
+            content: [{ type: 'text', text }],
+          }).run();
+          scheduleSave({ content: { md: ed.getHTML() } });
+        }}
+      />
+
+      {/* ── /template — pre-canned skeleton picker ─────────────── */}
+      {templatePickerOpen && (
+        <div
+          className="fixed inset-0 z-[260] flex items-start justify-center pt-[15vh] bg-black/40 backdrop-blur-sm"
+          onClick={() => setTemplatePickerOpen(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-white dark:bg-[#1c1c1c] border border-black/10 dark:border-white/10 shadow-2xl py-1"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {(Object.entries(TEMPLATES) as Array<[TemplateKind, typeof TEMPLATES[TemplateKind]]>).map(([key, tpl]) => (
+              <button
+                key={key}
+                onClick={() => {
+                  const ed = pendingEditorRef.current ?? editor;
+                  if (!ed) return;
+                  // Insert template as multiple paragraphs (split on blank lines)
+                  const blocks = tpl.md.split(/\n\s*\n/).filter(Boolean);
+                  const content = blocks.map((b) => ({
+                    type: 'paragraph',
+                    content: [{ type: 'text', text: b }],
+                  }));
+                  ed.chain().focus().insertContent(content).run();
+                  scheduleSave({ content: { md: ed.getHTML() } });
+                  setTemplatePickerOpen(false);
+                }}
+                className="w-full text-left px-4 py-3 hover:bg-cl2-burgundy/5 transition-colors border-b border-black/5 dark:border-white/5 last:border-0"
+              >
+                <div className="text-[13px] font-semibold text-[#0e1745] dark:text-white">
+                  {tpl.label}
+                </div>
+                <div className="text-[11px] text-[#0e1745]/55 dark:text-white/45 mt-0.5">
+                  {tpl.subtitle}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+// ─── Save indicator ──────────────────────────────────────────────────
+// Renders the auto-save status next to the hoja header. We keep this
+// separate so the parent's render isn't a giant ternary and so the
+// timestamp formatter is colocated with the consumer.
+function SaveIndicator({
+  state,
+  lastSavedAt,
+}: {
+  state: 'idle' | 'saving' | 'saved' | 'error';
+  lastSavedAt: number | null;
+}) {
+  if (state === 'saving') {
+    return (
+      <span className="inline-flex items-center gap-1 text-[10.5px] font-medium text-cl2-burgundy/80 dark:text-[#d8a4ad]/85 px-1.5 py-0.5 rounded-md bg-cl2-burgundy/[0.06] dark:bg-cl2-accent/[0.10]">
+        <span className="inline-block w-2 h-2 rounded-full bg-cl2-burgundy/60 animate-pulse" />
+        Guardando…
+      </span>
+    );
+  }
+  if (state === 'error') {
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-[10.5px] font-semibold text-rose-700 dark:text-rose-400 px-1.5 py-0.5 rounded-md bg-rose-50 dark:bg-rose-900/20"
+        title="No se pudo guardar — reintenta editando o revisa tu conexión"
+      >
+        <span className="inline-block w-2 h-2 rounded-full bg-rose-500" />
+        No guardó
+      </span>
+    );
+  }
+  if (state === 'saved' && lastSavedAt !== null) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-[10.5px] font-medium text-emerald-700/85 dark:text-emerald-400/85"
+        title={`Última escritura: ${new Date(lastSavedAt).toLocaleString('es-CR')}`}
+      >
+        <Check className="w-3 h-3" />
+        Guardado · {formatRelativeAgo(lastSavedAt)}
+      </span>
+    );
+  }
+  // idle without a prior save — render nothing
+  return null;
+}
+
+/**
+ * "hace 5 s" / "hace 2 m" / "hace 1 h" — short relative format. We
+ * cap the granularity at hours; anything older just shows the time.
+ */
+function formatRelativeAgo(ts: number): string {
+  const sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (sec < 5)   return 'recién';
+  if (sec < 60)  return `hace ${sec} s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `hace ${min} min`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24)  return `hace ${hr} h`;
+  return new Date(ts).toLocaleDateString('es-CR');
 }

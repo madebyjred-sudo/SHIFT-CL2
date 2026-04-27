@@ -60,10 +60,10 @@ silRouter.get('/coverage', async (req, res) => {
       { count: legacy97_22 },
     ] = await Promise.all([
       s.from('sil_expedientes').select('id', { count: 'exact', head: true }),
-      // Distinct count of expediente_id present in sil_documentos — count
-      // exact via head=true returns null for distinct, so we fall back
-      // to fetching ids and de-duping in JS. The set is small (<1k for
-      // a long time) so the cost is negligible.
+      // Total count of rows in sil_documentos (used as `indexed_doc_count`).
+      // Distinct expediente count is computed below via pagination —
+      // PostgREST's `head:true` doesn't support DISTINCT and `.limit()` is
+      // capped server-side at 1000 rows by default, so we have to walk.
       s.from('sil_documentos').select('expediente_id', { count: 'exact', head: true }),
       s.from('sil_expedientes').select('id', { count: 'exact', head: true }).gte('id', 22000),
       s.from('sil_expedientes').select('id', { count: 'exact', head: true }).lt('id', 12900),
@@ -71,11 +71,31 @@ silRouter.get('/coverage', async (req, res) => {
     ]);
 
     // True distinct expedientes-with-docs count.
-    const { data: docRows } = await s
-      .from('sil_documentos')
-      .select('expediente_id')
-      .limit(20_000);
-    const indexedDistinct = new Set((docRows ?? []).map((r) => r.expediente_id)).size;
+    //
+    // Bug history: this used to be `.limit(20_000)` followed by a JS dedup,
+    // assuming the table stayed small (<1k unique expedientes). After the
+    // bulk DOCX ingest of 2026-04-27 the table crossed 13k rows and PostgREST's
+    // server-side default page cap (1000) silently truncated the result —
+    // the catálogo started showing 241 instead of the real number.
+    //
+    // Fix: paginate in 1000-row windows until we exhaust the table. The set
+    // we accumulate is just integers so memory is bounded (~80kB at 10k uniques).
+    const indexedSet = new Set<number>();
+    const PAGE = 1000;
+    const MAX_PAGES = 50; // safety cap: 50k rows = enough for years of growth
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const from = page * PAGE;
+      const to = from + PAGE - 1;
+      const { data: chunk, error: pageErr } = await s
+        .from('sil_documentos')
+        .select('expediente_id')
+        .range(from, to);
+      if (pageErr) throw new Error(pageErr.message);
+      if (!chunk || chunk.length === 0) break;
+      for (const r of chunk) indexedSet.add(r.expediente_id as number);
+      if (chunk.length < PAGE) break; // last page
+    }
+    const indexedDistinct = indexedSet.size;
 
     res.json({
       ok: true,

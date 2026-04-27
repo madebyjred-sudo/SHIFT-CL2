@@ -77,6 +77,27 @@ export interface CreatePodcastArgs {
   voice_id: string;
   duration_target_s: 90 | 180 | 300;
   style: PodcastStyle;
+  /** Optional ≤140-char directive Lexa weaves into the script. */
+  user_prompt?: string;
+}
+
+/**
+ * Ask Lexa to rewrite a 140-char user idea into a tighter directive.
+ * Used by the modal's "Mejorar con Lexa" button — non-destructive, the
+ * user can accept or discard the result.
+ */
+export async function enhancePodcastPrompt(prompt: string): Promise<string> {
+  const res = await fetch(`${BASE}/enhance-prompt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+    body: JSON.stringify({ prompt }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
+  const json = (await res.json()) as { ok: true; prompt: string };
+  return json.prompt;
 }
 
 export interface PodcastQuota {

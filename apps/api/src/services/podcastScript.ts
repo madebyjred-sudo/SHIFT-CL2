@@ -50,6 +50,12 @@ export interface ScriptArgs {
   duration_target_s: number;
   /** 'informativo' = factual briefing tone. 'conversacional' = lighter. */
   style: 'informativo' | 'conversacional';
+  /**
+   * Optional user-supplied directive (≤140 chars) — surfaces what the
+   * listener wants emphasized. Threaded into the user prompt as a
+   * "DIRECTRIZ DEL USUARIO" block. Empty/undefined = standard behavior.
+   */
+  user_prompt?: string | null;
 }
 
 /**
@@ -70,7 +76,7 @@ export async function generatePodcastScript(args: ScriptArgs): Promise<PodcastSc
   const charsBudget = Math.min(wordsBudget * 6, 8_000);
 
   const systemPrompt = buildScriptSystemPrompt(args.style, args.duration_target_s, charsBudget);
-  const userPrompt = buildScriptUserPrompt(args.source_label, args.source_text, args.duration_target_s);
+  const userPrompt = buildScriptUserPrompt(args.source_label, args.source_text, args.duration_target_s, args.user_prompt);
 
   const res = await withRetry(
     () =>
@@ -195,17 +201,35 @@ function buildDialoguePrompt(minutes: number, charsBudget: number): string {
   ].join('\n');
 }
 
-function buildScriptUserPrompt(label: string, source: string, durationS: number): string {
-  return [
+function buildScriptUserPrompt(
+  label: string,
+  source: string,
+  durationS: number,
+  userDirective?: string | null,
+): string {
+  const lines: string[] = [
     `Material fuente — ${label}:`,
     '"""',
     source.slice(0, 12_000),
     '"""',
     '',
+  ];
+  // Hard cap to 280 chars (140 user + 140 enhanced) so a malicious
+  // caller can't blow up the prompt budget. Trim whitespace too.
+  const directive = (userDirective ?? '').trim().slice(0, 280);
+  if (directive) {
+    lines.push(
+      'DIRECTRIZ DEL USUARIO (priorizá esto, sin contradecir el material fuente):',
+      `"${directive}"`,
+      '',
+    );
+  }
+  lines.push(
     `Escribí un guion de podcast de aproximadamente ${Math.round(durationS / 60)} minuto${
       durationS >= 90 ? 's' : ''
     } basado en lo anterior. Devolvé el JSON.`,
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 // ─── Validation ──────────────────────────────────────────────────────
@@ -240,4 +264,81 @@ function validateScript(raw: unknown): PodcastScript {
     throw new Error(`script: total ${total} chars exceeds cap`);
   }
   return { title, segments: validated, total_chars: total };
+}
+
+// ─── Prompt enhancement ──────────────────────────────────────────────
+//
+// Used by POST /api/podcasts/enhance-prompt. The user types a 140-char
+// idea ("hablá del impacto fiscal y mencioná a Otto"); a flash model
+// rewrites it into a tighter directive that scripts read better.
+// Output also capped at 140 chars so the modal can show it inline and
+// the generation request stays below the 280-char hard cap.
+//
+// Model selection: deliberately NOT Lexa's default (Sonnet-class) —
+// this is a one-shot rewrite of <140 chars, the cheap-and-fast tier
+// gives indistinguishable quality at ~1/40th the price + ~1/3 the
+// latency. Same default as the workspace transform pipeline. Override
+// via env if a faster model becomes available.
+const ENHANCE_TIMEOUT_MS = 20_000;
+const ENHANCE_MAX_LEN = 140;
+const ENHANCE_MODEL = process.env.PODCAST_ENHANCE_MODEL ?? 'deepseek/deepseek-v4-flash';
+
+export async function enhancePodcastPrompt(rawPrompt: string): Promise<string> {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error('OPENROUTER_API_KEY not set');
+
+  const trimmed = rawPrompt.replace(/\s+/g, ' ').trim().slice(0, ENHANCE_MAX_LEN);
+  if (!trimmed) throw new Error('empty prompt');
+
+  // Voice still matches Lexa's editorial register, but we bypass the
+  // agent loader since we don't need persona/tools — just a single
+  // string-in / string-out call.
+  const sys = [
+    'Sos Lexa, asesora legislativa de CL2.',
+    `Reescribís la directriz que el usuario quiere darle al podcast en una sola oración española de Costa Rica, máximo ${ENHANCE_MAX_LEN} caracteres.`,
+    'Mantenés la intención original. Sumás especificidad concreta sólo si está implícita (ej: "hablá del impacto fiscal" → "Enfocá el guion en el impacto fiscal y los actores legislativos involucrados").',
+    'NO inventes datos. NO agregues actores ni números no mencionados. NO uses comillas. Devolvé sólo la oración mejorada, sin prefijos como "Aquí está:" ni explicaciones.',
+  ].join(' ');
+
+  const res = await withTimeout(
+    (signal) =>
+      fetch(`${OR_BASE}/chat/completions`, {
+        signal,
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://agentescl2.com',
+          'X-Title': 'CL2 Podcast Prompt Enhance',
+        },
+        body: JSON.stringify({
+          model: ENHANCE_MODEL,
+          messages: [
+            { role: 'system', content: sys },
+            { role: 'user', content: trimmed },
+          ],
+          max_tokens: 120,
+          temperature: 0.4,
+        }),
+      }),
+    { ms: ENHANCE_TIMEOUT_MS, label: 'podcast:enhance' },
+  );
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    logger.warn('podcast_enhance_http_failed', { status: res.status, detail: detail.slice(0, 200) });
+    throw new Error(`enhance ${res.status}`);
+  }
+
+  const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+  const out = (json.choices?.[0]?.message?.content ?? '').trim();
+  if (!out) throw new Error('enhance: empty response');
+  // Strip surrounding quotes if Lexa wrapped them anyway, collapse
+  // whitespace, hard cap.
+  const cleaned = out
+    .replace(/^["'`]+|["'`]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, ENHANCE_MAX_LEN);
+  return cleaned;
 }

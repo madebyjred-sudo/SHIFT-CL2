@@ -1,0 +1,31 @@
+# cloudbuild-web.yaml — build web image with VITE build-args.
+#
+# Invoked by deploy-web.sh.
+
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '${_IMAGE}'
+      - '-f'
+      - 'infra/deploy/Dockerfile.web'
+      - '--build-arg'
+      - 'VITE_SUPABASE_URL=${_VITE_SUPABASE_URL}'
+      - '--build-arg'
+      - 'VITE_SUPABASE_PUBLISHABLE_KEY=${_VITE_SUPABASE_PUBLISHABLE_KEY}'
+      - '.'
+
+images:
+  - '${_IMAGE}'
+
+options:
+  machineType: 'E2_HIGHCPU_8'
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _IMAGE: 'us-central1-docker.pkg.dev/sincere-burner-475520-g7/cl2/cl2-v2-web:latest'
+  _VITE_SUPABASE_URL: ''
+  _VITE_SUPABASE_PUBLISHABLE_KEY: ''
+
+timeout: '1200s'

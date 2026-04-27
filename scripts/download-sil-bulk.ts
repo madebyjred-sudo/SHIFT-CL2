@@ -26,6 +26,12 @@
  *             Designed to run overnight or in background.
  * Resumable:  set START_FROM=N to skip lower expediente numbers; LIMIT=N
  *             caps the total count.
+ * Order:      ascending by expediente id (oldest first) by default.
+ *             Set NEWEST_FIRST=1 to walk descending — covers the active
+ *             period first (most relevant for current legislative work),
+ *             leaving historical bulk for later. SIL's webforms backend
+ *             also tends to be more responsive for recent expedientes,
+ *             which means fewer 30s timeouts per batch.
  *
  * Idempotent: existing sil_documentos rows for an expediente are deleted
  * and re-inserted on each run for that expediente. Set FORCE=0 to skip
@@ -65,6 +71,7 @@ const CONCURRENCY = Number(process.env.SIL_BULK_CONCURRENCY ?? 4);
 const PER_WORKER_DELAY_MS = Number(process.env.SIL_BULK_DELAY_MS ?? 800);
 const LIMIT = Number(process.env.LIMIT ?? Number.POSITIVE_INFINITY);
 const START_FROM = Number(process.env.START_FROM ?? 0);
+const NEWEST_FIRST = (process.env.NEWEST_FIRST ?? '0') === '1';
 const SESSION_REFRESH_EVERY = 50; // refresh more aggressively — heavier per-exp work
 const FORCE = (process.env.FORCE ?? '0') === '1';
 const CHUNK_CHARS = 1500;
@@ -170,12 +177,18 @@ async function fetchTargets(): Promise<ExpRow[]> {
   let offset = 0;
   const pageSize = 1000;
   while (true) {
+    // NEWEST_FIRST flips the walk so we cover the active legislative period
+    // first. START_FROM still applies but its semantics flip too: in newest-
+    // first mode it means "skip ids ABOVE this value" (i.e. resume below a
+    // given id). Default ascending mode keeps the original gte semantics.
     let q = supa
       .from('sil_expedientes')
       .select('id, numero, titulo, comision, estado, fecha_presentacion, url_detalle')
-      .order('id', { ascending: true })
+      .order('id', { ascending: !NEWEST_FIRST })
       .range(offset, offset + pageSize - 1);
-    if (START_FROM > 0) q = q.gte('id', START_FROM);
+    if (START_FROM > 0) {
+      q = NEWEST_FIRST ? q.lte('id', START_FROM) : q.gte('id', START_FROM);
+    }
     const { data, error } = await q;
     if (error) throw new Error(`fetchTargets: ${error.message}`);
     if (!data || data.length === 0) break;

@@ -24,7 +24,11 @@ import { withRetry, withTimeout } from './resilience.js';
 const SIL_WEBFORMS_BASE =
   process.env.SIL_WEBFORMS_BASE ?? 'https://consultassil3.asamblea.go.cr';
 const PAGE_PATH = '/frmConsultaProyectos.aspx';
-const WEBFORMS_TIMEOUT_MS = 20_000;
+// SIL upstream is intermittently slow — observed 0.9s to 30s+ response times
+// during the post-outage recovery window 2026-04-27. 60s gives the bulk
+// loop enough headroom to ride through the spikes without falling back to
+// retry-storm. Override via SIL_WEBFORMS_TIMEOUT_MS if needed.
+const WEBFORMS_TIMEOUT_MS = Number(process.env.SIL_WEBFORMS_TIMEOUT_MS ?? 60_000);
 
 const COMMON_HEADERS = {
   'User-Agent': 'shift-cl2/1.0 (+https://cl2.shiftlab.io; contact: madebyjred@gmail.com)',

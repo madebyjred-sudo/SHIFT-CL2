@@ -4,15 +4,19 @@
  * (el modal de diff es 20h+ y excede el sprint).
  */
 import { motion, AnimatePresence } from 'motion/react';
-import { X } from 'lucide-react';
+import { Layers, X } from 'lucide-react';
 
 interface Props {
   ids: number[];
   onClear: () => void;
   onCompare: (ids: number[]) => void;
+  /** Optional: when set, renders a "Enviar a workspace" CTA next to
+   *  Comparar. Click pushes the selected ids up so the page can open
+   *  its SendToWorkspaceModal. */
+  onSendToWorkspace?: (ids: number[]) => void;
 }
 
-export function CompareDock({ ids, onClear, onCompare }: Props) {
+export function CompareDock({ ids, onClear, onCompare, onSendToWorkspace }: Props) {
   return (
     <AnimatePresence>
       {ids.length > 0 && (
@@ -46,6 +50,17 @@ export function CompareDock({ ids, onClear, onCompare }: Props) {
           <span className="text-[12.5px] font-medium">
             {ids.length} {ids.length === 1 ? 'plenaria seleccionada' : 'plenarias seleccionadas'}
           </span>
+          {onSendToWorkspace && (
+            <button
+              type="button"
+              onClick={() => onSendToWorkspace(ids)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white text-[12.5px] font-semibold transition-colors"
+              title="Enviar las sesiones seleccionadas a un workspace"
+            >
+              <Layers size={13} />
+              A workspace
+            </button>
+          )}
           <button
             type="button"
             onClick={() => onCompare(ids)}

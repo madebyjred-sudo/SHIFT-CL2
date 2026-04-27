@@ -104,7 +104,7 @@ export function Sidebar({
     };
 
     for (const s of sessions) {
-        if (s.scope?.legacy_session_id != null) {
+        if (s.scope?.kind === 'session' && s.scope.legacy_session_id != null) {
             const sid = s.scope.legacy_session_id;
             const existing = scopedGroupsMap.get(sid);
             if (existing) {

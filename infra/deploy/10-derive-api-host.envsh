@@ -1,0 +1,23 @@
+#!/bin/sh
+# Derives API_HOST from API_BASE_URL before nginx's envsubst runs.
+# Cloud Run upstreams require the Host header to match the *.run.app
+# hostname (SNI routing), so we strip the scheme + path off API_BASE_URL.
+#
+# Runs from /docker-entrypoint.d/ which the upstream nginx:alpine image
+# auto-executes in lexical order before launching nginx.
+
+set -eu
+
+if [ -z "${API_BASE_URL:-}" ]; then
+  echo "[entrypoint] WARN: API_BASE_URL is empty — /api/* proxy will fail"
+  export API_HOST=""
+else
+  # Strip protocol + everything after the host (path, query, port).
+  host="${API_BASE_URL#http://}"
+  host="${host#https://}"
+  host="${host%%/*}"
+  host="${host%%:*}"
+  export API_HOST="$host"
+  echo "[entrypoint] API_BASE_URL=${API_BASE_URL}"
+  echo "[entrypoint] API_HOST=${API_HOST}"
+fi

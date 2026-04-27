@@ -21,26 +21,37 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import {
-  ArrowLeft, Headphones, Mic, Plus, Layers, ZoomIn,
+  ArrowLeft, Copy, Headphones, Plus, Layers, Sparkles, Trash2, Upload, ZoomIn,
 } from 'lucide-react';
 import { TopDock } from '@/components/top-dock';
 import { HojaNode } from '@/components/hoja/HojaNode';
-import { LexaContextPanel } from '@/components/hoja/LexaContextPanel';
-import { HojaSelectionMenu } from '@/components/hoja/HojaSelectionMenu';
-import { VoiceCaptureModal } from '@/components/hoja/VoiceCaptureModal';
+import { AssetNode } from '@/components/hoja/AssetNode';
+import { LexaContextPanel } from '@/components/hoja/LexaContextPanel'; // kept for rollback
+import { HojaFormatMenu } from '@/components/hoja/HojaFormatMenu';
+import { AnimatedAiInput } from '@/components/animated-ai-input';
+import { LexaQuickHojaModal } from '@/components/hoja/LexaQuickHojaModal';
 import { PodcastModal } from '@/components/podcasts/PodcastModal';
 import { BoardAudioStrip } from '@/components/podcasts/BoardAudioStrip';
+import { useContextMenu, type ContextMenuItem } from '@/components/ui/context-menu';
 import { navigate } from '@/lib/router';
 import { cn } from '@/lib/utils';
 import {
-  listNodes, createNode, updateNode, deleteNode, getNode,
+  listNodes, createNode, updateNode, deleteNode, getNode, importAsset,
   type WorkspaceNode,
 } from '@/services/workspaceApi';
 import { updateWorkspace } from '@/services/workspaceApi';
 import { supabase } from '@/lib/supabase';
 
 // ─── Node type registration ───────────────────────────────────────────
-const NODE_TYPES = { hoja: HojaNode } as const;
+// hoja → rich-text TipTap node (the default workspace primitive)
+// image / audio / document → imported asset nodes (single AssetNode handles
+//                            all three via type-aware render branch)
+const NODE_TYPES = {
+  hoja: HojaNode,
+  image: AssetNode,
+  audio: AssetNode,
+  document: AssetNode,
+} as const;
 
 // ─── Grid layout helper ───────────────────────────────────────────────
 const GRID_COLS = 3;
@@ -88,14 +99,47 @@ function CanvasInner({
   workspaceUpdatedAt?: string;
 }) {
   const { fitView, screenToFlowPosition } = useReactFlow();
-  const [nodes, setNodes, onNodesChange] = useNodesState([]);
+  // Explicit Node generic — without it, useNodesState infers `never[]` from
+  // the empty initial array and tsc rejects every setNodes((ns) => Node[])
+  // call downstream. (Doesn't matter under `tsx watch` which is permissive.)
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedNodeFull, setSelectedNodeFull] = useState<WorkspaceNode | null>(null);
   const [loading, setLoading] = useState(true);
   const [editingTitle, setEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState(title);
-  const [voiceOpen, setVoiceOpen] = useState(false);
   const [podcastOpen, setPodcastOpen] = useState(false);
+  // Right-click → context menu surface. The fileInputRef is reused
+  // across canvas + node menus so we don't mount multiple <input
+  // type="file"> elements. lexaQuickOpen drives the "Pedile a Lexa una
+  // hoja" affordance; we anchor it at the right-click position so it
+  // feels in-context and the resulting node lands where the user clicked.
+  // podcastNode tracks "generate podcast of THIS hoja" — separate from
+  // the workspace-level podcastOpen so the two flows don't collide.
+  const ctxMenu = useContextMenu();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [lexaQuickOpen, setLexaQuickOpen] = useState(false);
+  const [pendingClickFlow, setPendingClickFlow] = useState<{ x: number; y: number } | null>(null);
+  const [podcastNode, setPodcastNode] = useState<{ id: string; title: string } | null>(null);
+
+  // Chat-panel width (resizable splitter). Min = 340 (the previous
+  // fixed xl size); Max = 340 × 1.618 ≈ 550. Persists per-user via
+  // localStorage so the user's preferred layout survives reloads.
+  const CHAT_MIN = 340;
+  const CHAT_MAX = Math.round(CHAT_MIN * 1.618);
+  const [chatWidth, setChatWidth] = useState<number>(() => {
+    if (typeof window === 'undefined') return CHAT_MIN;
+    const stored = Number(localStorage.getItem('cl2-chat-width'));
+    if (!Number.isFinite(stored) || stored < CHAT_MIN) return CHAT_MIN;
+    return Math.min(stored, CHAT_MAX);
+  });
+  // Persist on every change (debounced via the next tick — user
+  // dragging fires this many times per second; localStorage write is
+  // cheap so we don't bother with throttling).
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    localStorage.setItem('cl2-chat-width', String(chatWidth));
+  }, [chatWidth]);
   // bumpRefresh = changes whenever the strip should re-poll for a new
   // podcast row (e.g. right after we kick a new generation from the
   // modal). We pass a key derived from this into BoardAudioStrip so it
@@ -117,8 +161,12 @@ function CanvasInner({
   }, [workspaceId]);
 
   // ── Load nodes from API ──────────────────────────────────────────
+  // withContent=true so HojaNode editors paint bodies on first render.
+  // Without this flag the list endpoint strips `content` for perf, and
+  // refreshing the page would show every hoja as empty even though the
+  // markdown is persisted in the DB.
   useEffect(() => {
-    listNodes(workspaceId)
+    listNodes(workspaceId, { withContent: true })
       .then((apiNodes) => {
         const rfNodes = apiNodes.map((n) => toRFNode(n, workspaceId, { onDelete: handleDelete, onSelect: handleSelect }));
         setNodes(rfNodes);
@@ -179,30 +227,220 @@ function CanvasInner({
     } catch { /* graceful — node didn't save, don't add to canvas */ }
   }, [workspaceId, nodes.length, setNodes, fitView, handleDelete, handleSelect]);
 
-  // ── Voice → new hoja ─────────────────────────────────────────────
-  // VoiceCaptureModal posts a transcript; we materialize a node with
-  // it as the body and the derived first-sentence title. Position uses
-  // the same grid logic as handleAddHoja.
-  const handleVoiceCommit = useCallback(async ({ title: voiceTitle, md }: { title: string; md: string }) => {
-    const position = gridPosition(nodes.length);
-    const apiNode = await createNode(workspaceId, {
-      type: 'hoja',
-      title: voiceTitle || 'Nota por voz',
-      x: position.x, y: position.y,
-      width: NODE_W, height: NODE_H,
-      content: { md },
-    });
-    const rfNode = toRFNode(apiNode, workspaceId, { onDelete: handleDelete, onSelect: handleSelect });
-    setNodes((ns) => [...ns, rfNode]);
-    setSelectedNodeId(apiNode.id);
-    setTimeout(() => fitView({ padding: 0.15, duration: 400 }), 50);
-  }, [workspaceId, nodes.length, setNodes, fitView, handleDelete, handleSelect]);
+  // ── Materialize a Lexa-authored hoja at a specific canvas pos ─────
+  // Bridge for right-click → "Pedile a Lexa una hoja". The modal does
+  // the LLM call; we only handle node creation here so the file stays
+  // narrow on its responsibility.
+  const handleLexaQuickCommit = useCallback(
+    async ({ title: hojaTitle, md }: { title: string; md: string }) => {
+      const pos = pendingClickFlow ?? gridPosition(nodes.length);
+      const apiNode = await createNode(workspaceId, {
+        type: 'hoja',
+        title: hojaTitle || 'Hoja de Lexa',
+        x: pos.x, y: pos.y,
+        width: NODE_W, height: NODE_H,
+        content: { md },
+      }).catch(() => null);
+      if (!apiNode) return;
+      const rfNode = toRFNode(apiNode, workspaceId, { onDelete: handleDelete, onSelect: handleSelect });
+      setNodes((ns) => [...ns, rfNode]);
+      setSelectedNodeId(apiNode.id);
+      setTimeout(() => fitView({ padding: 0.15, duration: 400 }), 50);
+    },
+    [workspaceId, nodes.length, setNodes, fitView, handleDelete, handleSelect, pendingClickFlow],
+  );
+
+  // ── File picker → asset node at a specific canvas pos ─────────────
+  // Same pattern as drag-drop import (which the canvas already supports
+  // elsewhere) but triggered from right-click. We open a hidden file
+  // input and upload via importAsset; the server resolves type from
+  // mime and returns the new asset node.
+  const handleFilesPicked = useCallback(
+    async (files: FileList | null) => {
+      if (!files || files.length === 0) return;
+      const basePos = pendingClickFlow ?? gridPosition(nodes.length);
+      // For multi-select, stagger 24px so the nodes don't stack pixel-perfect.
+      let i = 0;
+      for (const file of Array.from(files)) {
+        const offset = i * 24;
+        const apiNode = await importAsset(workspaceId, file, {
+          x: basePos.x + offset,
+          y: basePos.y + offset,
+        }).catch(() => null);
+        if (apiNode) {
+          const rfNode = toRFNode(apiNode, workspaceId, { onDelete: handleDelete, onSelect: handleSelect });
+          setNodes((ns) => [...ns, rfNode]);
+        }
+        i++;
+      }
+      setTimeout(() => fitView({ padding: 0.15, duration: 400 }), 60);
+    },
+    [workspaceId, nodes.length, setNodes, fitView, handleDelete, handleSelect, pendingClickFlow],
+  );
 
   // ── Double-click canvas → add hoja at that position ──────────────
   const handlePaneDoubleClick = useCallback((e: React.MouseEvent) => {
     const pos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
     handleAddHoja({ x: pos.x - NODE_W / 2, y: pos.y - NODE_H / 2 });
   }, [screenToFlowPosition, handleAddHoja]);
+
+  // ── Right-click canvas → context menu ────────────────────────────
+  // Compute the FLOW position once (in-canvas coords used by node
+  // creation) and stash it via pendingClickFlow. Items that need to
+  // know "where the user clicked" read it; the resulting modal/upload
+  // still has the anchor after the menu closes.
+  const handlePaneContextMenu = useCallback(
+    (e: React.MouseEvent | MouseEvent) => {
+      e.preventDefault();
+      const ev = e as React.MouseEvent;
+      const flow = screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
+      const targetPos = { x: flow.x - NODE_W / 2, y: flow.y - NODE_H / 2 };
+      setPendingClickFlow(targetPos);
+
+      const items: ContextMenuItem[] = [
+        { kind: 'header', label: 'Crear acá' },
+        {
+          label: 'Crear hoja',
+          icon: <Plus size={14} />,
+          shortcut: 'Doble clic',
+          onSelect: () => handleAddHoja(targetPos),
+        },
+        {
+          label: 'Subir archivo',
+          icon: <Upload size={14} />,
+          onSelect: () => fileInputRef.current?.click(),
+        },
+        { kind: 'separator' },
+        {
+          label: 'Pedile a Lexa una hoja',
+          icon: <Sparkles size={14} />,
+          onSelect: () => setLexaQuickOpen(true),
+        },
+      ];
+      ctxMenu.open(ev.clientX, ev.clientY, items);
+    },
+    [screenToFlowPosition, handleAddHoja, ctxMenu.open],
+  );
+
+  // ── Right-click node → node-specific context menu ────────────────
+  // ReactFlow fires this BEFORE the global contextmenu listener, with
+  // the matching node already resolved. We don't preventDefault on
+  // 'contextmenu' anywhere else, so the menu opens reliably.
+  //
+  // Items kept tight on purpose — duplicate / podcast / delete covers
+  // 90% of node ops; deeper actions (color, resize, lock) live in the
+  // node header chrome (managed by the other agent's HojaNode work).
+  const handleNodeContextMenu = useCallback(
+    (e: React.MouseEvent, node: Node) => {
+      e.preventDefault();
+      const id = node.id;
+      const data = (node.data ?? {}) as { title?: string };
+      const nodeTitle = (data.title ?? '').trim() || 'hoja sin título';
+
+      const items: ContextMenuItem[] = [
+        { kind: 'header', label: nodeTitle.slice(0, 32) + (nodeTitle.length > 32 ? '…' : '') },
+        {
+          label: 'Duplicar hoja',
+          icon: <Copy size={14} />,
+          onSelect: async () => {
+            const full = await getNode(workspaceId, id).catch(() => null);
+            if (!full) return;
+            // Drop a copy 32px down-right so the user sees both.
+            const dup = await createNode(workspaceId, {
+              type: full.type,
+              title: full.title ? `${full.title} (copia)` : 'Sin título',
+              subtitle: full.subtitle ?? undefined,
+              color: full.color,
+              x: full.x + 32,
+              y: full.y + 32,
+              width: full.width,
+              height: full.height,
+              content: { md: full.content?.md ?? '' },
+            }).catch(() => null);
+            if (!dup) return;
+            const rfNode = toRFNode(dup, workspaceId, { onDelete: handleDelete, onSelect: handleSelect });
+            setNodes((ns) => [...ns, rfNode]);
+          },
+        },
+        {
+          label: 'Generar podcast de esta hoja',
+          icon: <Headphones size={14} />,
+          onSelect: () => setPodcastNode({ id, title: nodeTitle }),
+        },
+        { kind: 'separator' },
+        {
+          label: 'Eliminar hoja',
+          icon: <Trash2 size={14} />,
+          shortcut: 'Supr',
+          destructive: true,
+          onSelect: () => void handleDelete(id),
+        },
+      ];
+      ctxMenu.open(e.clientX, e.clientY, items);
+    },
+    [workspaceId, ctxMenu.open, handleDelete, handleSelect, setNodes],
+  );
+
+  // ── Document-level capture-phase contextmenu listener ────────────
+  // Earlier attempts (React onContextMenu, ref-scoped capture listener)
+  // didn't fire on the user's setup. Moving the listener to `document`
+  // in CAPTURE phase is the most aggressive interception possible — it
+  // fires BEFORE every other listener, including xyflow's internal
+  // contextmenu suppressor. We then filter by checking if the target
+  // is inside our canvas root via `.closest('.react-flow')`; clicks
+  // outside the canvas (top dock, sidebar, modals) are ignored.
+  useEffect(() => {
+    const handler = (ev: MouseEvent) => {
+      const tgt = ev.target as HTMLElement | null;
+      // eslint-disable-next-line no-console
+      console.log('[ctx]', tgt?.className, 'inCanvas:', !!tgt?.closest('.react-flow'));
+      if (!tgt) return;
+      const inCanvas = tgt.closest('.react-flow');
+      if (!inCanvas) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const nodeEl = tgt.closest('.react-flow__node') as HTMLElement | null;
+      if (nodeEl) {
+        const id = nodeEl.getAttribute('data-id') ?? '';
+        const rfNode = nodes.find((n) => (n as Node).id === id) as unknown as Node | undefined;
+        if (rfNode) {
+          // eslint-disable-next-line no-console
+          console.log('[ctx] → node menu', id);
+          handleNodeContextMenu(ev as unknown as React.MouseEvent, rfNode);
+          return;
+        }
+      }
+      // eslint-disable-next-line no-console
+      console.log('[ctx] → pane menu');
+      handlePaneContextMenu(ev as unknown as React.MouseEvent);
+    };
+    document.addEventListener('contextmenu', handler, true);
+    return () => document.removeEventListener('contextmenu', handler, true);
+  }, [nodes, handleNodeContextMenu, handlePaneContextMenu]);
+
+  // ── Stop ReactFlow drag inside hoja editors ──────────────────────
+  // ReactFlow uses pointerdown to start node drags. The body of a
+  // hoja is a TipTap .ProseMirror contenteditable inside the node —
+  // clicking it should focus the editor, not initiate a drag.
+  // HojaNode's existing onMouseDown stopPropagation is insufficient
+  // because xyflow v12's d3-drag listens on POINTER events, not
+  // MOUSE events. We intercept pointerdown at document level in
+  // capture phase (fires before xyflow's own listener) and stop
+  // propagation when the target is inside any .ProseMirror.
+  //
+  // Side benefit: same fix lets the user select text inside hojas
+  // without accidentally dragging the node.
+  useEffect(() => {
+    const handler = (ev: PointerEvent) => {
+      const tgt = ev.target as HTMLElement | null;
+      if (!tgt) return;
+      if (tgt.closest('.ProseMirror')) {
+        ev.stopPropagation();
+      }
+    };
+    document.addEventListener('pointerdown', handler, true);
+    return () => document.removeEventListener('pointerdown', handler, true);
+  }, []);
 
   // ── Next node position for Lexa panel ────────────────────────────
   const nextNodePosition = useCallback(() => gridPosition(nodes.length), [nodes.length]);
@@ -262,23 +500,72 @@ function CanvasInner({
 
   return (
     <div className="flex h-full">
-      {/* Global floating selection menu — Alt+select / ⌘K shortcuts.
-          Mounted once, listens to document.selectionchange globally. */}
-      <HojaSelectionMenu
+      {/* Single consolidated docx-style toolbar — format buttons +
+          Lexa AI actions in one row. Replaces the old two-menu layout
+          (HojaSelectionMenu above + HojaFormatMenu below) which fought
+          each other on outside-click handlers. */}
+      <HojaFormatMenu
         workspaceId={workspaceId}
         onCreateHojaFromSelection={handleCreateHojaFromSelection}
       />
 
-      {/* ── Lexa Panel ─────────────────────────────────────────── */}
-      <div className="w-[300px] xl:w-[340px] shrink-0 h-full border-r border-black/8 dark:border-white/6 overflow-hidden">
-        <LexaContextPanel
-          workspaceId={workspaceId}
-          selectedNode={selectedNodeFull}
-          onNodeCreated={handleNodeCreated}
-          onNodesGenerated={handleNodesGenerated}
-          nextNodePosition={nextNodePosition}
+      {/* ── Chat Panel (AnimatedAiInput, workspace scope) ──────── */}
+      {/* Width controlled by chatWidth state; resizable via the
+          splitter handle to the right. min = 340 (default), max =
+          golden-ratio wider (≈550px). */}
+      <div
+        className="shrink-0 h-full border-r border-black/8 dark:border-white/6 overflow-hidden"
+        style={{ width: chatWidth }}
+      >
+        <AnimatedAiInput
+          scope={{
+            kind: 'workspace',
+            workspace_id: workspaceId,
+            workspace_title: title,
+            selected_node_id: selectedNodeId,
+          }}
+          hojaTitles={nodes.map((n) => ({
+            id: n.id,
+            title: (n.data?.title as string) ?? '',
+            subtitle: (n.data?.subtitle as string) ?? null,
+          }))}
+          onClearSelection={() => setSelectedNodeId(null)}
+          onWorkspaceAction={async (action) => {
+            if (action.intent === 'build' && action.nodes) {
+              await handleNodesGenerated(action.nodes);
+            } else if (action.node_id && action.new_content) {
+              const fresh = await getNode(workspaceId, action.node_id).catch(() => null);
+              if (fresh) {
+                setNodes((ns) =>
+                  ns.map((n) =>
+                    n.id === action.node_id
+                      ? toRFNode(fresh, workspaceId, {
+                          onDelete: handleDelete,
+                          onSelect: handleSelect,
+                        })
+                      : n,
+                  ),
+                );
+                // Brief highlight — fly camera to the updated node
+                setTimeout(() => fitView({ padding: 0.2, duration: 600 }), 50);
+              }
+            }
+          }}
         />
       </div>
+
+      {/* ── Splitter handle ─────────────────────────────────────── */}
+      {/* 4px-wide vertical strip between chat and canvas. Captures
+          pointer drag and updates chatWidth in real time, clamped to
+          [CHAT_MIN, CHAT_MAX]. The 8px hover region (via padding +
+          inset bg) makes the handle easier to grab without taking
+          extra horizontal space. */}
+      <ChatSplitter
+        min={CHAT_MIN}
+        max={CHAT_MAX}
+        width={chatWidth}
+        onChange={setChatWidth}
+      />
 
       {/* ── Canvas ─────────────────────────────────────────────── */}
       <div className="flex-1 relative h-full">
@@ -295,7 +582,12 @@ function CanvasInner({
           nodeTypes={NODE_TYPES}
           onPaneClick={() => setSelectedNodeId(null)}
           onNodeClick={(_, node) => handleSelect(node.id)}
+          // @ts-expect-error — onPaneDoubleClick is supported at runtime
+          // by xyflow but missing from this version's prop types.
           onPaneDoubleClick={handlePaneDoubleClick}
+          // Right-click is handled at document level via a capture-
+          // phase listener (see useEffect above). The xyflow props
+          // weren't firing reliably on this build, so we bypass them.
           fitView
           fitViewOptions={{ padding: 0.2 }}
           minZoom={0.15}
@@ -366,17 +658,8 @@ function CanvasInner({
               {/* "Audio del board" button — only visible when no strip showing */}
               <BoardAudioCTA workspaceId={workspaceId} onClick={() => setPodcastOpen(true)} />
 
-              {/* Voice → new hoja */}
-              <button
-                onClick={() => setVoiceOpen(true)}
-                title="Nueva hoja por voz"
-                className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white dark:bg-[#1c1c1c] border border-black/8 dark:border-white/8 shadow-sm text-[13px] font-medium text-cl2-burgundy dark:text-[#d8a4ad] hover:bg-cl2-burgundy/[0.04] dark:hover:bg-cl2-accent/[0.08] transition-colors"
-              >
-                <Mic className="w-4 h-4" />
-                <span className="hidden md:inline">Voz</span>
-              </button>
-
-              {/* Nueva hoja (manual) */}
+              {/* Nueva hoja (manual) — voice path moved into the
+                  right-click "Pedile a Lexa" + the chat panel mic. */}
               <button
                 onClick={() => handleAddHoja()}
                 className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-cl2-accent text-white text-[13px] font-semibold hover:bg-cl2-accent-hover transition-colors shadow-sm shadow-cl2-accent/25"
@@ -393,7 +676,7 @@ function CanvasInner({
               <div className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white/80 dark:bg-[#1c1c1c]/80 backdrop-blur border border-black/8 dark:border-white/8 shadow-sm">
                 <ZoomIn className="w-4 h-4 text-[#0e1745]/40 dark:text-white/40" />
                 <span className="text-[12px] text-[#0e1745]/55 dark:text-white/50">
-                  Doble clic en el canvas para crear una hoja · O usá el botón "Nueva hoja"
+                  Doble clic para crear hoja · Click derecho para subir archivo o pedirle a Lexa
                 </span>
               </div>
             </Panel>
@@ -401,15 +684,38 @@ function CanvasInner({
         </ReactFlow>
       </div>
 
-      {/* ── Voice capture modal (new hoja by voice) ─────────────── */}
-      <VoiceCaptureModal
-        open={voiceOpen}
-        onClose={() => setVoiceOpen(false)}
-        onCommit={async (data) => {
-          await handleVoiceCommit(data);
+      {/* ── Hidden file input — driven by right-click "Subir archivo" ─ */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        accept="image/*,audio/*,application/pdf,.docx,.md,.txt"
+        className="hidden"
+        onChange={(e) => {
+          const files = e.target.files;
+          void handleFilesPicked(files);
+          // Reset so the same file re-selected fires onChange again.
+          e.currentTarget.value = '';
         }}
-        mode="new"
       />
+
+      {/* ── Lexa quick-hoja modal (right-click → "Pedile a Lexa") ─── */}
+      <LexaQuickHojaModal
+        open={lexaQuickOpen}
+        onClose={() => setLexaQuickOpen(false)}
+        workspaceId={workspaceId}
+        anchor={
+          // Modal anchor is in screen coords; we don't have that
+          // anymore (pendingClickFlow is in flow coords). Falling back
+          // to centered is fine — the resulting node DOES land at the
+          // click position via pendingClickFlow.
+          null
+        }
+        onResult={handleLexaQuickCommit}
+      />
+
+      {/* ── Context menu portal ───────────────────────────────────── */}
+      {ctxMenu.element}
 
       {/* ── Podcast modal (board → audio) ───────────────────────── */}
       <PodcastModal
@@ -423,6 +729,96 @@ function CanvasInner({
         source_type="hoja_workspace"
         source_id={workspaceId}
         source_title={title}
+      />
+
+      {/* ── Podcast modal (single hoja node) ─────────────────────── */}
+      {/* Mounted only when a node was right-clicked → "Generar
+          podcast de esta hoja". Separate instance from the workspace
+          one so the two flows can be open independently and don't
+          contaminate each other's source params. */}
+      <PodcastModal
+        open={podcastNode !== null}
+        onClose={() => setPodcastNode(null)}
+        source_type="hoja_node"
+        source_id={podcastNode?.id ?? ''}
+        source_title={podcastNode?.title}
+      />
+    </div>
+  );
+}
+
+/**
+ * Vertical drag handle between the chat panel and the canvas. 4px
+ * visual width but a wider invisible hit-area (8px on each side via
+ * `-mx-1` + padding) so the user doesn't have to thread the needle.
+ *
+ * Pointer-capture pattern: on pointerdown we lock the move/up
+ * listeners onto the handle element so drag continues even when the
+ * cursor leaves the strip. Body cursor + user-select get globally
+ * overridden during drag so the canvas doesn't text-select hojas
+ * accidentally.
+ */
+function ChatSplitter({
+  min,
+  max,
+  width,
+  onChange,
+}: {
+  min: number;
+  max: number;
+  width: number;
+  onChange: (w: number) => void;
+}) {
+  const draggingRef = useRef(false);
+  const startXRef = useRef(0);
+  const startWRef = useRef(width);
+
+  const onPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    draggingRef.current = true;
+    startXRef.current = e.clientX;
+    startWRef.current = width;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }, [width]);
+
+  const onPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!draggingRef.current) return;
+    const dx = e.clientX - startXRef.current;
+    const next = Math.max(min, Math.min(max, startWRef.current + dx));
+    onChange(next);
+  }, [min, max, onChange]);
+
+  const onPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!draggingRef.current) return;
+    draggingRef.current = false;
+    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }, []);
+
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-valuemin={min}
+      aria-valuemax={max}
+      aria-valuenow={width}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      onDoubleClick={() => onChange(min)}
+      title="Arrastrá para ensanchar · Doble clic para restaurar"
+      className="group relative h-full w-1 shrink-0 cursor-col-resize select-none touch-none"
+    >
+      {/* Visible 1px line + wider invisible hit area via the parent's
+          w-1 box. Hover/active state highlights the line subtly so
+          the handle is discoverable without being noisy. */}
+      <span
+        className="absolute inset-y-0 left-0 right-0 mx-auto w-px bg-[#0e1745]/[0.08] dark:bg-white/[0.08] group-hover:bg-cl2-burgundy/40 group-hover:w-[2px] transition-all"
+        aria-hidden
       />
     </div>
   );
@@ -512,3 +908,4 @@ export function WorkspaceCanvasPage({ id }: { id: string }) {
     </div>
   );
 }
+// Sun Apr 26 21:01:31 -05 2026

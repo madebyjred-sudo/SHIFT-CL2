@@ -23,13 +23,13 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { getUserIdFromRequest } from '../services/auth.js';
 import {
   generateMonologue,
-  whitelistedVoices,
+  resolveWhitelistedVoices,
   isVoiceWhitelisted,
   guestVoiceId,
   pickTtsModel,
   applyEmotionTag,
 } from '../services/elevenlabsClient.js';
-import { generatePodcastScript, type PodcastScript } from '../services/podcastScript.js';
+import { generatePodcastScript, enhancePodcastPrompt, type PodcastScript } from '../services/podcastScript.js';
 import { uploadPodcastAudio, signPodcastAudio } from '../services/podcastStorage.js';
 import { getTranscripcionById } from '../services/legacyCl2Client.js';
 import { getExpedienteById } from '../services/silClient.js';
@@ -74,8 +74,39 @@ const jobs = new Map<string, { startedAt: number }>();
 
 // ─── Routes ──────────────────────────────────────────────────────────
 
-podcastsRouter.get('/voices', (_req, res) => {
-  res.json({ ok: true, voices: whitelistedVoices() });
+podcastsRouter.get('/voices', async (_req, res) => {
+  try {
+    const voices = await resolveWhitelistedVoices();
+    res.json({ ok: true, voices });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/**
+ * POST /api/podcasts/enhance-prompt
+ * Body: { prompt: string }  (≤140 chars enforced server-side too)
+ * Returns: { ok, prompt }
+ *
+ * Used by the modal's "Mejorar con Lexa" button. Cheap one-shot call —
+ * no DB write, no rate limit beyond the global per-user middleware.
+ * Auth required so anons can't burn OpenRouter credits.
+ */
+podcastsRouter.post('/enhance-prompt', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const raw = (req.body?.prompt ?? '') as string;
+  if (typeof raw !== 'string' || !raw.trim()) {
+    res.status(400).json({ ok: false, error: 'empty_prompt' });
+    return;
+  }
+  try {
+    const enhanced = await enhancePodcastPrompt(raw);
+    res.json({ ok: true, prompt: enhanced });
+  } catch (err) {
+    req.log?.warn('podcast_enhance_failed', { error: (err as Error).message });
+    res.status(502).json({ ok: false, error: 'enhance_failed' });
+  }
 });
 
 /**
@@ -103,6 +134,68 @@ podcastsRouter.get('/quota', async (req, res) => {
 });
 
 /**
+ * GET /api/podcasts/by-source?type=hoja_workspace&id=...
+ * Lists this user's podcasts attached to a specific source. Used by the
+ * workspace header strip to find the most recent ready audio for a
+ * board so we can show inline player + stale badge.
+ *
+ * MUST be registered BEFORE /:id — Express matches in order, and
+ * /:id would otherwise swallow `by-source` as an id.
+ */
+podcastsRouter.get('/by-source', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+
+  const type = String(req.query.type ?? '');
+  const id = String(req.query.id ?? '');
+  if (!type || !id || !ALLOWED_SOURCES.has(type)) {
+    res.status(400).json({ ok: false, error: 'bad_query' });
+    return;
+  }
+
+  const { data, error } = await supa()
+    .from('podcasts')
+    .select(
+      'id, source_type, source_id, title, voice_id, duration_target_s, duration_actual_s, status, progress, created_at, finished_at',
+    )
+    .eq('user_id', userId)
+    .eq('source_type', type)
+    .eq('source_id', id)
+    .order('created_at', { ascending: false })
+    .limit(10);
+
+  if (error) {
+    res.status(500).json({ ok: false, error: error.message });
+    return;
+  }
+  res.json({ ok: true, items: data ?? [] });
+});
+
+/**
+ * GET /api/podcasts/mine — user history. Same ordering rule as
+ * /by-source: literal path must come before /:id.
+ */
+podcastsRouter.get('/mine', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+
+  const { data, error } = await supa()
+    .from('podcasts')
+    .select(
+      'id, source_type, source_id, title, voice_id, duration_target_s, duration_actual_s, status, progress, created_at, finished_at',
+    )
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(50);
+
+  if (error) {
+    res.status(500).json({ ok: false, error: error.message });
+    return;
+  }
+  res.json({ ok: true, items: data ?? [] });
+});
+
+/**
  * POST /api/podcasts
  * Body: { source_type, source_id, voice_id, duration_target_s, style }
  * Returns: { ok, id, status }
@@ -117,6 +210,7 @@ podcastsRouter.post('/', async (req, res) => {
     voice_id: string;
     duration_target_s: number;
     style: string;
+    user_prompt: string;
   }>;
 
   // Validate.
@@ -125,6 +219,12 @@ podcastsRouter.post('/', async (req, res) => {
   const voice_id = body.voice_id;
   const duration_target_s = Number(body.duration_target_s);
   const style = body.style ?? 'informativo';
+  // Hard cap: 280 chars (UI gates at 140; we allow 2× headroom for
+  // Lexa-enhanced prompts that the user accepted). Trim + collapse
+  // newlines so it embeds cleanly in the system prompt.
+  const user_prompt = typeof body.user_prompt === 'string'
+    ? body.user_prompt.replace(/\s+/g, ' ').trim().slice(0, 280)
+    : '';
 
   if (!source_type || !ALLOWED_SOURCES.has(source_type)) {
     res.status(400).json({ ok: false, error: 'bad_source_type' });
@@ -134,7 +234,7 @@ podcastsRouter.post('/', async (req, res) => {
     res.status(400).json({ ok: false, error: 'bad_source_id' });
     return;
   }
-  if (!voice_id || !isVoiceWhitelisted(voice_id)) {
+  if (!voice_id || !(await isVoiceWhitelisted(voice_id))) {
     res.status(400).json({ ok: false, error: 'bad_voice_id' });
     return;
   }
@@ -180,6 +280,7 @@ podcastsRouter.post('/', async (req, res) => {
       voice_id,
       duration_target_s,
       style,
+      user_prompt: user_prompt || null,
       status: 'queued',
     })
     .select('id')
@@ -267,41 +368,6 @@ podcastsRouter.get('/:id/audio', async (req, res) => {
     req.log?.error('podcast_sign_failed', { error: (err as Error).message, id });
     res.status(502).json({ ok: false, error: 'sign_failed' });
   }
-});
-
-/**
- * GET /api/podcasts/by-source?type=hoja_workspace&id=...
- * Lists this user's podcasts attached to a specific source. Used by the
- * workspace header strip to find the most recent ready audio for a
- * board so we can show inline player + stale badge.
- */
-podcastsRouter.get('/by-source', async (req, res) => {
-  const userId = await requireUser(req, res);
-  if (!userId) return;
-
-  const type = String(req.query.type ?? '');
-  const id = String(req.query.id ?? '');
-  if (!type || !id || !ALLOWED_SOURCES.has(type)) {
-    res.status(400).json({ ok: false, error: 'bad_query' });
-    return;
-  }
-
-  const { data, error } = await supa()
-    .from('podcasts')
-    .select(
-      'id, source_type, source_id, title, voice_id, duration_target_s, duration_actual_s, status, progress, created_at, finished_at',
-    )
-    .eq('user_id', userId)
-    .eq('source_type', type)
-    .eq('source_id', id)
-    .order('created_at', { ascending: false })
-    .limit(10);
-
-  if (error) {
-    res.status(500).json({ ok: false, error: error.message });
-    return;
-  }
-  res.json({ ok: true, items: data ?? [] });
 });
 
 /**
@@ -409,29 +475,6 @@ podcastsRouter.delete('/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
-/**
- * GET /api/podcasts/mine — user history.
- */
-podcastsRouter.get('/mine', async (req, res) => {
-  const userId = await requireUser(req, res);
-  if (!userId) return;
-
-  const { data, error } = await supa()
-    .from('podcasts')
-    .select(
-      'id, source_type, source_id, title, voice_id, duration_target_s, duration_actual_s, status, progress, created_at, finished_at',
-    )
-    .eq('user_id', userId)
-    .order('created_at', { ascending: false })
-    .limit(50);
-
-  if (error) {
-    res.status(500).json({ ok: false, error: error.message });
-    return;
-  }
-  res.json({ ok: true, items: data ?? [] });
-});
-
 // ─── Worker ──────────────────────────────────────────────────────────
 //
 // Sequential pipeline; each step writes status + progress before
@@ -444,7 +487,7 @@ async function runWorker(podcastId: string, userId: string): Promise<void> {
     // Re-read the row to pick up params authoritatively.
     const { data: row, error: rowErr } = await supa()
       .from('podcasts')
-      .select('id, source_type, source_id, voice_id, duration_target_s, style, status')
+      .select('id, source_type, source_id, voice_id, duration_target_s, style, status, user_prompt')
       .eq('id', podcastId)
       .single();
     if (rowErr || !row) throw new Error('row_missing');
@@ -455,6 +498,7 @@ async function runWorker(podcastId: string, userId: string): Promise<void> {
       duration_target_s: number;
       style: 'informativo' | 'conversacional';
       status: string;
+      user_prompt: string | null;
     };
     if (r.status === 'cancelled') return;
 
@@ -468,6 +512,7 @@ async function runWorker(podcastId: string, userId: string): Promise<void> {
       source_label,
       duration_target_s: r.duration_target_s,
       style: r.style,
+      user_prompt: r.user_prompt,
     });
     await supa()
       .from('podcasts')
@@ -484,7 +529,7 @@ async function runWorker(podcastId: string, userId: string): Promise<void> {
     // tags actually render). Monologue mode uses host voice + multilingual_v2.
     const isDialogue = r.style === 'conversacional';
     const modelId = pickTtsModel({ dialogue: isDialogue });
-    const guestId = guestVoiceId();
+    const guestId = await guestVoiceId();
     const buffers: Buffer[] = [];
     for (let i = 0; i < script.segments.length; i++) {
       const seg = script.segments[i];

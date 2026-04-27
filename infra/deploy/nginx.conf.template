@@ -1,0 +1,93 @@
+# nginx.conf.template — processed by envsubst at container start.
+# Variables filled at runtime: $API_BASE_URL, $PORT.
+#
+# CRITICAL for SSE (chat streaming):
+#   - proxy_buffering off  (don't hold tokens until chunk full)
+#   - proxy_read_timeout long (streams are 5-30s)
+#   - proxy_http_version 1.1 (chunked encoding)
+
+server {
+    listen       ${PORT};
+    server_name  _;
+
+    root   /usr/share/nginx/html;
+    index  index.html;
+
+    # Cloud Run requires DNS resolution at runtime since upstream is a
+    # *.run.app host that resolves to Google's frontend. Without an explicit
+    # resolver + a variable in proxy_pass, nginx caches DNS at boot and
+    # breaks when Google rotates IPs.
+    resolver 8.8.8.8 8.8.4.4 ipv6=off valid=60s;
+    resolver_timeout 5s;
+
+    # ───────────────────────────────────────────────────────────────
+    # /api/* → BFF (Cloud Run service)
+    # ───────────────────────────────────────────────────────────────
+    location /api/ {
+        # Stash upstream in a variable so the resolver fires (nginx
+        # only does runtime DNS when the upstream is a variable, not
+        # a literal in proxy_pass).
+        set $upstream_api ${API_BASE_URL};
+        proxy_pass         $upstream_api;
+        proxy_http_version 1.1;
+
+        # Cloud Run routes by Host header / SNI — must send the
+        # *.run.app host of the API, NOT $host (which is the web
+        # service's domain and would never match the API service).
+        proxy_ssl_server_name on;
+        proxy_ssl_name     ${API_HOST};
+        proxy_set_header   Host              ${API_HOST};
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_set_header   Authorization     $http_authorization;
+
+        # SSE / streaming
+        proxy_buffering    off;
+        proxy_cache        off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+
+        # Allow large multipart uploads (audio + PDF)
+        client_max_body_size 30m;
+
+        # Pass-through original request id if present (for log correlation)
+        proxy_pass_request_headers on;
+    }
+
+    # ───────────────────────────────────────────────────────────────
+    # nginx-self health check.
+    # Note: NOT named /healthz — GCP's frontend intercepts that path
+    # for its own k8s-style probes and never forwards it to the
+    # container. /_nginx_health is unreserved and works.
+    # ───────────────────────────────────────────────────────────────
+    location = /_nginx_health {
+        access_log off;
+        return 200 "ok\n";
+        add_header Content-Type text/plain;
+    }
+
+    # ───────────────────────────────────────────────────────────────
+    # SPA fallback — every other path serves index.html so React
+    # Router can take over. Cache the bundled assets aggressively.
+    # ───────────────────────────────────────────────────────────────
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Long-cache hashed Vite assets (filenames have content hash so safe)
+    location ~* \.(js|css|woff2?|svg|png|jpg|jpeg|gif|ico|webp)$ {
+        try_files $uri =404;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+
+    # Never cache index.html — it's the entry to a fresh build hash
+    location = /index.html {
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+    }
+
+    # gzip for everything dynamic
+    gzip            on;
+    gzip_min_length 1024;
+    gzip_types      text/css application/javascript application/json image/svg+xml;
+}

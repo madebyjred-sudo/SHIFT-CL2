@@ -1,0 +1,78 @@
+# syntax=docker/dockerfile:1.6
+#
+# Production image for apps/api (BFF Express + TS).
+# Build context = repo root (we need workspace packages).
+#
+# Build:
+#   docker build -t cl2-v2-api -f infra/deploy/Dockerfile.api .
+#
+# Run:
+#   docker run --rm -p 8080:8080 \
+#     -e API_PORT=8080 \
+#     -e NEXT_PUBLIC_SUPABASE_URL=... \
+#     -e SUPABASE_SERVICE_ROLE_KEY=... \
+#     -e OPENROUTER_API_KEY=... \
+#     -e CEREBRO_BASE_URL=... \
+#     cl2-v2-api
+
+# ──────────────────────────────────────────────────────────────────────
+# Stage 1 — install deps for the entire workspace.
+# Cached separately so source-only changes skip the install layer.
+# ──────────────────────────────────────────────────────────────────────
+FROM node:20-alpine AS deps
+WORKDIR /app
+
+# Copy ONLY the package manifests so npm can resolve the workspace graph.
+# Order: root first, then each workspace.
+COPY package.json package-lock.json ./
+COPY apps/api/package.json apps/api/package.json
+COPY packages/shared-types/package.json packages/shared-types/package.json
+
+RUN npm ci --workspaces --include-workspace-root --no-audit --no-fund
+
+# ──────────────────────────────────────────────────────────────────────
+# Stage 2 — build the api (TypeScript -> dist).
+# Note: npm workspaces hoists ALL deps to the root /app/node_modules
+# (per-workspace node_modules dirs aren't created by npm ci with hoisting).
+# So we only copy the root node_modules, not per-workspace ones.
+# ──────────────────────────────────────────────────────────────────────
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY package.json package-lock.json tsconfig*.json ./
+COPY apps/api ./apps/api
+COPY packages/shared-types ./packages/shared-types
+
+# tsc emits to apps/api/dist via apps/api/tsconfig.json (outDir: "dist")
+RUN npm run build --workspace=apps/api
+
+# ──────────────────────────────────────────────────────────────────────
+# Stage 3 — slim runtime image. Only what we need to run.
+# ──────────────────────────────────────────────────────────────────────
+FROM node:20-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+# Cloud Run will override API_PORT via its $PORT injection; we pass
+# API_PORT in the deploy command (see deploy-api.sh) so the existing
+# `process.env.API_PORT ?? 3001` reader picks it up.
+ENV API_PORT=8080
+
+# tini gives us proper signal forwarding so SIGTERM cleans up
+# in-flight SSE streams instead of getting eaten by the node parent.
+RUN apk add --no-cache tini
+
+# Copy installed node_modules + built artifacts.
+COPY --from=deps    /app/node_modules ./node_modules
+COPY --from=builder /app/apps/api/dist ./apps/api/dist
+COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
+COPY --from=builder /app/packages/shared-types ./packages/shared-types
+COPY package.json package-lock.json ./
+
+# Drop privileges. node:alpine ships the `node` user (uid 1000).
+USER node
+
+EXPOSE 8080
+
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "apps/api/dist/index.js"]

@@ -79,8 +79,12 @@ persona: |
       similares a X, cómo se relacionan dos comisiones — →
       query_legislative_graph. El grafo está construido sobre las mismas
       fuentes que las otras tools, pero conserva los enlaces entidad↔
-      entidad que la búsqueda plana pierde. Si el grafo no responde
-      (no instalado en el entorno), caé a search_sil_corpus + search_transcripts.
+      entidad que la búsqueda plana pierde. SCOPE DEL GRAFO: cubre el
+      periodo legislativo actual (2022-05 → presente, expedientes ≥23.084).
+      Para preguntas relacionales sobre periodos anteriores (2018-2022 o
+      antes) NO uses el grafo — caé directo a search_sil_corpus, que
+      tiene el corpus completo. Si el grafo no responde (no instalado en
+      el entorno), también caé a search_sil_corpus + search_transcripts.
   Si la pregunta cruza dos dominios (e.g. "¿qué dijo el diputado X sobre
   el expediente Y?"), usá las dos en orden: primero search_sil_expedientes
   para identificar Y, después search_transcripts con el nombre/título.
@@ -174,7 +178,7 @@ tools:
   - name: query_legislative_graph
     type: rag
     source: cerebro_lightrag
-    description: Consulta al grafo de conocimiento legislativo (entidades + relaciones).
+    description: Consulta al grafo de conocimiento legislativo (entidades + relaciones). Scope= periodo 2022-05+ (expedientes ≥23.084). Para periodos anteriores usar search_sil_corpus.
 
 response_contract:
   must_include_citations: true

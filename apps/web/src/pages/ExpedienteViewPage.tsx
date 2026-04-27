@@ -15,8 +15,9 @@
  *   └──────────────────────┴──────────────────────┘
  */
 import { useEffect, useState, type MouseEvent } from 'react';
-import { ArrowLeft, Download, ExternalLink, FileText, Gavel, Calendar, Headphones, Users, Building2, Scale } from 'lucide-react';
+import { ArrowLeft, Download, ExternalLink, FileText, Gavel, Calendar, Headphones, Layers, Users, Building2, Scale } from 'lucide-react';
 import { PodcastModal } from '@/components/podcasts/PodcastModal';
+import { SendToWorkspaceModal } from '@/components/SendToWorkspaceModal';
 import { PodcastStrip } from '@/components/podcasts/PodcastStrip';
 import { TopDock } from '@/components/top-dock';
 import { navigate } from '@/lib/router';
@@ -53,6 +54,7 @@ export function ExpedienteViewPage({ numero }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [podcastOpen, setPodcastOpen] = useState(false);
   const [podcastBump, setPodcastBump] = useState(0);
+  const [sendOpen, setSendOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -124,6 +126,17 @@ export function ExpedienteViewPage({ numero }: Props) {
 
           <button
             type="button"
+            onClick={() => setSendOpen(true)}
+            disabled={!exp}
+            title="Enviar este expediente a un workspace de Hojas"
+            className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-[#0e1745]/[0.06] text-[#0e1745]/75 dark:bg-white/[0.06] dark:text-white/75 hover:bg-[#0e1745]/[0.10] dark:hover:bg-white/[0.10] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Layers size={13} />
+            Enviar a workspace
+          </button>
+
+          <button
+            type="button"
             onClick={() => setPodcastOpen(true)}
             disabled={!exp}
             title="Generar podcast — narrado por Lexa"
@@ -155,6 +168,14 @@ export function ExpedienteViewPage({ numero }: Props) {
           source_type="expediente"
           source_id={String(exp.id)}
           source_title={`Exp. ${exp.numero}${exp.titulo ? ' — ' + exp.titulo : ''}`}
+        />
+      )}
+      {exp && (
+        <SendToWorkspaceModal
+          open={sendOpen}
+          onClose={() => setSendOpen(false)}
+          sources={[{ type: 'expediente', id: exp.id }]}
+          summary={`Expediente ${exp.numero}${exp.titulo ? ` — ${exp.titulo}` : ''}`}
         />
       )}
 

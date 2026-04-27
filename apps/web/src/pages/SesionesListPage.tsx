@@ -31,6 +31,7 @@ import { SesionesFeed } from '@/components/sesiones/SesionesFeed';
 import { CalendarView } from '@/components/sesiones/CalendarView';
 import { TemaCard } from '@/components/sesiones/TemaCard';
 import { CompareDock } from '@/components/sesiones/CompareDock';
+import { SendToWorkspaceModal } from '@/components/SendToWorkspaceModal';
 import {
   applyDuracionFilter,
   applyEstadoFilter,
@@ -114,6 +115,7 @@ export function SesionesListPage() {
   const [items, setItems] = useState<SessionListItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<number[]>([]);
+  const [sendOpen, setSendOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -338,6 +340,24 @@ export function SesionesListPage() {
           console.warn('[compare] modal pendiente — ids seleccionados:', ids);
           alert('La vista de comparación llega en el próximo sprint. Por ahora podés abrir cada plenaria desde su card.');
         }}
+        onSendToWorkspace={() => setSendOpen(true)}
+      />
+
+      <SendToWorkspaceModal
+        open={sendOpen}
+        onClose={() => {
+          setSendOpen(false);
+          // After a successful send the user typically navigates to
+          // the workspace — clearing the selection is the right
+          // default. If they cancel mid-flow the dock stays open.
+          // (modal navigates away on success.)
+        }}
+        sources={selected.map((id) => ({ type: 'sesion' as const, id }))}
+        summary={
+          selected.length === 1
+            ? '1 sesión'
+            : `${selected.length} sesiones`
+        }
       />
     </div>
   );

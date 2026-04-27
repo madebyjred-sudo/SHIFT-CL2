@@ -1,0 +1,53 @@
+# Dockerignore at repo root — applies to both Dockerfile.api and Dockerfile.web
+# (both use repo root as build context to access workspace packages).
+
+# ─── Heavy / never-needed in image ───────────────────────────────────
+node_modules
+**/node_modules
+.git
+.gitignore
+.github
+.turbo
+.vscode
+.idea
+.DS_Store
+
+# Local-only state
+.env
+.env.local
+.env.*.local
+*.log
+.logs
+
+# Build output (we rebuild fresh inside the image)
+dist
+**/dist
+build
+**/build
+
+# Tests (don't ship to prod)
+**/__tests__
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+playwright-report
+test-results
+
+# Docs (not needed at runtime)
+docs
+*.md
+!apps/api/README.md
+!apps/web/README.md
+
+# Secrets — NEVER bake into image
+infra/secrets
+
+# Other workspace bits we don't need for api/web builds
+apps/web/playwright.config.ts
+.shifty-replication-playbook.md
+*.pdf
+*.docx
+*.html
+
+# Worker dir not used yet
+apps/worker

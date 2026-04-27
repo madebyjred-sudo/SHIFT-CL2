@@ -44,3 +44,7 @@ gcp-sa*.json
 apps/web/src.old-backup/
 .shifty-vps-clone/
 .shifty-replication-playbook.md
+infra/deploy/.env.production
+
+# Runtime log dirs (script output, seed progress, etc.)
+.logs/

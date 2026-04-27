@@ -351,3 +351,211 @@ button {
     0%   { transform: scale(0.8); opacity: 0.6; }
     100% { transform: scale(1.8); opacity: 0; }
 }
+
+/* ──────────────────────────────────────────────────────────────────
+ * Hoja editor (TipTap / ProseMirror) — typography fallback.
+ *
+ * HojaNode applies `prose prose-sm dark:prose-invert` to the editor
+ * surface, but `@tailwindcss/typography` is NOT installed in this
+ * project. Without the plugin those classes are no-ops and the editor
+ * inherits whatever color happens to land — which in dark mode reads
+ * as black-on-dark (invisible).
+ *
+ * Rather than add the plugin (heavy + opinionated), we ship a
+ * minimal hand-rolled style sheet for `.ProseMirror`. Same shape as
+ * Anthropic's own thread editor: tight rhythm, color from CSS vars
+ * so dark mode flips automatically.
+ *
+ * Light mode → cl2-ink (deep navy) at 92% on white surface.
+ * Dark mode  → white at 88% on the dark hoja surface.
+ *
+ * Headings / blockquotes / code / lists all get the same treatment so
+ * any markdown body the model returns reads cleanly without us having
+ * to touch HojaNode.tsx.
+ * ────────────────────────────────────────────────────────────────── */
+.ProseMirror {
+    color: rgb(14 23 69 / 0.92); /* cl2-ink @ 92% */
+    font-size: 13.5px;
+    line-height: 1.6;
+}
+.dark .ProseMirror {
+    color: rgb(255 255 255 / 0.88);
+}
+
+.ProseMirror p { margin: 0.5em 0; }
+.ProseMirror p:first-child { margin-top: 0; }
+.ProseMirror p:last-child  { margin-bottom: 0; }
+
+.ProseMirror h1,
+.ProseMirror h2,
+.ProseMirror h3,
+.ProseMirror h4 {
+    font-weight: 600;
+    color: rgb(14 23 69); /* full ink for headings */
+    margin: 1em 0 0.4em;
+    line-height: 1.25;
+}
+.dark .ProseMirror h1,
+.dark .ProseMirror h2,
+.dark .ProseMirror h3,
+.dark .ProseMirror h4 {
+    color: rgb(255 255 255 / 0.96);
+}
+.ProseMirror h1 { font-size: 1.35em; }
+.ProseMirror h2 { font-size: 1.18em; }
+.ProseMirror h3 { font-size: 1.05em; }
+.ProseMirror h4 { font-size: 0.98em; }
+
+.ProseMirror ul,
+.ProseMirror ol {
+    margin: 0.5em 0;
+    padding-left: 1.4em;
+}
+.ProseMirror li { margin: 0.2em 0; }
+.ProseMirror li::marker { color: rgb(14 23 69 / 0.45); }
+.dark .ProseMirror li::marker { color: rgb(255 255 255 / 0.45); }
+
+.ProseMirror blockquote {
+    margin: 0.6em 0;
+    padding: 0.2em 0.9em;
+    border-left: 2px solid rgb(122 59 71 / 0.45); /* cl2-burgundy soft */
+    color: rgb(14 23 69 / 0.72);
+    font-style: italic;
+}
+.dark .ProseMirror blockquote {
+    color: rgb(255 255 255 / 0.7);
+    border-left-color: rgb(216 164 173 / 0.45);
+}
+
+.ProseMirror code {
+    background: rgb(14 23 69 / 0.06);
+    padding: 0.1em 0.35em;
+    border-radius: 4px;
+    font-size: 0.92em;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    color: rgb(122 59 71); /* cl2-burgundy */
+}
+.dark .ProseMirror code {
+    background: rgb(255 255 255 / 0.08);
+    color: rgb(216 164 173); /* burgundy soft for dark */
+}
+.ProseMirror pre {
+    background: rgb(14 23 69 / 0.06);
+    padding: 0.6em 0.9em;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 0.6em 0;
+}
+.dark .ProseMirror pre {
+    background: rgb(255 255 255 / 0.06);
+}
+.ProseMirror pre code {
+    background: transparent;
+    padding: 0;
+    color: inherit;
+}
+
+.ProseMirror a {
+    color: rgb(225 29 72); /* cl2-accent-hover */
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+.dark .ProseMirror a {
+    color: rgb(255 104 119); /* cl2-accent-soft for contrast on dark */
+}
+
+.ProseMirror strong { font-weight: 600; color: inherit; }
+.ProseMirror em { font-style: italic; }
+
+.ProseMirror hr {
+    border: none;
+    border-top: 1px solid rgb(14 23 69 / 0.12);
+    margin: 1em 0;
+}
+.dark .ProseMirror hr { border-top-color: rgb(255 255 255 / 0.12); }
+
+/* Highlight (<mark>): default browser CSS forces black text on yellow,
+   which is unreadable in dark mode. Inherit the editor color so
+   highlighted text uses the same white-at-88%/cl2-ink we set above —
+   only the background changes per the user's chosen color. Subtle
+   horizontal padding keeps the band visually separated from siblings. */
+.ProseMirror mark {
+    color: inherit;
+    background-color: rgba(234, 179, 8, 0.45); /* yellow fallback if no inline style */
+    padding: 0.05em 0.18em;
+    border-radius: 2px;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+}
+
+/* Links (<a> from TipTap Link extension) — burgundy in light mode,
+   burgundy-soft in dark for contrast. Underline on hover only so the
+   default state stays clean (matches docx behavior more than markdown). */
+.ProseMirror a[href] {
+    color: rgb(122 59 71);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    text-decoration-color: rgb(122 59 71 / 0.35);
+    cursor: pointer;
+}
+.dark .ProseMirror a[href] {
+    color: rgb(216 164 173);
+    text-decoration-color: rgb(216 164 173 / 0.4);
+}
+.ProseMirror a[href]:hover {
+    text-decoration-color: currentColor;
+}
+
+/* Task list (TipTap TaskList + TaskItem). Default rendering is a
+   <ul data-type="taskList"> with <li data-type="taskItem"> containing
+   <input type="checkbox">. We strip the bullet and align the checkbox. */
+.ProseMirror ul[data-type="taskList"] {
+    list-style: none;
+    padding-left: 0.4em;
+}
+.ProseMirror ul[data-type="taskList"] li {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5em;
+    margin: 0.18em 0;
+}
+.ProseMirror ul[data-type="taskList"] li > label {
+    flex-shrink: 0;
+    margin-top: 0.28em;
+    user-select: none;
+}
+.ProseMirror ul[data-type="taskList"] li > div {
+    flex: 1;
+    min-width: 0;
+}
+.ProseMirror ul[data-type="taskList"] input[type="checkbox"] {
+    accent-color: rgb(225, 29, 72); /* cl2-accent-hover */
+    cursor: pointer;
+}
+/* Strike-through completed items for a satisfying check feedback. */
+.ProseMirror ul[data-type="taskList"] li[data-checked="true"] > div {
+    color: rgb(14 23 69 / 0.45);
+    text-decoration: line-through;
+}
+.dark .ProseMirror ul[data-type="taskList"] li[data-checked="true"] > div {
+    color: rgb(255 255 255 / 0.40);
+}
+
+/* Text alignment classes from @tiptap/extension-text-align — the ext
+   sets text-align inline but we also support its data attribute hook. */
+.ProseMirror [style*="text-align: center"] { text-align: center; }
+.ProseMirror [style*="text-align: right"]  { text-align: right; }
+.ProseMirror [style*="text-align: justify"] { text-align: justify; }
+
+/* Placeholder text when the editor is empty (TipTap's
+   `is-editor-empty` helper) — readable on both backgrounds. */
+.ProseMirror p.is-editor-empty:first-child::before {
+    content: attr(data-placeholder);
+    color: rgb(14 23 69 / 0.30);
+    pointer-events: none;
+    float: left;
+    height: 0;
+}
+.dark .ProseMirror p.is-editor-empty:first-child::before {
+    color: rgb(255 255 255 / 0.32);
+}

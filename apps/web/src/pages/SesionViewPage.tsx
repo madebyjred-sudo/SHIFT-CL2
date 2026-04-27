@@ -18,8 +18,9 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { ArrowLeft, Calendar, Check as CheckIcon, Clock, Eye, EyeOff, FileSliders, Headphones, MessageSquare, Search, Sparkles, X } from 'lucide-react';
+import { ArrowLeft, Calendar, Check as CheckIcon, Clock, Eye, EyeOff, FileSliders, Headphones, Layers, MessageSquare, Search, Sparkles, X } from 'lucide-react';
 import { PodcastModal } from '@/components/podcasts/PodcastModal';
+import { SendToWorkspaceModal } from '@/components/SendToWorkspaceModal';
 import { PodcastStrip } from '@/components/podcasts/PodcastStrip';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -83,6 +84,7 @@ export function SesionViewPage({ sesionId }: Props) {
   // both the transcript multi-select and the resumen cards.
   const [chatPrefill, setChatPrefill] = useState<{ text: string; nonce: number } | null>(null);
   const [podcastOpen, setPodcastOpen] = useState(false);
+  const [sendOpen, setSendOpen] = useState(false);
   const [podcastBump, setPodcastBump] = useState(0);
 
   const sendToLexa = (contextText: string) => {
@@ -189,6 +191,16 @@ export function SesionViewPage({ sesionId }: Props) {
 
           <button
             type="button"
+            onClick={() => setSendOpen(true)}
+            title="Enviar la sesión completa a un workspace de Hojas"
+            className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-[#0e1745]/[0.06] text-[#0e1745]/75 dark:bg-white/[0.06] dark:text-white/75 hover:bg-[#0e1745]/[0.10] dark:hover:bg-white/[0.10] transition-colors"
+          >
+            <Layers size={13} />
+            Enviar a workspace
+          </button>
+
+          <button
+            type="button"
             onClick={() => setPodcastOpen(true)}
             title="Generar podcast — narrado por Lexa"
             className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-cl2-burgundy/10 text-cl2-burgundy dark:bg-cl2-accent/15 dark:text-cl2-accent-soft hover:bg-cl2-burgundy/15 dark:hover:bg-cl2-accent/20 transition-colors"
@@ -198,6 +210,12 @@ export function SesionViewPage({ sesionId }: Props) {
           </button>
         </div>
       </div>
+      <SendToWorkspaceModal
+        open={sendOpen}
+        onClose={() => setSendOpen(false)}
+        sources={[{ type: 'sesion', id: String(sesionId) }]}
+        summary={detail?.titulo ? `Sesión: ${detail.titulo}` : `Sesión #${sesionId}`}
+      />
       <PodcastModal
         open={podcastOpen}
         onClose={() => {
@@ -254,7 +272,7 @@ export function SesionViewPage({ sesionId }: Props) {
                   <AnimatedAiInput
                     scope={
                       detail
-                        ? { legacy_session_id: detail.id, label: `Sesión #${detail.id}` }
+                        ? { kind: 'session', legacy_session_id: detail.id, label: `Sesión #${detail.id}` }
                         : undefined
                     }
                     placeholder={

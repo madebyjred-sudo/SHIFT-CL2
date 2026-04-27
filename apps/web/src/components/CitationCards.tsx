@@ -7,8 +7,9 @@
  */
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { ChevronDown, FileText, ExternalLink, Landmark, Gavel } from 'lucide-react';
+import { BookOpen, Check, ChevronDown, FileText, ExternalLink, Landmark, Gavel } from 'lucide-react';
 import type { ChunkCitation } from '@/lib/chat-context';
+import { saveCitation } from '@/services/workspaceApi';
 
 interface CitationCardsProps {
   citations: ChunkCitation[];
@@ -161,12 +162,32 @@ function PlenariaCitationCard({ citation: c, index: i }: { citation: ChunkCitati
 // + serves PDFs from our GCS mirror — works even when the SIL is down.
 // Falls back to the upstream `url_detalle` for citations without a number.
 function SilCitationCard({ citation: c, index: i }: { citation: ChunkCitation; index: number }) {
+  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+
   const typeLabel = silTypeLabel(c.source_type);
   const link = c.expediente_numero
     ? `/expediente/${encodeURIComponent(c.expediente_numero.replace(/[^\d]/g, ''))}`
     : c.url_detalle ?? null;
   const linkLabel = c.expediente_numero ? 'Ver expediente' : 'Ver en SIL';
   const linkExternal = !c.expediente_numero;
+
+  const handleSave = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (saved || saving) return;
+    setSaving(true);
+    try {
+      await saveCitation({
+        chunk_id: c.id,
+        source_label: c.source_ref ?? `Exp. ${c.expediente_numero ?? ''}`,
+        excerpt: c.content?.slice(0, 300) ?? '',
+      });
+      setSaved(true);
+    } catch { /* silent — citation not critical */ } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <article className="rounded-xl border border-cl2-accent/15 bg-cl2-accent/5 dark:bg-cl2-accent/[0.07] p-3 text-[12.5px]">
       <header className="flex items-center justify-between gap-2 mb-2">
@@ -214,7 +235,21 @@ function SilCitationCard({ citation: c, index: i }: { citation: ChunkCitation; i
         <span className="truncate">
           {c.proponente ? `Proponente: ${c.proponente}` : c.source_ref}
         </span>
-        {c.comision && <span className="shrink-0">{c.comision}</span>}
+        <div className="flex items-center gap-2 shrink-0">
+          {c.comision && <span>{c.comision}</span>}
+          <button
+            onClick={handleSave}
+            disabled={saved || saving}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-medium transition-colors bg-cl2-burgundy/10 text-cl2-burgundy dark:text-cl2-burgundy/90 hover:bg-cl2-burgundy/20 disabled:opacity-60"
+            title="Guardar en hojas de trabajo"
+          >
+            {saved ? (
+              <><Check className="w-3 h-3" /> Guardado</>
+            ) : (
+              <><BookOpen className="w-3 h-3" /> Guardar en hoja</>
+            )}
+          </button>
+        </div>
       </footer>
     </article>
   );

@@ -45,7 +45,21 @@ export function SesionCard({ session, selectable, selected, onToggleSelect, onCl
 
   const durFill = Math.min(100, Math.round(((session.duration_s ?? 0) / DURATION_FULL_S) * 100));
 
-  const handleClick = () => {
+  // Click flow:
+  // - shift/meta/ctrl-click: ALWAYS toggle selection (enters compare
+  //   mode on first card, no separate toolbar button needed).
+  // - selectable mode active: plain click toggles too.
+  // - otherwise: navigate to the session.
+  // The explicit modifier-key path is what the page hint promises and
+  // matches the docx/Notion idiom for multi-select in lists.
+  const handleClick = (e: React.MouseEvent | React.KeyboardEvent) => {
+    const me = e as React.MouseEvent;
+    const shifted = me.shiftKey || me.metaKey || me.ctrlKey;
+    if (shifted) {
+      me.preventDefault();
+      onToggleSelect?.(session.id);
+      return;
+    }
     if (selectable) onToggleSelect?.(session.id);
     else onClick?.(session.id);
   };
@@ -60,7 +74,7 @@ export function SesionCard({ session, selectable, selected, onToggleSelect, onCl
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          handleClick();
+          handleClick(e);
         }
       }}
       className={cn(

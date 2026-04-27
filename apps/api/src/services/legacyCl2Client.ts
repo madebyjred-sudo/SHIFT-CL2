@@ -135,7 +135,7 @@ export async function getTranscripcionById(id: number): Promise<LegacyTranscripc
 // ElevenLabs raw blobs are 1-3MB each. 20 entries ≈ 60MB cap, fits in the
 // API container without GC churn. Eviction on write when over capacity.
 
-interface TranscriptBlob {
+export interface TranscriptBlob {
   text: string;
   words: TranscriptWord[];
   language_code: string;

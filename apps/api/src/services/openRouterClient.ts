@@ -454,12 +454,15 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   if (hasReglamentoTool(agent.tools)) {
     tools.push(SEARCH_REGLAMENTO_TOOL);
   }
-  // Graph-augmented retrieval. Only registered when the agent opts in via
-  // YAML — kept narrow so the model doesn't reach for it on every question.
-  // When LightRAG isn't installed in Cerebro, the tool returns a structured
-  // "not_installed" payload that prompts the model to fall back to corpus
-  // search instead of erroring out the turn.
-  if (hasGraphTool(agent.tools)) {
+  // Graph-augmented retrieval (LightRAG). DEEP-INSIGHT-GATED.
+  // The graph traversal + Opus 4.7 synthesis is our "premium reasoning" tier
+  // — token-heavy, expensive, and only justified when the user explicitly
+  // opts in via the Profundizar toggle. In normal mode we hide the tool
+  // entirely so the model can't reach for it: vector search via
+  // search_sil_corpus + search_reglamento covers ~90% of real questions
+  // for ~12x lower cost. Locked 2026-04-26 after a runaway seed run made
+  // the cost asymmetry concrete.
+  if (hasGraphTool(agent.tools) && args.deep_insight) {
     tools.push(QUERY_LEGISLATIVE_GRAPH_TOOL);
   }
 
