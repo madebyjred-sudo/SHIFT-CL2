@@ -8,7 +8,7 @@ import { ErrorBoundary } from './components/error-boundary';
 import { SupabaseAuthView } from './components/SupabaseAuthView';
 import { AuthCallback } from './components/AuthCallback';
 import { useSupabaseStore } from './store/useSupabaseStore';
-import { useRoute, matchSesionId, matchExpedienteNumero, matchAdminSection, isSilBrowse, isLandingPage, isWorkspacesList, matchWorkspaceId, isAudiosPage } from './lib/router';
+import { useRoute, matchSesionId, matchExpedienteNumero, matchAdminSection, isSilBrowse, isLandingPage, isWorkspacesList, matchWorkspaceId, isAudiosPage, matchPodcastShareToken } from './lib/router';
 import { SesionesListPage } from './pages/SesionesListPage';
 import { SesionViewPage } from './pages/SesionViewPage';
 import { SubirSesionPage } from './pages/SubirSesionPage';
@@ -19,6 +19,7 @@ import { WorkspacesListPage } from './pages/WorkspacesListPage';
 import { WorkspaceCanvasPage } from './pages/WorkspaceCanvasPage';
 import { LandingPage } from './pages/LandingPage';
 import { AudiosPage } from './pages/AudiosPage';
+import { PodcastSharePage } from './pages/PodcastSharePage';
 import { cn } from '@/lib/utils';
 
 export default function App() {
@@ -37,6 +38,19 @@ export default function App() {
   }, [init]);
 
   if (path === '/auth/callback') return <AuthCallback />;
+
+  // /p/:token — public podcast share page. Must render before the auth
+  // gate; the token is the auth.
+  const shareToken = matchPodcastShareToken(path);
+  if (shareToken) {
+    return (
+      <ErrorBoundary>
+        <ThemeProvider>
+          <PodcastSharePage token={shareToken} />
+        </ThemeProvider>
+      </ErrorBoundary>
+    );
+  }
 
   // /landing is the public marketing page — must render before the auth
   // gate so prospects can visit without logging in. We still wrap it in

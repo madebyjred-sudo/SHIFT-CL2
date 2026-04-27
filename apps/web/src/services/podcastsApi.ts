@@ -79,6 +79,17 @@ export interface CreatePodcastArgs {
   style: PodcastStyle;
 }
 
+export interface PodcastQuota {
+  used: number;
+  limit: number;
+  remaining: number;
+}
+
+export async function getPodcastQuota(): Promise<PodcastQuota> {
+  const r = await get<{ ok: true } & PodcastQuota>('/quota');
+  return { used: r.used, limit: r.limit, remaining: r.remaining };
+}
+
 export async function listVoices(): Promise<PodcastVoice[]> {
   const r = await get<{ ok: true; voices: PodcastVoice[] }>('/voices');
   return r.voices;

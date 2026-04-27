@@ -18,8 +18,10 @@ import { cn } from '@/lib/utils';
 import {
   createPodcast,
   getPodcast,
+  getPodcastQuota,
   listVoices,
   resolvePodcastAudioUrl,
+  type PodcastQuota,
   type PodcastRow,
   type PodcastSourceType,
   type PodcastStyle,
@@ -58,10 +60,11 @@ export function PodcastModal({ open, onClose, source_type, source_id, source_tit
   const [job, setJob] = useState<PodcastRow | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [quota, setQuota] = useState<PodcastQuota | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Load voices on first open. Cached for the modal lifetime.
+  // Load voices + quota on first open. Cached for the modal lifetime.
   useEffect(() => {
     if (!open) return;
     let alive = true;
@@ -72,6 +75,9 @@ export function PodcastModal({ open, onClose, source_type, source_id, source_tit
         if (!voiceId && vs.length > 0) setVoiceId(vs[0].id);
       })
       .catch((err) => setError((err as Error).message));
+    getPodcastQuota()
+      .then((q) => alive && setQuota(q))
+      .catch(() => null);
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -283,27 +289,50 @@ export function PodcastModal({ open, onClose, source_type, source_id, source_tit
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-[#0e1745]/[0.06] dark:border-white/[0.06]">
-          {phase === 'config' && (
+        <div className="flex items-center justify-between gap-2 px-5 py-3 border-t border-[#0e1745]/[0.06] dark:border-white/[0.06]">
+          {phase === 'config' ? (
             <>
-              <button
-                type="button"
-                onClick={onClose}
-                className="px-3 py-1.5 rounded-md text-[12.5px] font-medium text-[#0e1745]/65 dark:text-white/65 hover:bg-[#0e1745]/[0.05] dark:hover:bg-white/[0.05]"
-              >
-                Cancelar
-              </button>
-              <button
-                type="button"
-                disabled={!voiceId}
-                onClick={() => void startGen()}
-                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md bg-cl2-accent hover:bg-cl2-accent-hover disabled:opacity-50 disabled:cursor-not-allowed text-white text-[12.5px] font-semibold"
-              >
-                <Headphones size={13} />
-                Generar
-              </button>
+              {/* Per-user daily counter — hides if quota fetch failed
+                  (server fails open, returning the cap). Surfaces a soft
+                  warning at >=80% and a hard error at full so the user
+                  knows before they click. */}
+              {quota && (
+                <span
+                  className={cn(
+                    'text-[11.5px]',
+                    quota.remaining === 0
+                      ? 'text-rose-600 dark:text-rose-400 font-semibold'
+                      : quota.used / quota.limit >= 0.8
+                      ? 'text-amber-600 dark:text-amber-400'
+                      : 'text-[#0e1745]/55 dark:text-white/55',
+                  )}
+                  title="Cuota diaria por usuario — se reinicia cada 24h"
+                >
+                  {quota.remaining === 0
+                    ? `Sin cuota — volvé en 24h`
+                    : `${quota.used} de ${quota.limit} usados hoy`}
+                </span>
+              )}
+              <div className="flex items-center gap-2 ml-auto">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="px-3 py-1.5 rounded-md text-[12.5px] font-medium text-[#0e1745]/65 dark:text-white/65 hover:bg-[#0e1745]/[0.05] dark:hover:bg-white/[0.05]"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  disabled={!voiceId || quota?.remaining === 0}
+                  onClick={() => void startGen()}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md bg-cl2-accent hover:bg-cl2-accent-hover disabled:opacity-50 disabled:cursor-not-allowed text-white text-[12.5px] font-semibold"
+                >
+                  <Headphones size={13} />
+                  Generar
+                </button>
+              </div>
             </>
-          )}
+          ) : null}
           {phase === 'running' && (
             <span className="text-[11.5px] text-[#0e1745]/55 dark:text-white/55">
               Esto suele tomar entre 30 y 90 segundos.

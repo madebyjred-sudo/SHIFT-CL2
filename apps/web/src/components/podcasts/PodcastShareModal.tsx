@@ -13,7 +13,7 @@
  */
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Check, Copy, ExternalLink, Headphones, Link2, Loader2, Trash2, X } from 'lucide-react';
+import { Check, Copy, ExternalLink, Headphones, Link2, Loader2, Share2, Trash2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   createPodcastShare,
@@ -85,6 +85,31 @@ export function PodcastShareModal({ open, onClose, podcastId, podcastTitle }: Pr
     } catch {
       // older browsers — show a manual copy hint
       setError('Copiá manualmente el link de abajo.');
+    }
+  };
+
+  // Native Web Share API — surfaces the OS share sheet on iOS / Android
+  // (and on macOS Safari since 17). Lets the user fire to WhatsApp,
+  // mail, AirDrop, etc. without us needing to integrate each. Falls
+  // back to copy-to-clipboard on browsers that don't expose it.
+  const canNativeShare =
+    typeof navigator !== 'undefined' &&
+    typeof (navigator as unknown as { share?: unknown }).share === 'function';
+
+  const nativeShare = async () => {
+    if (!share || !canNativeShare) return;
+    try {
+      await (navigator as unknown as {
+        share: (data: { title?: string; text?: string; url: string }) => Promise<void>;
+      }).share({
+        title: podcastTitle ?? 'Podcast de CL2',
+        text: 'Te comparto este audio generado por Lexa en CL2.',
+        url: share.url,
+      });
+    } catch (err) {
+      // User-cancelled or unsupported — silent fallback to copy.
+      const name = (err as Error).name;
+      if (name !== 'AbortError') void copy();
     }
   };
 
@@ -210,6 +235,16 @@ export function PodcastShareModal({ open, onClose, podcastId, podcastTitle }: Pr
                     {copied ? <Check size={12} /> : <Copy size={12} />}
                     {copied ? 'Copiado' : 'Copiar'}
                   </button>
+                  {canNativeShare && (
+                    <button
+                      type="button"
+                      onClick={() => void nativeShare()}
+                      title="Compartir vía sistema"
+                      className="shrink-0 p-1.5 rounded-md text-[#0e1745]/55 dark:text-white/55 hover:text-cl2-burgundy dark:hover:text-cl2-accent-soft hover:bg-cl2-burgundy/[0.05] dark:hover:bg-cl2-accent/[0.10]"
+                    >
+                      <Share2 size={12} />
+                    </button>
+                  )}
                   <a
                     href={share.url}
                     target="_blank"

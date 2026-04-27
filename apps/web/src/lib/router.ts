@@ -71,6 +71,16 @@ export function isAudiosPage(path: string): boolean {
   return /^\/audios\/?$/.test(path);
 }
 
+/**
+ * Match `/p/:token` — public podcast share page. Token is a UUID v4
+ * minted by POST /api/podcasts/:id/share. Returns the token (no
+ * trailing slash) or null. PUBLIC route: rendered before the auth gate.
+ */
+export function matchPodcastShareToken(path: string): string | null {
+  const m = path.match(/^\/p\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/?$/i);
+  return m ? m[1] : null;
+}
+
 /** Match `/admin/punto-medio` (exact) — single page, no params. */
 export function isAdminPuntoMedio(path: string): boolean {
   return /^\/admin\/punto-medio\/?$/.test(path);

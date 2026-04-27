@@ -79,6 +79,30 @@ podcastsRouter.get('/voices', (_req, res) => {
 });
 
 /**
+ * GET /api/podcasts/quota — surface the per-user daily count + the
+ * cap so the modal can render "X de N usados" before generating.
+ */
+podcastsRouter.get('/quota', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  try {
+    const { data, error } = await supa().rpc('podcasts_user_daily_count', { uid: userId });
+    if (error) throw error;
+    const used = Number(data ?? 0);
+    res.json({
+      ok: true,
+      used,
+      limit: USER_DAILY_CAP,
+      remaining: Math.max(0, USER_DAILY_CAP - used),
+    });
+  } catch (err) {
+    req.log?.warn('podcasts_quota_failed', { error: (err as Error).message });
+    // Fail open — modal will just hide the quota line.
+    res.json({ ok: true, used: 0, limit: USER_DAILY_CAP, remaining: USER_DAILY_CAP });
+  }
+});
+
+/**
  * POST /api/podcasts
  * Body: { source_type, source_id, voice_id, duration_target_s, style }
  * Returns: { ok, id, status }
@@ -329,11 +353,14 @@ podcastsRouter.post('/:id/share', async (req, res) => {
     return;
   }
 
-  // Build public URL — origin from req for dev / prod parity.
+  // Build public URL pointing at the branded share page (NOT the raw
+  // audio endpoint). The /p/:token route fetches metadata + signed URL
+  // and renders the player + CTA. Recipients get a real product
+  // experience, not an mp3 dump.
   const origin = `${req.protocol}://${req.get('host')}`;
   res.json({
     ok: true,
-    url: `${origin}/api/public/podcasts/share/${token}`,
+    url: `${origin}/p/${token}`,
     token,
     expires_at: expiresAt,
   });
