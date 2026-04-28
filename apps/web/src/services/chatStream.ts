@@ -37,6 +37,11 @@ export interface WorkspaceActionPayload {
   [key: string]: unknown;
 }
 
+export interface ChatHistoryMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 export interface StreamChatOptions {
   agentId: string;
   query: string;
@@ -44,6 +49,10 @@ export interface StreamChatOptions {
   deepInsight?: boolean;
   modelOverride?: string;
   scope?: ChatScope;
+  /** Prior turns in this conversation. Pass the messages array (excluding
+   *  the current pending turn) so the model has continuity. Server caps
+   *  the count downstream (~20). */
+  history?: ChatHistoryMessage[];
   onChunk: (chunk: Chunk) => void;
   signal?: AbortSignal;
 }
@@ -75,6 +84,7 @@ export async function streamChat(opts: StreamChatOptions): Promise<void> {
       deep_insight: opts.deepInsight ?? false,
       model_override: opts.modelOverride,
       scope: scopePayload,
+      history: opts.history ?? [],
     }),
     signal: opts.signal,
   });
@@ -115,11 +125,20 @@ export async function streamChat(opts: StreamChatOptions): Promise<void> {
 export interface StreamWorkspaceTurnArgs {
   workspaceId: string;
   query: string;
+  /** 2026-04-28: el agent picker del workspace solo expone Lexa+Atlas.
+   *  Cuando se manda este field, el backend deriva el intent del agente
+   *  + estado de selección — Lexa→chat, Atlas→build|edit_selected. El
+   *  classifier se saltea. Ver docs/AGENTS.md §Atlas. */
+  agentId?: 'lexa' | 'atlas';
   selectedNodeId: string | null;
   hojaTitles: Array<{ id: string; title: string; subtitle?: string | null }>;
   deepInsight: boolean;
-  mode: 'auto' | 'manual';
+  /** Legacy fields — deprecated en favor de agentId, mantenidos para
+   *  back-compat si algún caller no migró. El backend prioriza agentId. */
+  mode?: 'auto' | 'manual';
   forcedIntent?: 'chat' | 'build' | 'edit_selected' | 'edit_by_match';
+  /** Prior turns in this workspace's chat. Same contract as streamChat. */
+  history?: ChatHistoryMessage[];
   signal?: AbortSignal;
   onChunk: (chunk: ChatChunk) => void;
   onIntent?: (info: {
@@ -151,11 +170,15 @@ export async function streamWorkspaceTurn(args: StreamWorkspaceTurnArgs): Promis
     },
     body: JSON.stringify({
       query: args.query,
+      agent_id: args.agentId,
       selected_node_id: args.selectedNodeId,
       hoja_titles: args.hojaTitles,
       deep_insight: args.deepInsight,
-      mode: args.mode,
-      forced_intent: args.forcedIntent,
+      // Legacy mode/forced_intent — solo se mandan si están presentes
+      // (back-compat con callers que no migraron a agent_id).
+      ...(args.mode ? { mode: args.mode } : {}),
+      ...(args.forcedIntent ? { forced_intent: args.forcedIntent } : {}),
+      history: args.history ?? [],
     }),
     signal: args.signal,
   });

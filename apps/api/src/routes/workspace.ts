@@ -950,6 +950,66 @@ const ASSET_TYPE_ALLOWLIST: Record<string, 'image' | 'audio' | 'document'> = {
   'text/plain': 'document', 'text/markdown': 'document',
 };
 
+/** Cap on extracted text we persist + forward to the LLM. ~15K tokens
+ *  with room to spare in a Sonnet/Opus context. Beyond this we truncate
+ *  with a marker so the model knows the source was longer. */
+const ASSET_EXTRACT_MAX_CHARS = 60_000;
+
+// pdf-parse v2 ESM bridge — lazy so the import cost only hits the
+// first PDF upload, not every API cold start.
+let _PDFParse: any | null = null;
+async function getPDFParse(): Promise<any> {
+  if (_PDFParse) return _PDFParse;
+  const mod = await import('pdf-parse');
+  _PDFParse = (mod as any).PDFParse ?? (mod as any).default?.PDFParse;
+  if (!_PDFParse) throw new Error('pdf-parse: PDFParse class not found');
+  return _PDFParse;
+}
+
+/**
+ * Extract plain text from an uploaded asset buffer when feasible (PDF,
+ * DOCX, plain text, markdown). Returns `null` for non-textual types
+ * (images, audio) — the caller persists nothing in that case.
+ *
+ * Why on the SERVER: the user attached a doc to the canvas; from now on
+ * Lexa sees this doc whenever the user asks "qué dice la hoja
+ * seleccionada". Without extraction the model only saw filename+size
+ * (the AssetContent shape), so it'd reply "no hay contenido" — the
+ * exact bug Oscar surfaced.
+ */
+async function extractAssetText(
+  buffer: Buffer,
+  mime: string,
+): Promise<string | null> {
+  // Plain text + markdown — just decode.
+  if (mime === 'text/plain' || mime === 'text/markdown') {
+    return buffer.toString('utf-8').slice(0, ASSET_EXTRACT_MAX_CHARS);
+  }
+  // PDF
+  if (mime === 'application/pdf') {
+    const PDFParse = await getPDFParse();
+    const parser = new PDFParse({ data: buffer });
+    const parsed = await parser.getText();
+    await parser.destroy?.();
+    const txt = ((parsed.text ?? '') as string).trim();
+    return txt.length > ASSET_EXTRACT_MAX_CHARS
+      ? txt.slice(0, ASSET_EXTRACT_MAX_CHARS) + '\n\n[…truncado por longitud]'
+      : txt;
+  }
+  // DOCX (the new MS Word format). The legacy .doc binary is not
+  // supported by mammoth — those will skip extraction.
+  if (mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    const mammoth = await import('mammoth');
+    const { value } = await mammoth.extractRawText({ buffer });
+    const txt = (value ?? '').trim();
+    return txt.length > ASSET_EXTRACT_MAX_CHARS
+      ? txt.slice(0, ASSET_EXTRACT_MAX_CHARS) + '\n\n[…truncado por longitud]'
+      : txt;
+  }
+  // Images, audio, legacy .doc, etc. — nothing to extract.
+  return null;
+}
+
 let _bucketEnsured = false;
 async function ensureAssetsBucket() {
   if (_bucketEnsured) return;
@@ -1021,6 +1081,22 @@ workspaceRouter.post('/:id/nodes/import', importUpload.single('file'), async (re
     const width = Number(req.body?.width ?? defaultDims.width);
     const height = Number(req.body?.height ?? defaultDims.height);
 
+    // Best-effort text extraction for PDFs / DOCXs / plain text. Failure
+    // is non-fatal — the asset still gets uploaded and a node created,
+    // we just can't surface its text to Lexa. (The extracted text feeds
+    // the workspace turn handler so "qué dice este documento" actually
+    // sees the body, not just the filename.)
+    let extractedText: string | null = null;
+    try {
+      extractedText = await extractAssetText(req.file.buffer, mime);
+    } catch (extractErr) {
+      req.log?.warn('workspace/asset_extract_failed', {
+        error: (extractErr as Error).message,
+        mime,
+        bytes: req.file.size,
+      });
+    }
+
     // Insert node row
     const { data: node, error: nErr } = await supa()
       .from('workspace_nodes')
@@ -1036,6 +1112,9 @@ workspaceRouter.post('/:id/nodes/import', importUpload.single('file'), async (re
           filename: req.file.originalname || safeName,
           size: req.file.size,
           mime,
+          ...(extractedText && extractedText.length > 0
+            ? { extracted_text: extractedText }
+            : {}),
         },
         color: 'default',
       })
@@ -1054,6 +1133,80 @@ workspaceRouter.post('/:id/nodes/import', importUpload.single('file'), async (re
     res.status(201).json({ ok: true, node });
   } catch (err) {
     req.log?.warn('workspace/import failed', { error: (err as Error).message, mime });
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// POST /:id/nodes/:nodeId/reextract — re-run text extraction for an
+// already-uploaded asset. Used to backfill nodes that were uploaded
+// before the extractor existed (the demo's existing docx). Pulls the
+// object from the public URL, runs extractAssetText, persists into
+// content.extracted_text. Idempotent.
+// ═══════════════════════════════════════════════════════════════════════
+workspaceRouter.post('/:id/nodes/:nodeId/reextract', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const id = String(req.params.id);
+  const nodeId = String(req.params.nodeId);
+  if (!await ownedWorkspace(userId, id, res)) return;
+
+  // Pull the node + its current content
+  const { data: node, error: getErr } = await supa()
+    .from('workspace_nodes')
+    .select('id, type, content, title')
+    .eq('id', nodeId)
+    .eq('workspace_id', id)
+    .single();
+  if (getErr || !node) {
+    res.status(404).json({ ok: false, error: 'node_not_found' });
+    return;
+  }
+  if (node.type !== 'document') {
+    res.status(400).json({ ok: false, error: 'not_a_document' });
+    return;
+  }
+
+  const c = (node.content ?? {}) as Record<string, unknown>;
+  const path = typeof c.path === 'string' ? c.path : null;
+  const mime = typeof c.mime === 'string' ? c.mime : null;
+  if (!path || !mime) {
+    res.status(400).json({ ok: false, error: 'missing_path_or_mime' });
+    return;
+  }
+
+  try {
+    // Download from the storage bucket directly (private path; the
+    // service-role client has read access regardless of bucket policy).
+    const { data: blob, error: dlErr } = await supa()
+      .storage
+      .from('workspace-assets')
+      .download(path);
+    if (dlErr || !blob) {
+      res.status(502).json({ ok: false, error: 'download_failed', detail: dlErr?.message });
+      return;
+    }
+    const arrayBuf = await blob.arrayBuffer();
+    const buffer = Buffer.from(arrayBuf);
+
+    const extracted = await extractAssetText(buffer, mime);
+    if (!extracted) {
+      res.status(415).json({ ok: false, error: 'extractor_unsupported', mime });
+      return;
+    }
+
+    // Patch into content.extracted_text
+    const newContent = { ...c, extracted_text: extracted };
+    const { error: upErr } = await supa()
+      .from('workspace_nodes')
+      .update({ content: newContent })
+      .eq('id', nodeId)
+      .eq('workspace_id', id);
+    if (upErr) throw new Error(`update: ${upErr.message}`);
+
+    res.json({ ok: true, chars: extracted.length, truncated: extracted.includes('[…truncado por longitud]') });
+  } catch (err) {
+    req.log?.warn('workspace/reextract failed', { error: (err as Error).message, nodeId });
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
 });
@@ -1907,6 +2060,23 @@ workspaceRouter.post('/:id/turn', async (req, res) => {
   const selectedNodeId        = req.body?.selected_node_id as string | undefined;
   const hojaToitles           = (req.body?.hoja_titles ?? []) as Array<{ id: string; title: string; subtitle?: string }>;
   const deepInsight: boolean  = Boolean(req.body?.deep_insight);
+  // 2026-04-28: agent picker en workspace. Lexa = chat (no edita).
+  // Atlas = build/edit (no responde Q&A en chat-prose). Si el cliente
+  // no manda agent_id (e.g. cliente viejo), fallback a la lógica
+  // anterior de classifier de intent — back-compat. Ver docs/AGENTS.md.
+  const requestedAgentId = (req.body?.agent_id as string | undefined)?.toLowerCase();
+  const agentId: 'lexa' | 'atlas' =
+    requestedAgentId === 'atlas' ? 'atlas' :
+    requestedAgentId === 'lexa'  ? 'lexa'  :
+    'lexa'; // default seguro
+  // Conversation history (prior turns in this workspace's chat). Without
+  // it the LLM treats every turn as a fresh thread — references like
+  // "el #1" or "expandí esa idea" lose context. Frontend builds this
+  // from the local message store; we cap downstream.
+  const history = (Array.isArray(req.body?.history) ? req.body.history : []) as Array<{
+    role: 'user' | 'assistant';
+    content: string;
+  }>;
 
   if (!query)              { res.status(400).json({ ok: false, error: 'query_required' }); return; }
   if (query.length > 4000) { res.status(400).json({ ok: false, error: 'query_too_long' }); return; }
@@ -1922,7 +2092,22 @@ workspaceRouter.post('/:id/turn', async (req, res) => {
   let classifierConfidence = 1.0;
   let classifierTargetNodeId: string | null = null;
 
-  if (mode === 'manual' && forcedIntent) {
+  // NEW PATH (2026-04-28): si el cliente nuevo manda explícitamente
+  // agent_id en el body, derivamos intent del agente seleccionado y
+  // del estado de selección. Esto reemplaza el classifier para los
+  // dos agentes que viven en el workspace (Lexa y Atlas), ahorrando
+  // un round-trip a Gemini y una latencia de 2-3s por turn.
+  //
+  //   Lexa  → siempre chat (es el agente reactivo de Q&A)
+  //   Atlas → edit_selected si hay nodo seleccionado, sino build
+  //           (Atlas es el constructor — siempre produce estructura)
+  if (requestedAgentId) {
+    intent = agentId === 'lexa'
+      ? 'chat'
+      : (selectedNodeId ? 'edit_selected' : 'build');
+    classifierTargetNodeId = selectedNodeId ?? null;
+    req.log?.info('turn/agent_picker', { agentId, intent, selectedNodeId });
+  } else if (mode === 'manual' && forcedIntent) {
     intent = forcedIntent;
   } else {
     // Auto-classify via OpenRouter
@@ -2009,22 +2194,91 @@ NO incluyas prosa. Solo el objeto JSON.`;
   if (intent === 'chat') {
     // Workspace context as a scope_system_prompt — openRouterStream
     // injects this between agent.persona and the user query.
-    const [{ data: ws }, { data: selNode }] = await Promise.all([
+    const [{ data: ws }, { data: selNode }, { data: assetNodes }] = await Promise.all([
       supa().from('workspaces').select('title, description').eq('id', id).single(),
       selectedNodeId
-        ? supa().from('workspace_nodes').select('title, content').eq('id', selectedNodeId).eq('workspace_id', id).single()
+        ? supa().from('workspace_nodes').select('title, content, type').eq('id', selectedNodeId).eq('workspace_id', id).single()
         : Promise.resolve({ data: null }),
+      // Pull asset nodes that have extracted text — these are the
+      // PDFs/DOCXs the user dropped on the canvas. We forward their
+      // bodies as context so Lexa can answer "qué dice este documento"
+      // for any of them, not just the selected one. We cap at 3 docs and
+      // 8K chars each (24K total) to keep the system prompt sane.
+      supa()
+        .from('workspace_nodes')
+        .select('id, title, content, type')
+        .eq('workspace_id', id)
+        .in('type', ['document'])
+        .order('updated_at', { ascending: false })
+        .limit(3),
     ]);
+
+    // Helper — pulls a markdown OR extracted_text body out of a node.
+    // Returns null when the node has no usable text.
+    const nodeBody = (node: Record<string, unknown> | null): string | null => {
+      if (!node) return null;
+      const c = node.content as Record<string, unknown> | undefined;
+      if (!c) return null;
+      const md = typeof c.md === 'string' ? c.md.trim() : '';
+      const extracted = typeof c.extracted_text === 'string' ? c.extracted_text.trim() : '';
+      const body = md || extracted;
+      return body.length > 0 ? body : null;
+    };
+
+    const selBody = nodeBody(selNode as Record<string, unknown> | null);
+    const ASSET_CONTEXT_PER_DOC = 8_000;
+    const assetBlocks = (assetNodes ?? [])
+      .filter((n) => n.id !== selectedNodeId) // selected one already shown
+      .map((n) => {
+        const body = nodeBody(n as Record<string, unknown>);
+        if (!body) return null;
+        const trimmed = body.length > ASSET_CONTEXT_PER_DOC
+          ? body.slice(0, ASSET_CONTEXT_PER_DOC) + '\n[…]'
+          : body;
+        return `[Documento en canvas] "${n.title}":\n${trimmed}`;
+      })
+      .filter((s): s is string => Boolean(s));
+
+    // We OVERRIDE the agent persona's "only use numbered extracts" rule
+    // when there is canvas/hoja content in the prompt, otherwise Sonnet
+    // hallucinates that it can't read documents the user attached. This
+    // sub-prompt is explicit and goes BEFORE the content blocks so the
+    // model reads the rules first.
+    const hasAnyCanvasContent = !!selBody || assetBlocks.length > 0;
+    const canvasReadingRules = hasAnyCanvasContent
+      ? [
+          '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+          'CONTEXTO DEL WORKSPACE — REGLAS DE LECTURA',
+          '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+          'A diferencia del chat principal, en este turno te estoy entregando',
+          'DIRECTAMENTE el contenido de las hojas y documentos que el usuario',
+          'puso en su canvas. NO son resultados de RAG ni necesitan tools.',
+          '',
+          '• Si te preguntan sobre [Hoja seleccionada] o [Documento en canvas],',
+          '  RESPONDÉ usando ese texto literal — sí podés leerlo, está acá abajo.',
+          '• Citás el bloque por su título entrecomillado (ej: según "informe',
+          '  técnico 22.403"...) — NO uses la convención [N] aquí, esos números',
+          '  son sólo para extractos del SIL/transcripciones.',
+          '• Si el usuario pide un análisis del documento, hacelo: resumen,',
+          '  puntos clave, observaciones legislativas. Tenés permiso para',
+          '  extrapolar y opinar profesionalmente sobre el texto provisto.',
+          '• Las tools (search_sil_corpus, search_reglamento, etc.) las usás',
+          '  solo si el usuario pregunta por algo que NO está en el canvas.',
+          '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+        ].join('\n')
+      : '';
 
     const scopeSystemPrompt = [
       ws ? `[Workspace actual] "${ws.title}"${ws.description ? ` — ${ws.description}` : ''}` : '',
+      canvasReadingRules,
       selNode
-        ? `[Hoja seleccionada] "${(selNode as Record<string,unknown>).title}":\n${((selNode as Record<string,unknown>).content as Record<string,unknown>)?.md ?? '(sin contenido)'}`
+        ? `[Hoja seleccionada] "${(selNode as Record<string,unknown>).title}":\n${selBody ?? '(sin contenido textual — puede ser una imagen, audio o documento sin extracción)'}`
         : '',
+      ...assetBlocks,
       hojaToitles.length > 0
         ? `[Otras hojas del workspace] ${hojaToitles.map(h => `"${h.title}"`).join(', ')}`
         : '',
-      `Respondé sobre el contenido del workspace cuando aplique. Para preguntas factuales sobre legislación, usá las tools de búsqueda SIL/Reglamento/grafo igual que en el chat principal.`,
+      `Para preguntas factuales sobre legislación general que NO se refieren al canvas, usá las tools de búsqueda SIL/Reglamento/grafo igual que en el chat principal.`,
     ].filter(Boolean).join('\n\n');
 
     res.setHeader('Content-Type', 'text/event-stream');
@@ -2037,12 +2291,18 @@ NO incluyas prosa. Solo el objeto JSON.`;
 
     let tokensForwarded = 0;
     try {
+      // Cuando el usuario eligió Atlas en el agent picker, su intent debió
+      // ser build/edit_selected, no chat — pero por si llega chat con
+      // agentId=atlas (e.g. Atlas en chat-prose accidental), la persona
+      // de Atlas dice explícitamente "redirigí a Lexa". Acá pasamos el
+      // agentId tal cual; el persona/addendum hace el resto.
       await openRouterStream({
-        agent_id: 'lexa',
+        agent_id: agentId,
         query,
         deep_insight: deepInsight,
         model_override: TURN_CHAT_MODEL,
         scope_system_prompt: scopeSystemPrompt,
+        history,
         // Note: scope_legacy_session_id stays undefined — workspace turns
         // don't activate the per-plenaria search_session_transcript tool.
         onChunk: (chunk) => {

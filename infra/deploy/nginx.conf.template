@@ -42,11 +42,24 @@ server {
         proxy_set_header   X-Forwarded-Proto $scheme;
         proxy_set_header   Authorization     $http_authorization;
 
-        # SSE / streaming
-        proxy_buffering    off;
-        proxy_cache        off;
-        proxy_read_timeout 300s;
-        proxy_send_timeout 300s;
+        # ─── SSE / streaming hardening ───────────────────────────────
+        # Without this set, nginx will buffer the upstream response and
+        # emit a Content-Length: 0 header before the stream completes,
+        # killing token-by-token rendering.
+        proxy_buffering             off;
+        proxy_cache                 off;
+        # Some setups (Cloud Run + nginx) re-enable request buffering
+        # by default; disable so multipart uploads stream too.
+        proxy_request_buffering     off;
+        proxy_read_timeout          600s;
+        proxy_send_timeout          600s;
+        # Stops nginx from injecting its own chunking layer on top of
+        # what the upstream emits; SSE has its own framing.
+        chunked_transfer_encoding   on;
+        # Disable response gzip explicitly here (the global gzip block
+        # below excludes text/event-stream by mime type, but being
+        # explicit is cheaper than chasing a future regression).
+        gzip                        off;
 
         # Allow large multipart uploads (audio + PDF)
         client_max_body_size 30m;

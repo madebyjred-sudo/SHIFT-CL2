@@ -192,6 +192,12 @@ chatRouter.post('/stream', async (req, res) => {
       dynamic_rag_prompt: dynamicRagPrompt,
       scope_system_prompt: scopeSystemPrompt,
       scope_legacy_session_id: scopeLegacySessionId,
+      // Forward conversation history sent by the client (keeps the model
+      // aware of prior turns). The frontend trims to its own window; the
+      // server caps at MAX_HISTORY_MESSAGES as a safety net.
+      history: Array.isArray((body as { history?: unknown }).history)
+        ? ((body as { history?: Array<{ role: 'user' | 'assistant'; content: string }> }).history ?? [])
+        : [],
       onChunk: (chunk) => {
         if (chunk.type === 'token' && typeof chunk.payload === 'string') {
           assistantText += chunk.payload;

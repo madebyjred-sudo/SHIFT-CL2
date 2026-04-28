@@ -43,6 +43,12 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY package.json package-lock.json tsconfig*.json ./
 COPY apps/api ./apps/api
 COPY packages/shared-types ./packages/shared-types
+# Agent YAMLs (atlas, lexa, etc.) — loaded at runtime by agentLoader.ts
+# via a path relative to the compiled JS. Without this, the chat handler
+# scandirs an empty path and crashes mid-response (after flushHeaders),
+# producing a 200 with content-length: 0 and an SSE stream that never
+# emits a single chunk.
+COPY packages/cerebro-config ./packages/cerebro-config
 
 # tsc emits to apps/api/dist via apps/api/tsconfig.json (outDir: "dist")
 RUN npm run build --workspace=apps/api
@@ -67,6 +73,8 @@ COPY --from=deps    /app/node_modules ./node_modules
 COPY --from=builder /app/apps/api/dist ./apps/api/dist
 COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
 COPY --from=builder /app/packages/shared-types ./packages/shared-types
+# Agent YAMLs (loaded at runtime — see comment in builder stage above).
+COPY --from=builder /app/packages/cerebro-config ./packages/cerebro-config
 COPY package.json package-lock.json ./
 
 # Drop privileges. node:alpine ships the `node` user (uid 1000).

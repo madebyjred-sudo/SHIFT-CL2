@@ -64,7 +64,9 @@ gcloud run deploy "$SERVICE_NAME" \
   --min-instances=0 \
   --max-instances=10 \
   --concurrency=80 \
-  --timeout=300 \
+  --timeout=600 \
+  --execution-environment=gen2 \
+  --no-cpu-throttling \
   --set-env-vars "API_PORT=8080" \
   --set-env-vars "NODE_ENV=production" \
   --set-env-vars "NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL" \

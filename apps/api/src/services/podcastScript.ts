@@ -122,12 +122,43 @@ export async function generatePodcastScript(args: ScriptArgs): Promise<PodcastSc
   const content = json.choices?.[0]?.message?.content?.trim();
   if (!content) throw new Error('script gen: empty response');
 
-  // Parse + validate.
+  // Parse + validate. Some models (Claude on OpenRouter, occasional Gemini)
+  // wrap the JSON in markdown fences (```json ... ```) even when we ask for
+  // response_format: json_object. Strip them defensively before parsing.
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
   } catch {
-    throw new Error('script gen: malformed JSON');
+    // Try stripping ```json / ```  fences.
+    const stripped = content
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```\s*$/i, '')
+      .trim();
+    try {
+      parsed = JSON.parse(stripped);
+    } catch {
+      // Last-ditch: extract the largest {...} block.
+      const match = content.match(/\{[\s\S]*\}/);
+      if (match) {
+        try {
+          parsed = JSON.parse(match[0]);
+        } catch {
+          // Give up — log a useful preview so the next failure is debuggable
+          // from logs alone (no need to repro).
+          logger.warn('podcast_script_unparseable', {
+            preview: content.slice(0, 400),
+            length: content.length,
+          });
+          throw new Error('script gen: malformed JSON');
+        }
+      } else {
+        logger.warn('podcast_script_unparseable', {
+          preview: content.slice(0, 400),
+          length: content.length,
+        });
+        throw new Error('script gen: malformed JSON');
+      }
+    }
   }
   return validateScript(parsed);
 }

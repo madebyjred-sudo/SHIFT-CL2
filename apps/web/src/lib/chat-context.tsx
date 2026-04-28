@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { Scale, FileText, Radar } from 'lucide-react';
 import type { UploadedDoc } from '@/services/uploadPdf';
 
@@ -120,7 +120,16 @@ export type Confidence = {
 export type Message = {
   id: string;
   role: 'user' | 'assistant';
+  /** What the chat bubble shows. May be a friendly summary
+   *  (e.g. "📎 file.pdf\n\nWhat does this say?") that hides
+   *  attached document text from the rendered transcript. */
   content: string;
+  /** What the LLM should see for THIS message in subsequent turns'
+   *  history. When present, overrides `content` in the forwarded
+   *  history payload — used to keep attached document text in the
+   *  model's context across turns without polluting the visible
+   *  bubble. Optional; falls back to `content` when not set. */
+  llmContent?: string;
   agent?: Agent;
   model?: Model;
   agentActive?: string;
@@ -192,6 +201,14 @@ interface ChatContextType {
   adoptServerSessionId: (localId: string, serverId: string) => void;
   /** Tag a session with a scope. Idempotent — overwrites if set. */
   setSessionScope: (sessionId: string, scope: ChatScope | null) => void;
+  /** Find the MOST RECENT session scoped to this workspace, or create
+   *  a new one and select it. Used on workspace mount to restore the
+   *  user's last conversation. */
+  selectOrCreateWorkspaceSession: (workspaceId: string, title?: string) => void;
+  /** Always create a NEW chat in this workspace. The user gets a fresh
+   *  conversation while their prior chats remain accessible from the
+   *  sidebar (filtered to this workspace). */
+  startNewWorkspaceSession: (workspaceId: string, title?: string) => void;
 }
 
 const ChatContext = createContext<ChatContextType | undefined>(undefined);
@@ -502,6 +519,79 @@ export function ChatProvider({ children, defaultTenantId = 'cl2' }: ChatProvider
     }
   };
 
+  /**
+   * Select-or-create the workspace's MOST RECENT chat session. A workspace
+   * can have many threads — this picks the latest by updatedAt or creates
+   * the first one. Hidden from the main sidebar; visible only when the
+   * user is inside that workspace's surface.
+   */
+  const selectOrCreateWorkspaceSession = useCallback(
+    (workspaceId: string, title?: string) => {
+      const matching = sessions
+        .filter(
+          (s) => s.scope?.kind === 'workspace' && s.scope.workspace_id === workspaceId,
+        )
+        .sort((a, b) => b.updatedAt - a.updatedAt);
+      if (matching.length > 0) {
+        const latest = matching[0];
+        setCurrentSessionId(latest.id);
+        setSelectedModel(latest.model);
+        setSelectedAgent(latest.agent);
+        return;
+      }
+      // First chat in this workspace — use a deterministic id so the
+      // very first session has a stable, recognizable label.
+      const newId = `workspace:${workspaceId}`;
+      const newSession: ChatSession = {
+        id: newId,
+        title: title ? `Hojas — ${title}` : 'Nuevo chat',
+        updatedAt: Date.now(),
+        messages: [],
+        model: selectedModel,
+        agent: 'lexa',
+        scope: {
+          kind: 'workspace',
+          workspace_id: workspaceId,
+          workspace_title: title ?? '',
+          selected_node_id: null,
+        },
+      };
+      setSessions((prev) => [newSession, ...prev]);
+      setCurrentSessionId(newId);
+      setSelectedAgent('lexa');
+    },
+    [sessions, selectedModel],
+  );
+
+  /**
+   * Spawn a brand-new conversation for this workspace, leaving any prior
+   * threads in place (visible in the workspace sidebar). Bound to the
+   * "Nuevo chat" button inside Hojas.
+   */
+  const startNewWorkspaceSession = useCallback(
+    (workspaceId: string, title?: string) => {
+      const newId = `workspace:${workspaceId}:${Date.now()}`;
+      const newSession: ChatSession = {
+        id: newId,
+        title: 'Nuevo chat',
+        updatedAt: Date.now(),
+        messages: [],
+        model: selectedModel,
+        agent: 'lexa',
+        scope: {
+          kind: 'workspace',
+          workspace_id: workspaceId,
+          workspace_title: title ?? '',
+          selected_node_id: null,
+        },
+      };
+      setSessions((prev) => [newSession, ...prev]);
+      setCurrentSessionId(newId);
+      setSelectedAgent('lexa');
+    },
+    [selectedModel],
+  );
+
   return (
     <ChatContext.Provider
       value={{
@@ -531,6 +621,8 @@ export function ChatProvider({ children, defaultTenantId = 'cl2' }: ChatProvider
         deleteSession,
         adoptServerSessionId,
         setSessionScope,
+        selectOrCreateWorkspaceSession,
+        startNewWorkspaceSession,
       }}
     >
       {children}

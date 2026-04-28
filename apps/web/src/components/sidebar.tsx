@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Plus, MessageSquare, X, Trash2 } from 'lucide-react';
 import { useChat } from '@/lib/chat-context';
+import { useRoute, matchWorkspaceId } from '@/lib/router';
 import { cn } from '@/lib/utils';
 
 interface SidebarProps {
@@ -19,7 +20,9 @@ export function Sidebar({
     side = 'left',
     className,
 }: SidebarProps) {
-    const { sessions, currentSessionId, setCurrentSessionId, createNewSession, deleteSession } = useChat();
+    const { sessions, currentSessionId, setCurrentSessionId, createNewSession, deleteSession, startNewWorkspaceSession } = useChat();
+    const path = useRoute();
+    const currentWorkspaceId = matchWorkspaceId(path);
     const drawerRef = useRef<HTMLDivElement | null>(null);
 
     useEffect(() => {
@@ -82,7 +85,14 @@ export function Sidebar({
     };
 
     const handleNewChat = () => {
-        createNewSession();
+        // When the user is inside a workspace, "New chat" spawns a new
+        // workspace-scoped session (the prior thread stays in the
+        // sidebar list). Outside workspace, normal new chat.
+        if (currentWorkspaceId) {
+            startNewWorkspaceSession(currentWorkspaceId);
+        } else {
+            createNewSession();
+        }
         onClose?.();
     };
 
@@ -104,6 +114,28 @@ export function Sidebar({
     };
 
     for (const s of sessions) {
+        // Workspace-scoped chats split into two cases:
+        //   • If the user is INSIDE that workspace, show only that
+        //     workspace's chats (so they can revisit earlier threads).
+        //   • If the user is anywhere else, hide all workspace chats so
+        //     they don't pollute the main sidebar or other workspaces.
+        if (s.scope?.kind === 'workspace') {
+            if (currentWorkspaceId && s.scope.workspace_id === currentWorkspaceId) {
+                // Bucket workspace chats with the rest by date — keeps
+                // the visual grouping consistent and surfaces "today"
+                // / "yesterday" labeling for free.
+                const sessionDate = new Date(s.updatedAt).toDateString();
+                if (sessionDate === today) dateGroups.Hoy.push(s);
+                else if (sessionDate === yesterday) dateGroups.Ayer.push(s);
+                else dateGroups.Anteriores.push(s);
+            }
+            continue;
+        }
+
+        // When inside a workspace, hide the global / session-scoped
+        // history entirely — the user wants a clean per-workspace view.
+        if (currentWorkspaceId) continue;
+
         if (s.scope?.kind === 'session' && s.scope.legacy_session_id != null) {
             const sid = s.scope.legacy_session_id;
             const existing = scopedGroupsMap.get(sid);

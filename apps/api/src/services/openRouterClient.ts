@@ -1,5 +1,5 @@
 import type { CerebroStreamChunk, AgentId } from '@shift-cl2/shared-types';
-import { getAgent } from './agentLoader.js';
+import { getAgent, buildAgentSystemPrompt } from './agentLoader.js';
 import { searchTranscripts, type ChunkHit } from './searchTranscripts.js';
 import { searchSessionTranscript } from './searchSessionTranscript.js';
 import {
@@ -43,8 +43,18 @@ interface StreamArgs {
   // match over ElevenLabs segments, with timecodes returned for citation.
   // Pragmatic stand-in for full RAG (Phase 3 of docs/issues/001).
   scope_legacy_session_id?: number | null;
+  // Prior turns of this conversation, in OAI {role,content} shape. Without
+  // this, every turn is a "first turn" to the LLM (it can't see what it
+  // said last time, so references like "el #1" or "expandí esa idea" miss).
+  // Caller is responsible for trimming to a reasonable window — we cap at
+  // MAX_HISTORY_MESSAGES inside this function as a safety net.
+  history?: Array<{ role: 'user' | 'assistant'; content: string }>;
   onChunk: (chunk: CerebroStreamChunk) => void;
 }
+
+/** Hard cap on prior turns we forward. Keeps cost bounded even if the
+ *  client sends an unbounded transcript. ~20 turns ≈ 10-20K tokens. */
+const MAX_HISTORY_MESSAGES = 20;
 
 const OR_BASE = 'https://openrouter.ai/api/v1';
 
@@ -418,15 +428,31 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
 
   // System message ordering: persona FIRST (kept at index 0 so prompt
   // caching against the LLM provider doesn't churn), then approved-only
-  // RAG patterns (Punto Medio), then session scope (if any), then user.
+  // RAG patterns (Punto Medio), then session scope (if any), then prior
+  // turns (so the model has continuity), then the new user turn.
+  // History is trimmed + sanitized: we only forward role∈{user,assistant}
+  // entries with non-empty content, and cap to MAX_HISTORY_MESSAGES.
+  const trimmedHistory: OAMessage[] = (args.history ?? [])
+    .filter((m) => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.trim().length > 0)
+    .slice(-MAX_HISTORY_MESSAGES)
+    .map((m) => ({ role: m.role, content: m.content }));
+
+  // Build the system prompt with Deep Insight semantics applied per agent.
+  // When DI is on, each agent's YAML may define a `deep_insight.prompt_addendum`
+  // that we append to the persona — Lexa gets "Pensamiento profundo", Atlas
+  // gets "Construcción ejecutiva", Centinela gets "Análisis de patrones".
+  // See docs/AGENTS.md §Deep Insight for the design rationale.
+  const systemPrompt = buildAgentSystemPrompt(agent, args.deep_insight);
+
   const messages: OAMessage[] = [
-    { role: 'system', content: agent.persona },
+    { role: 'system', content: systemPrompt },
     ...(args.dynamic_rag_prompt
       ? [{ role: 'system' as const, content: args.dynamic_rag_prompt }]
       : []),
     ...(args.scope_system_prompt
       ? [{ role: 'system' as const, content: args.scope_system_prompt }]
       : []),
+    ...trimmedHistory,
     { role: 'user', content: args.query },
   ];
 

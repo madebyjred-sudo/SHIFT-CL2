@@ -44,11 +44,12 @@ gcloud run deploy "$SERVICE_NAME" \
   --allow-unauthenticated \
   --port=8080 \
   --cpu=1 \
-  --memory=256Mi \
+  --memory=512Mi \
   --min-instances=0 \
   --max-instances=5 \
   --concurrency=200 \
-  --timeout=60 \
+  --timeout=600 \
+  --execution-environment=gen2 \
   --set-env-vars "API_BASE_URL=$API_BASE_URL"
 
 # ─── 3. Print the URL ─────────────────────────────────────────────────

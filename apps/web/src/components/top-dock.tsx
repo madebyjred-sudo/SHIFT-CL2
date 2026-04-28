@@ -1,8 +1,9 @@
-import { BookOpen, Clock, PanelLeftClose, PanelLeftOpen, Sun, Moon } from 'lucide-react';
+import { BookOpen, Clock, HelpCircle, PanelLeftClose, PanelLeftOpen, Sun, Moon } from 'lucide-react';
 import { useTheme } from '@/lib/theme-context';
 import { UserNavMenu } from './UserNavMenu';
 import { useRoute, navigate } from '@/lib/router';
 import { cn } from '@/lib/utils';
+import { useOnboarding } from './onboarding/OnboardingProvider';
 
 interface TopDockProps {
   onOpenHistory?: () => void;
@@ -13,6 +14,7 @@ interface TopDockProps {
 export function TopDock({ onOpenHistory, onToggleHistory, isHistoryOpen }: TopDockProps) {
   const { theme, toggleTheme } = useTheme();
   const path = useRoute();
+  const { replay: replayTour, hasCompleted: tourCompleted } = useOnboarding();
   const currentView: 'chat' | 'live' | 'sil' | 'audios' | 'admin' | 'hojas' =
     path.startsWith('/admin') ? 'admin'
     : path.startsWith('/sil') ? 'sil'
@@ -32,7 +34,7 @@ export function TopDock({ onOpenHistory, onToggleHistory, isHistoryOpen }: TopDo
     <header className="sticky top-0 z-[90] px-4 sm:px-5 md:px-6 pt-1.5 sm:pt-2">
       <div className="w-full border border-t-0 border-[#0e1745]/[0.06] dark:border-white/[0.04] rounded-b-2xl shadow-[0_4px_20px_rgba(14,23,69,0.04)] dark:shadow-[0_4px_20px_rgba(0,0,0,0.12)] px-3 py-2 md:px-4 md:py-2.5 flex items-center justify-between gap-2 md:gap-4">
         {/* Brand */}
-        <div className="flex items-center gap-2.5 min-w-0">
+        <div className="flex items-center gap-2.5 min-w-0" data-tour="brand">
           <div
             className="relative h-9 w-9 rounded-xl overflow-hidden shrink-0"
             aria-label="CL2 Logo"
@@ -64,6 +66,7 @@ export function TopDock({ onOpenHistory, onToggleHistory, isHistoryOpen }: TopDo
         <div className="flex items-center gap-1.5">
           {onToggleHistory && (
             <button
+              data-tour="history-toggle"
               onClick={onToggleHistory}
               className="hidden lg:flex h-9 w-9 items-center justify-center rounded-full bg-white/70 dark:bg-white/5 hover:bg-white dark:hover:bg-white/10 border border-white/70 dark:border-white/10 text-[#0e1745]/60 dark:text-white/60 transition-all"
               aria-label={isHistoryOpen ? 'Cerrar historial' : 'Abrir historial'}
@@ -79,6 +82,7 @@ export function TopDock({ onOpenHistory, onToggleHistory, isHistoryOpen }: TopDo
 
           {onOpenHistory && (
             <button
+              data-tour="history-toggle"
               onClick={onOpenHistory}
               className="lg:hidden h-9 w-9 flex items-center justify-center rounded-full bg-white/70 dark:bg-white/5 hover:bg-white dark:hover:bg-white/10 border border-white/70 dark:border-white/10 text-[#0e1745]/60 dark:text-white/60 transition-all"
               aria-label="Abrir historial"
@@ -88,6 +92,7 @@ export function TopDock({ onOpenHistory, onToggleHistory, isHistoryOpen }: TopDo
           )}
 
           <button
+            data-tour="theme-toggle"
             onClick={toggleTheme}
             className="h-9 w-9 flex items-center justify-center rounded-full bg-white/70 dark:bg-white/5 hover:bg-white dark:hover:bg-white/10 border border-white/70 dark:border-white/10 shadow-sm text-[#0e1745]/60 dark:text-white/60 hover:text-[#0e1745] dark:hover:text-white transition-all"
             title={theme === 'dark' ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro'}
@@ -95,7 +100,27 @@ export function TopDock({ onOpenHistory, onToggleHistory, isHistoryOpen }: TopDo
             {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
           </button>
 
-          <UserNavMenu currentView={currentView} onNavigate={handleNavigate} />
+          {/* Help / replay tutorial button. Visible on every surface EXCEPT
+              admin (admin is a power-user view; its own onboarding pattern
+              would be different and the chat-rooted tour anchors aren't
+              relevant there). Pulses softly until the user completes the
+              tour at least once, then settles. */}
+          {currentView !== 'admin' && (
+            <button
+              data-tour="help-replay"
+              data-attention={!tourCompleted ? 'true' : 'false'}
+              onClick={replayTour}
+              className="cl2-help-button h-9 w-9 flex items-center justify-center rounded-full bg-white/70 dark:bg-white/5 hover:bg-white dark:hover:bg-white/10 border border-white/70 dark:border-white/10 shadow-sm text-cl2-burgundy dark:text-cl2-burgundy/80 hover:text-cl2-burgundy dark:hover:text-white transition-all"
+              aria-label="Ver tutorial de la aplicación"
+              title="Ver tutorial"
+            >
+              <HelpCircle className="w-4 h-4" />
+            </button>
+          )}
+
+          <div data-tour="user-nav">
+            <UserNavMenu currentView={currentView} onNavigate={handleNavigate} />
+          </div>
         </div>
       </div>
     </header>

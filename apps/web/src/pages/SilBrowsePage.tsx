@@ -384,7 +384,13 @@ function CoverageStrip({
   coverage: SilCoverage;
   includeMetadata: boolean;
 }) {
-  const indexed = coverage.indexed_count;
+  // Two metrics matter: total documents indexed (the searchable corpus
+  // size — what RAG actually ranks over) AND the distinct expedientes
+  // those docs come from. The big number is `indexed_doc_count`
+  // (~22k doc rows post bulk-DOCX ingest); the secondary line shows
+  // expedientes covered (~6.3k) so the hero strip is still honest.
+  const indexedDocs = coverage.indexed_doc_count;
+  const indexedExpedientes = coverage.indexed_count;
   const pending = coverage.buckets.pending_in_active;
   const legacy = coverage.buckets.legacy_1997_2022;
   const historical = coverage.buckets.historical_pre_1997;
@@ -392,9 +398,9 @@ function CoverageStrip({
   return (
     <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2.5">
       <Tile
-        label="Indexados"
-        value={indexed.toLocaleString('es-CR')}
-        sub="con texto + dictámenes"
+        label="Documentos indexados"
+        value={indexedDocs.toLocaleString('es-CR')}
+        sub={`en ${indexedExpedientes.toLocaleString('es-CR')} expedientes`}
         emphasis
       />
       <Tile

@@ -29,6 +29,9 @@ import { AssetNode } from '@/components/hoja/AssetNode';
 import { LexaContextPanel } from '@/components/hoja/LexaContextPanel'; // kept for rollback
 import { HojaFormatMenu } from '@/components/hoja/HojaFormatMenu';
 import { AnimatedAiInput } from '@/components/animated-ai-input';
+import { Sidebar } from '@/components/sidebar';
+import { History } from 'lucide-react';
+import { useChat } from '@/lib/chat-context';
 import { LexaQuickHojaModal } from '@/components/hoja/LexaQuickHojaModal';
 import { PodcastModal } from '@/components/podcasts/PodcastModal';
 import { BoardAudioStrip } from '@/components/podcasts/BoardAudioStrip';
@@ -66,13 +69,26 @@ function gridPosition(index: number): { x: number; y: number } {
 }
 
 // ─── Map API node → ReactFlow node ───────────────────────────────────
+// CRITICAL: pass through n.type so document/image/audio assets render
+// with AssetNode (read-only metadata) instead of HojaNode (TipTap
+// editor). Hardcoding 'hoja' here was destroying uploaded files —
+// TipTap's autosave clobbered the asset's {url, path, mime} with
+// an empty `<p>` paragraph on first keystroke.
 function toRFNode(n: WorkspaceNode, workspaceId: string, callbacks: {
   onDelete: (id: string) => void;
   onSelect: (id: string) => void;
 }): Node {
+  // Asset types route to AssetNode; everything else (hoja, note, cite,
+  // expediente_ref) renders as HojaNode. Defensive lowercasing in case
+  // older rows have inconsistent casing.
+  const t = (n.type ?? 'hoja').toLowerCase();
+  const rfType: 'hoja' | 'image' | 'audio' | 'document' =
+    t === 'image' || t === 'audio' || t === 'document'
+      ? (t as 'image' | 'audio' | 'document')
+      : 'hoja';
   return {
     id: n.id,
-    type: 'hoja',
+    type: rfType,
     position: { x: n.x, y: n.y },
     style: { width: n.width, height: n.height },
     data: {
@@ -158,6 +174,28 @@ function CanvasInner({
     // Fetch full content (lazy — not included in list response)
     const full = await getNode(workspaceId, nodeId).catch(() => null);
     if (full) setSelectedNodeFull(full);
+  }, [workspaceId]);
+
+  // ── Workspace-scoped chat sessions ──────────────────────────────
+  // Each workspace gets its OWN chat threads, separate from the main
+  // sidebar and from other workspaces. On mount we restore the most
+  // recent thread (or create a fresh one). The "Nuevo chat" button
+  // spawns additional threads; the chat-history drawer below shows
+  // every thread for THIS workspace only (filter in sidebar.tsx).
+  const {
+    selectOrCreateWorkspaceSession,
+    startNewWorkspaceSession,
+    setCurrentSessionId,
+  } = useChat();
+  const [chatHistoryOpen, setChatHistoryOpen] = useState(false);
+  useEffect(() => {
+    selectOrCreateWorkspaceSession(workspaceId, title);
+    return () => {
+      setCurrentSessionId(null);
+    };
+    // We intentionally only re-bind on workspaceId — title changes
+    // shouldn't churn the session. The helper is stable enough.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
   // ── Load nodes from API ──────────────────────────────────────────
@@ -514,9 +552,39 @@ function CanvasInner({
           splitter handle to the right. min = 340 (default), max =
           golden-ratio wider (≈550px). */}
       <div
-        className="shrink-0 h-full border-r border-black/8 dark:border-white/6 overflow-hidden"
+        className="shrink-0 h-full border-r border-black/8 dark:border-white/6 overflow-hidden flex flex-col"
         style={{ width: chatWidth }}
       >
+        {/* Header — per-workspace chat controls. "Nuevo chat" spawns a
+            fresh thread (the prior one stays accessible from history).
+            "Historial" toggles a drawer of THIS workspace's past chats. */}
+        <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-black/6 dark:border-white/6 shrink-0">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-cl2-burgundy/70 dark:text-cl2-burgundy/80">
+              Lexa · {title.slice(0, 22)}{title.length > 22 ? '…' : ''}
+            </span>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              onClick={() => setChatHistoryOpen(true)}
+              className="h-7 w-7 flex items-center justify-center rounded-md text-[#0e1745]/55 dark:text-white/55 hover:bg-black/5 dark:hover:bg-white/8 hover:text-[#0e1745] dark:hover:text-white transition-colors"
+              title="Historial de chats en este workspace"
+              aria-label="Historial de chats"
+            >
+              <History className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => startNewWorkspaceSession(workspaceId, title)}
+              className="h-7 px-2 flex items-center gap-1 rounded-md text-[11px] font-semibold text-white bg-cl2-burgundy hover:bg-cl2-burgundy/90 transition-colors"
+              title="Nuevo chat en este workspace"
+              aria-label="Nuevo chat"
+            >
+              <Plus className="w-3 h-3" />
+              Nuevo
+            </button>
+          </div>
+        </div>
+        <div className="flex-1 min-h-0">
         <AnimatedAiInput
           scope={{
             kind: 'workspace',
@@ -552,7 +620,20 @@ function CanvasInner({
             }
           }}
         />
+        </div>
       </div>
+
+      {/* ── Workspace chat-history drawer ──────────────────────── */}
+      {/* Shows ONLY this workspace's chats (sidebar.tsx filters by
+          currentWorkspaceId). Click any to switch threads; "+" inside
+          the sidebar also creates a new workspace chat (handleNewChat
+          in sidebar branches on currentWorkspaceId). */}
+      <Sidebar
+        open={chatHistoryOpen}
+        onClose={() => setChatHistoryOpen(false)}
+        variant="drawer"
+        side="left"
+      />
 
       {/* ── Splitter handle ─────────────────────────────────────── */}
       {/* 4px-wide vertical strip between chat and canvas. Captures

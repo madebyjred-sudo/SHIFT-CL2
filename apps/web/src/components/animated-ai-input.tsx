@@ -372,6 +372,12 @@ export function AnimatedAiInput({
       id: Date.now().toString(),
       role: 'user',
       content: userBubbleContent,
+      // When the user attached a document or a workspace, the bubble
+      // shows a friendly label ("📎 file.pdf") but the LLM needs the
+      // full text in subsequent turns to remember what was attached.
+      // Stash it in llmContent so the history-forwarding path picks
+      // it up (see history builder below).
+      ...(userBubbleContent !== queryForAgent ? { llmContent: queryForAgent } : {}),
     };
     const assistantId = (Date.now() + 1).toString();
     const assistantMessage: Message = {
@@ -393,24 +399,50 @@ export function AnimatedAiInput({
     setIsLoading(true);
     abortControllerRef.current = new AbortController();
 
+    // Build conversation history from the local message store. `messages`
+    // here is the snapshot BEFORE we added the new user/assistant pair
+    // above (closure is stable for this handler invocation), so it is
+    // exactly the "prior turns" the model needs to maintain continuity.
+    // Filter out empty/streaming placeholders. We use `llmContent` when
+    // present (the LLM-facing version of an attached doc / workspace)
+    // and fall back to the visible `content` otherwise. Trim to the
+    // last 20 turns to bound cost.
+    const history: Array<{ role: 'user' | 'assistant'; content: string }> = messages
+      .filter(
+        (m) =>
+          (m.role === 'user' || m.role === 'assistant') &&
+          typeof (m.llmContent ?? m.content) === 'string' &&
+          (m.llmContent ?? m.content).trim().length > 0,
+      )
+      .slice(-20)
+      .map((m) => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.llmContent ?? m.content,
+      }));
+
     let buffer = '';
 
     try {
       // ── Workspace scope path ─────────────────────────────────────────────
       if (scope?.kind === 'workspace') {
-        const forcedIntent =
-          workspaceMode === 'manual'
-            ? (manualIntent as 'chat' | 'build' | 'edit_selected')
-            : undefined;
+        // 2026-04-28: agent picker reemplaza el mode/intent toggle. Lexa
+        // implica chat-only; Atlas implica build/edit_selected (según
+        // selección). El backend deriva el intent del agentId + estado
+        // de selección, sin classifier. Ver docs/AGENTS.md §Atlas.
+        // Si el usuario eligió "centinela" en main chat y luego entró
+        // al workspace, lo coercemos a Lexa para evitar comportamiento
+        // raro — Centinela no vive en workspace.
+        const workspaceAgent: 'lexa' | 'atlas' =
+          selectedAgent === 'atlas' ? 'atlas' : 'lexa';
 
         await streamWorkspaceTurn({
           workspaceId: scope.workspace_id,
           query: queryForAgent,
+          agentId: workspaceAgent,
           selectedNodeId: scope.selected_node_id,
           hojaTitles: hojaTitles ?? [],
           deepInsight,
-          mode: workspaceMode,
-          forcedIntent,
+          history,
           signal: abortControllerRef.current.signal,
           onChunk: (chunk) => {
             if (chunk.type === 'token' && typeof chunk.payload === 'string') {
@@ -478,7 +510,7 @@ export function AnimatedAiInput({
           },
         });
       } else {
-        // ── General / session scope path (UNTOUCHED) ──────────────────────
+        // ── General / session scope path ──────────────────────────────────
         await streamChat({
           agentId: selectedAgent,
           query: queryForAgent,
@@ -487,6 +519,7 @@ export function AnimatedAiInput({
           scope: scope?.kind === 'session'
             ? { kind: 'session', legacy_session_id: scope.legacy_session_id, label: scope.label }
             : undefined,
+          history,
           signal: abortControllerRef.current.signal,
           onChunk: (chunk) => {
             if (chunk.type === 'token' && typeof chunk.payload === 'string') {
@@ -924,7 +957,7 @@ export function AnimatedAiInput({
             )}
           </AnimatePresence>
 
-          <div className="relative z-10 flex flex-col w-full">
+          <div className="relative z-10 flex flex-col w-full" data-tour="lexa-input">
             <div className="relative w-full overflow-hidden">
               <textarea
                 ref={textareaRef}
@@ -944,8 +977,15 @@ export function AnimatedAiInput({
 
             <div className="flex items-center justify-between px-5 pb-4 pt-2 w-full gap-2">
               <div className="flex items-center gap-1.5 flex-wrap min-w-0">
-                {/* Agent selector — hidden in workspace scope */}
-                {!isWorkspaceScope && (
+                {/* Agent selector — Lexa + Atlas + Centinela en main chat;
+                    Lexa + Atlas en workspace (Centinela no vive en /hojas).
+                    Centinela tiene su propia surface en /centinela.
+                    Decisión 2026-04-28 — ver docs/AGENTS.md §Atlas. */}
+                {(() => {
+                  const visibleAgents = isWorkspaceScope
+                    ? (ALL_AGENTS.filter((a) => a === 'lexa' || a === 'atlas'))
+                    : ALL_AGENTS;
+                  return (
                   <div className="relative">
                     <button
                       onClick={(e) => {
@@ -954,6 +994,13 @@ export function AnimatedAiInput({
                       }}
                       className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium rounded-pill transition-all border text-white border-transparent"
                       style={{ backgroundColor: agentInfo.color }}
+                      title={
+                        isWorkspaceScope
+                          ? selectedAgent === 'lexa'
+                            ? 'Lexa responde sobre el contenido del workspace. No modifica hojas.'
+                            : 'Atlas construye o reescribe hojas según lo que le pidas.'
+                          : `${agentInfo.name}: ${agentInfo.role}`
+                      }
                     >
                       {React.createElement(AgentIcon, { className: 'w-3.5 h-3.5' })}
                       <span className="max-w-[120px] truncate">{agentInfo.name}</span>
@@ -970,14 +1017,22 @@ export function AnimatedAiInput({
                         >
                           <div className="flex items-center justify-between px-3 py-2 border-b border-gray-200 dark:border-white/10 mb-2">
                             <span className="text-[10px] font-semibold text-gray-400 dark:text-white/40 uppercase tracking-wider">
-                              CL2 · 3 Agentes
+                              {isWorkspaceScope ? 'CL2 · Agentes del Workspace' : 'CL2 · 3 Agentes'}
                             </span>
                             <Users className="w-3 h-3 text-gray-400 dark:text-white/40" />
                           </div>
-                          {ALL_AGENTS.map((agent) => {
+                          {visibleAgents.map((agent) => {
                             const info = AGENT_INFO[agent];
                             const AIcomp = AGENT_ICONS[info.icon];
                             const isSel = selectedAgent === agent;
+                            // Roles in workspace context — sobreescribe el `info.role`
+                            // genérico con la descripción del job único en el workspace.
+                            const workspaceRole =
+                              isWorkspaceScope
+                                ? agent === 'lexa'
+                                  ? 'Pregunta. Responde sobre las hojas.'
+                                  : 'Construye. Crea o reescribe hojas.'
+                                : info.role;
                             return (
                               <button
                                 key={agent}
@@ -1014,7 +1069,7 @@ export function AnimatedAiInput({
                                     {info.name}
                                   </div>
                                   <div className="text-[10px] text-gray-400 dark:text-white/40 truncate">
-                                    {info.role}
+                                    {workspaceRole}
                                   </div>
                                 </div>
                                 {isSel && (
@@ -1030,7 +1085,8 @@ export function AnimatedAiInput({
                       )}
                     </AnimatePresence>
                   </div>
-                )}
+                  );
+                })()}
 
                 {/* Deep Insight */}
                 <ShinyButton
@@ -1054,20 +1110,10 @@ export function AnimatedAiInput({
                     pin manual mode with a specific intent. Saves a
                     full row of vertical space and removes a layout
                     shift when the user toggles. */}
-                {isWorkspaceScope && (
-                  <ModeIntentToolbar
-                    mode={workspaceMode}
-                    intent={manualIntent}
-                    onChange={(next) => {
-                      if (next === 'auto') {
-                        setWorkspaceMode('auto');
-                      } else {
-                        setWorkspaceMode('manual');
-                        setManualIntent(next);
-                      }
-                    }}
-                  />
-                )}
+                {/* 2026-04-28 — el ModeIntentToolbar (auto/manual + chat/build/edit/match)
+                    se reemplazó por el agent picker (Lexa/Atlas) arriba. La intent
+                    se deriva del agente seleccionado + estado de selección, sin
+                    classifier. Ver docs/AGENTS.md §Atlas. */}
 
                 {/* Adjuntar dropdown — replaces simple Paperclip */}
                 <div className="relative">

@@ -5,6 +5,7 @@ import { Sidebar } from './components/sidebar';
 import { ChatProvider } from './lib/chat-context';
 import { ThemeProvider } from './lib/theme-context';
 import { ErrorBoundary } from './components/error-boundary';
+import { OnboardingProvider } from './components/onboarding/OnboardingProvider';
 import { SupabaseAuthView } from './components/SupabaseAuthView';
 import { AuthCallback } from './components/AuthCallback';
 import { useSupabaseStore } from './store/useSupabaseStore';
@@ -92,6 +93,7 @@ export default function App() {
     <ErrorBoundary>
       <ThemeProvider>
         <ChatProvider>
+          <OnboardingProvider>
           {path === '/sesiones/subir' ? (
             <SubirSesionPage />
           ) : path === '/sesiones' ? (
@@ -144,6 +146,7 @@ export default function App() {
             />
           </div>
           )}
+          </OnboardingProvider>
         </ChatProvider>
       </ThemeProvider>
     </ErrorBoundary>

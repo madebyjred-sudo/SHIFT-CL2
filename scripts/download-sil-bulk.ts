@@ -62,7 +62,14 @@ const GCP_PROJECT = process.env.GCP_PROJECT_ID;
 const GCS_BUCKET = process.env.GCS_BUCKET_SIL ?? 'shift-cl2-sil';
 if (!SUPA_URL || !SUPA_KEY) { console.error('[bulk] Supabase env missing'); process.exit(1); }
 if (!GCP_PROJECT) { console.error('[bulk] GCP_PROJECT_ID missing'); process.exit(1); }
-if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) { console.error('[bulk] GOOGLE_APPLICATION_CREDENTIALS missing'); process.exit(1); }
+// Auth path: prefer GOOGLE_APPLICATION_CREDENTIALS (a JSON key file
+// path) if set; otherwise fall through to Application Default
+// Credentials, which works after `gcloud auth application-default
+// login`. This lets the user run the bulk locally without managing a
+// downloaded SA key file.
+if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+  console.warn('[bulk] GOOGLE_APPLICATION_CREDENTIALS not set — falling back to ADC (gcloud auth application-default login).');
+}
 
 const supa: SupabaseClient = createClient(SUPA_URL, SUPA_KEY, { auth: { persistSession: false } });
 const storage = new Storage();
