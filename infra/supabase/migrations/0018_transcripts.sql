@@ -46,6 +46,18 @@ alter table sessions
   -- ElevenLabs batch. Used by the admin UI to filter and by the
   -- indexer to route chunking logic.
 
+-- Add the check separately so we can use a named constraint with idempotency.
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint where conname = 'sessions_source_check'
+  ) then
+    alter table sessions
+      add constraint sessions_source_check
+      check (source in ('youtube', 'elevenlabs_legacy'));
+  end if;
+end $$;
+
 alter table sessions
   add column if not exists youtube_video_id text;
   -- Nullable. Set by the youtube-sync job when a session is created
@@ -96,10 +108,11 @@ create table if not exists transcript_segments (
   created_at      timestamptz not null default now()
 );
 
--- Composite index: the LLM review job scans all segments for a session
--- in order; the (session_id, segment_idx) index covers both the join
--- and the sort in a single scan.
-create index if not exists transcript_segments_session_idx
+-- Unique composite index: (session_id, segment_idx) is the natural
+-- composite key used by the LLM review job to reference segments.
+-- The unique index covers range scans and lookups, making a separate
+-- non-unique index redundant.
+create unique index if not exists transcript_segments_session_segment_unique
   on transcript_segments (session_id, segment_idx);
 
 -- RLS
@@ -151,11 +164,7 @@ comment on table transcript_segments is
 create table if not exists transcript_corrections (
   id              uuid primary key default gen_random_uuid(),
   session_id      uuid not null references sessions(id) on delete cascade,
-                  -- Denormalized from segment for fast session-level
-                  -- queries (e.g. "all corrections for this session").
   segment_id      uuid not null references transcript_segments(id) on delete cascade,
-                  -- Cascade delete: corrections are meaningless without
-                  -- their source segment.
 
   -- What kind of correction this is. Drives UI highlighting color and
   -- downstream logic (e.g. expediente corrections trigger extra
@@ -198,11 +207,16 @@ create table if not exists transcript_corrections (
 
   -- Provenance: which model created this correction, and which batch run.
   model           text not null,     -- e.g. 'anthropic/claude-sonnet-4-6'
-  llm_run_id      uuid,              -- Groups all corrections from a single LLM call.
+  llm_run_id      uuid not null,     -- Groups all corrections from a single LLM call.
                                      -- Useful for "revert entire run" operations.
+                                     -- Pipeline always sets this; nullable would silently
+                                     -- break the revert-by-run feature on manual imports.
 
   created_at      timestamptz not null default now()
 );
+-- Note: no updated_at column / trigger. The only update path is human
+-- review (accept/reject), which writes reviewed_at + reviewed_by
+-- explicitly. That doubles as the "last touched" timestamp.
 
 -- session_id index: admin UI queries all corrections for a session,
 -- and the indexer reads all accepted corrections per session for chunking.
