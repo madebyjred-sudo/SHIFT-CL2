@@ -244,4 +244,27 @@ describe('fetchTranscript', () => {
     expect(segments[0].start_seconds).toBe(1.123);
     expect(segments[0].end_seconds).toBe(4.111); // 1.1234567 + 2.9876543 = 4.111111... → 4.111
   });
+
+  it('throws code=cancelled and does not retry on aborted signal', async () => {
+    // When the caller aborts the signal before or during the fetch, the service
+    // should surface code='cancelled' and NOT retry — retrying on a fired signal
+    // would fail immediately every time and waste two extra attempts.
+    const ctrl = new AbortController();
+    ctrl.abort();
+
+    await expect(fetchTranscript('dQw4w9WgXcQ', { signal: ctrl.signal }))
+      .rejects.toMatchObject({ code: 'cancelled' });
+    // No retry: lib is called exactly once
+    expect(mockLibFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns empty array when lib returns no segments', async () => {
+    // YouTube sometimes returns [] when auto-captions are not yet generated
+    // (typically 1-4h after upload for AsambleaCRC sessions). This is not an
+    // error — callers must check for empty and re-queue after a delay.
+    mockLibFetch.mockResolvedValueOnce([]);
+
+    const segments = await fetchTranscript('dQw4w9WgXcQ');
+    expect(segments).toEqual([]);
+  });
 });

@@ -52,6 +52,12 @@ const BASE_DELAY_MS = 2_000;
 // 100_000 seconds ≈ 27.8 hours — no legislative session is that long.
 // 100_000 ms = 100 seconds — common in normal videos.
 // Any segment offset above this threshold must be milliseconds.
+//
+// DOMAIN ASSUMPTION: this heuristic only works reliably for videos where
+// at least one segment falls past the ~100s mark. For AsambleaCRC plenarias
+// (3-4 hours), this is always true. If this service is ever extended to
+// cover short clips (<100s), this heuristic must be replaced with a more
+// reliable signal (e.g. checking lib version, or a config flag from caller).
 const MS_VS_SECONDS_THRESHOLD = 100_000;
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -72,7 +78,8 @@ export type YoutubeTranscriptErrorCode =
   | 'no_transcript_available'
   | 'rate_limited'
   | 'network'
-  | 'parse_error';
+  | 'parse_error'
+  | 'cancelled';
 
 export class YoutubeTranscriptError extends Error {
   constructor(
@@ -89,15 +96,19 @@ export class YoutubeTranscriptError extends Error {
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /**
- * Detect whether the lib returned segment values in milliseconds or seconds.
+ * Heuristic to detect ms-based timecodes vs seconds-based.
  *
- * The lib's parseTranscriptXml handles two XML formats:
- *   - srv3 (<p t="ms" d="ms">): integer milliseconds, used by InnerTube path
- *   - classic (<text start="s" dur="s">): float seconds, used by fallback path
+ * The youtube-transcript lib returns offsets in seconds for the classic XML
+ * timed-text endpoint, and in ms for srv3 (which YouTube's CDN sometimes
+ * serves transparently). We detect by looking at the largest offset:
+ * if any segment is past 100,000 (= 100,000s = 27.7 hours, impossible for
+ * a real video), we assume the lib is giving us milliseconds and divide.
  *
- * Both paths return the same TranscriptResponse shape, but units differ.
- * We detect by checking if any offset exceeds our threshold — in seconds, that
- * would imply a 27h video (impossible); in ms it means >100 seconds (normal).
+ * DOMAIN ASSUMPTION: this heuristic only works reliably for videos where
+ * at least one segment falls past the ~100s mark. For AsambleaCRC plenarias
+ * (3-4 hours), this is always true. If this service is ever extended to
+ * cover short clips (<100s), this heuristic must be replaced with a more
+ * reliable signal (e.g. checking lib version, or a config flag from caller).
  */
 function detectMilliseconds(segments: { offset: number }[]): boolean {
   return segments.some((s) => s.offset > MS_VS_SECONDS_THRESHOLD);
@@ -143,7 +154,7 @@ function normalizeSegments(
  *   YoutubeTranscriptNotAvailableLanguageError → no_transcript_available
  *   YoutubeTranscriptTooManyRequestError   → rate_limited  (will be retried)
  *   ResilienceError(code='timeout')        → network        (will be retried)
- *   ResilienceError(code='aborted')        → network        (will NOT be retried)
+ *   ResilienceError(code='aborted')        → cancelled      (will NOT be retried)
  *   TypeError/fetch errors                 → network        (will be retried)
  *   everything else                        → parse_error    (NOT retried)
  */
@@ -176,10 +187,20 @@ function mapLibError(err: unknown, videoId: string): YoutubeTranscriptError {
       err,
     );
   }
+  if (err instanceof ResilienceError && err.code === 'aborted') {
+    // Caller cancelled the fetch (e.g. SIGTERM, deploy rotation). Do NOT retry —
+    // the signal is already fired and every subsequent attempt would fail
+    // immediately as well. Surfaced as 'cancelled' so shouldRetryTranscript
+    // leaves it alone.
+    return new YoutubeTranscriptError(
+      `Transcript fetch cancelled for ${videoId}`,
+      'cancelled',
+      videoId,
+      err,
+    );
+  }
   if (err instanceof ResilienceError) {
-    // timeout and aborted are both surfaced as 'network' to callers; the retry
-    // layer already chose not to retry 'aborted', so by the time this error
-    // propagates it's a terminal failure either way.
+    // timeout → transient network issue, will be retried.
     return new YoutubeTranscriptError(
       `Network error fetching transcript for ${videoId}: ${err.message}`,
       'network',
