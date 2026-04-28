@@ -95,6 +95,7 @@ export function isAdminPuntoMedio(path: string): boolean {
 export type AdminSection =
   | 'overview'
   | 'transcripciones'
+  | 'transcripts'
   | 'agentes'
   | 'curaduria'
   | 'sesiones'
@@ -107,6 +108,7 @@ export type AdminSection =
 const ADMIN_SECTIONS: ReadonlyArray<AdminSection> = [
   'overview',
   'transcripciones',
+  'transcripts',
   'agentes',
   'curaduria',
   'sesiones',
@@ -130,12 +132,24 @@ const ADMIN_ALIASES: Record<string, AdminSection> = {
 
 export function matchAdminSection(path: string): AdminSection | null {
   if (/^\/admin\/?$/.test(path)) return 'overview';
+  // Match /admin/transcripts/:sessionId — treat as 'transcripts' section
+  if (/^\/admin\/transcripts\/[^/]+/.test(path)) return 'transcripts';
   const m = path.match(/^\/admin\/([a-z-]+)\/?$/);
   if (!m) return null;
   const slug = m[1] as string;
   if (ADMIN_SECTIONS.includes(slug as AdminSection)) return slug as AdminSection;
   if (slug in ADMIN_ALIASES) return ADMIN_ALIASES[slug]!;
   return null;
+}
+
+/**
+ * Match `/admin/transcripts/:sessionId` — returns the sessionId or null.
+ * Used by AdminApp to decide whether to render TranscriptsSection (list) or
+ * TranscriptDetailSection (drill-down).
+ */
+export function matchTranscriptDetailId(path: string): string | null {
+  const m = path.match(/^\/admin\/transcripts\/([^/]+)\/?$/);
+  return m ? decodeURIComponent(m[1]!) : null;
 }
 
 /** Match `/hojas` — workspaces list. */

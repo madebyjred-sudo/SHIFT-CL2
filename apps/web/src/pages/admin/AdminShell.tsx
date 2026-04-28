@@ -29,6 +29,7 @@ import {
   Users,
   ScrollText,
   Settings2,
+  Youtube,
   type LucideIcon,
 } from 'lucide-react';
 import { TopDock } from '@/components/top-dock';
@@ -46,6 +47,7 @@ interface NavItem {
 const NAV: ReadonlyArray<NavItem> = [
   { id: 'overview',        label: 'Vista general',       icon: LayoutDashboard, group: 'Operación' },
   { id: 'transcripciones', label: 'Transcripciones',     icon: FileAudio,       group: 'Operación' },
+  { id: 'transcripts',     label: 'Pipeline YouTube',    icon: Youtube,         group: 'Operación' },
   { id: 'agentes',         label: 'Agentes',             icon: Bot,             group: 'Operación' },
   { id: 'curaduria',       label: 'Curaduría',           icon: ShieldCheck,     group: 'Operación' },
   { id: 'sesiones',        label: 'Sesiones plenarias',  icon: Radio,           group: 'Contenido' },

@@ -9,11 +9,13 @@
  * is one line; the verbosity is in the imports.
  */
 import { useEffect, useState } from 'react';
-import { matchAdminSection, navigate, type AdminSection } from '@/lib/router';
+import { matchAdminSection, matchTranscriptDetailId, navigate, useRoute, type AdminSection } from '@/lib/router';
 import { AdminShell } from './AdminShell';
 import { ToastProvider } from './Toast';
 import { OverviewSection } from './sections/OverviewSection';
 import { TranscripcionesSection } from './sections/TranscripcionesSection';
+import { TranscriptsSection } from './sections/TranscriptsSection';
+import { TranscriptDetailSection } from './sections/TranscriptDetailSection';
 import { AgentesSection } from './sections/AgentesSection';
 import { PuntoMedioSection } from './sections/PuntoMedioSection';
 import { SesionesSection } from './sections/SesionesSection';
@@ -24,6 +26,7 @@ import { AuditoriaSection } from './sections/AuditoriaSection';
 import { ConfigSection } from './sections/ConfigSection';
 import { fetchTranscripciones } from '@/services/adminApi';
 import { fetchPending } from '@/services/puntoMedioApi';
+import { listTranscriptSessions } from '@/services/transcriptsAdminApi';
 
 interface AdminAppProps {
   section: AdminSection;
@@ -31,6 +34,10 @@ interface AdminAppProps {
 
 export function AdminApp({ section }: AdminAppProps): React.ReactElement {
   const [badges, setBadges] = useState<Partial<Record<AdminSection, number>>>({});
+  const path = useRoute();
+
+  // Determine if we're drilling into a specific transcript session
+  const transcriptDetailId = section === 'transcripts' ? matchTranscriptDetailId(path) : null;
 
   // Lightweight badge loader so the sidebar shows fresh counts on every
   // section change. These calls are dirt cheap (json fetch, ~150ms each)
@@ -39,8 +46,8 @@ export function AdminApp({ section }: AdminAppProps): React.ReactElement {
   // sidebar signal.
   useEffect(() => {
     let alive = true;
-    Promise.allSettled([fetchTranscripciones(), fetchPending()])
-      .then(([trans, punto]) => {
+    Promise.allSettled([fetchTranscripciones(), fetchPending(), listTranscriptSessions({ limit: 200 })])
+      .then(([trans, punto, transcripts]) => {
         if (!alive) return;
         const next: Partial<Record<AdminSection, number>> = {};
         if (trans.status === 'fulfilled') {
@@ -49,6 +56,13 @@ export function AdminApp({ section }: AdminAppProps): React.ReactElement {
         if (punto.status === 'fulfilled') {
           next['curaduria'] =
             punto.value.pending_consolidations_count + punto.value.pending_patterns_count;
+        }
+        if (transcripts.status === 'fulfilled') {
+          // Badge = sessions with at least one pending correction
+          const pendingSessions = transcripts.value.sessions.filter(
+            (s) => s.corrections_pending > 0,
+          ).length;
+          if (pendingSessions > 0) next['transcripts'] = pendingSessions;
         }
         setBadges(next);
       });
@@ -62,6 +76,10 @@ export function AdminApp({ section }: AdminAppProps): React.ReactElement {
       <AdminShell active={section} badges={badges}>
         {section === 'overview' && <OverviewSection />}
         {section === 'transcripciones' && <TranscripcionesSection />}
+        {section === 'transcripts' && !transcriptDetailId && <TranscriptsSection />}
+        {section === 'transcripts' && transcriptDetailId && (
+          <TranscriptDetailSection sessionId={transcriptDetailId} />
+        )}
         {section === 'agentes' && <AgentesSection />}
         {section === 'curaduria' && <PuntoMedioSection />}
         {section === 'sesiones' && <SesionesSection />}

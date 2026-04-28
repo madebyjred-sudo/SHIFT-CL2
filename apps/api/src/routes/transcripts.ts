@@ -313,6 +313,302 @@ transcriptsAdminRouter.post('/sync', async (req, res) => {
   res.json({ ok: true, sync: syncResult, processed, errors });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/admin/transcripts/sessions
+//
+// List sessions with pipeline state. Efficient aggregation via Supabase RPC
+// equivalent — two parallel queries (sessions metadata + aggregated counts),
+// then joined in-process to avoid N+1.
+//
+// Query params:
+//   status  — comma-separated, e.g. "indexed,processing"
+//   source  — "youtube" | "legacy"
+//   limit   — default 50, max 200
+//   offset  — default 0
+// ─────────────────────────────────────────────────────────────────────────────
+transcriptsAdminRouter.get('/sessions', async (req, res) => {
+  const user = await getUserFromRequest(req);
+  if (!user) {
+    res.status(401).json({ ok: false, error: 'auth_required' });
+    return;
+  }
+
+  const limit = Math.min(Number(req.query.limit ?? 50) || 50, 200);
+  const offset = Number(req.query.offset ?? 0) || 0;
+  const statusFilter =
+    typeof req.query.status === 'string' && req.query.status.trim().length > 0
+      ? req.query.status.split(',').map((s) => s.trim()).filter(Boolean)
+      : null;
+  const sourceFilter =
+    typeof req.query.source === 'string' && req.query.source.trim().length > 0
+      ? req.query.source.trim()
+      : null;
+
+  try {
+    const s = supa();
+
+    // Build main query — grab session rows
+    let q = s
+      .from('sessions')
+      .select(
+        'id, titulo, youtube_video_id, status, source, fecha, comision, tipo, llm_reviewed_at, llm_review_model, metadata',
+        { count: 'exact' },
+      )
+      .order('fecha', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (statusFilter) {
+      q = q.in('status', statusFilter);
+    }
+    if (sourceFilter) {
+      q = q.eq('source', sourceFilter);
+    }
+
+    const { data: sessionRows, count, error } = await q;
+    if (error) throw new Error(error.message);
+
+    const rows = (sessionRows ?? []) as Array<{
+      id: string;
+      titulo: string | null;
+      youtube_video_id: string | null;
+      status: string;
+      source: string | null;
+      fecha: string | null;
+      comision: string | null;
+      tipo: string | null;
+      llm_reviewed_at: string | null;
+      llm_review_model: string | null;
+      metadata: Record<string, unknown> | null;
+    }>;
+
+    if (rows.length === 0) {
+      res.json({ ok: true, sessions: [], total: count ?? 0 });
+      return;
+    }
+
+    // Aggregate segments and corrections counts in two parallel queries
+    const sessionIds = rows.map((r) => r.id);
+
+    const [segCountRes, corrCountRes] = await Promise.all([
+      // Segments count per session
+      s
+        .from('transcript_segments')
+        .select('session_id')
+        .in('session_id', sessionIds),
+      // Corrections count per session, grouped by human_review status
+      s
+        .from('transcript_corrections')
+        .select('session_id, human_review')
+        .in('session_id', sessionIds),
+    ]);
+
+    // Build lookup maps from the flat arrays
+    const segsBySession: Record<string, number> = {};
+    for (const row of (segCountRes.data ?? []) as Array<{ session_id: string }>) {
+      segsBySession[row.session_id] = (segsBySession[row.session_id] ?? 0) + 1;
+    }
+
+    const corrsBySession: Record<string, { total: number; pending: number }> = {};
+    for (const row of (corrCountRes.data ?? []) as Array<{
+      session_id: string;
+      human_review: string | null;
+    }>) {
+      const entry = corrsBySession[row.session_id] ?? { total: 0, pending: 0 };
+      entry.total += 1;
+      if (row.human_review === 'pending') entry.pending += 1;
+      corrsBySession[row.session_id] = entry;
+    }
+
+    const sessions = rows.map((r) => ({
+      id: r.id,
+      title: r.titulo ?? r.youtube_video_id ?? r.id,
+      youtube_video_id: r.youtube_video_id,
+      source: r.source ?? 'unknown',
+      status: r.status,
+      fecha: r.fecha,
+      comision: r.comision,
+      tipo: r.tipo,
+      llm_reviewed_at: r.llm_reviewed_at,
+      llm_review_model: r.llm_review_model,
+      segments_count: segsBySession[r.id] ?? 0,
+      corrections_count: corrsBySession[r.id]?.total ?? 0,
+      corrections_pending: corrsBySession[r.id]?.pending ?? 0,
+    }));
+
+    res.json({ ok: true, sessions, total: count ?? 0 });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('admin_transcripts_sessions_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/admin/transcripts/sessions/:id
+//
+// Drill-down for one session: metadata + segments (capped at 200) + corrections
+// grouped by human_review status.
+// ─────────────────────────────────────────────────────────────────────────────
+transcriptsAdminRouter.get('/sessions/:id', async (req, res) => {
+  const user = await getUserFromRequest(req);
+  if (!user) {
+    res.status(401).json({ ok: false, error: 'auth_required' });
+    return;
+  }
+
+  const sessionId = req.params.id as string;
+
+  try {
+    const s = supa();
+
+    const [sessionRes, segmentsRes, correctionsRes] = await Promise.all([
+      s
+        .from('sessions')
+        .select(
+          'id, titulo, youtube_video_id, status, source, fecha, comision, tipo, llm_reviewed_at, llm_review_model, metadata',
+        )
+        .eq('id', sessionId)
+        .maybeSingle(),
+      s
+        .from('transcript_segments')
+        .select('id, session_id, segment_idx, start_seconds, end_seconds, text, source')
+        .eq('session_id', sessionId)
+        .order('segment_idx', { ascending: true })
+        .limit(200),
+      s
+        .from('transcript_corrections')
+        .select(
+          'id, session_id, segment_id, kind, span_start, span_end, original_text, suggested_text, confidence, reasoning, human_review, reviewed_by, reviewed_at, model, llm_run_id',
+        )
+        .eq('session_id', sessionId)
+        .order('segment_id', { ascending: true }),
+    ]);
+
+    if (sessionRes.error) throw new Error(sessionRes.error.message);
+    if (!sessionRes.data) {
+      res.status(404).json({ ok: false, error: 'session_not_found' });
+      return;
+    }
+
+    if (segmentsRes.error) throw new Error(segmentsRes.error.message);
+    if (correctionsRes.error) throw new Error(correctionsRes.error.message);
+
+    const session = sessionRes.data as {
+      id: string;
+      titulo: string | null;
+      youtube_video_id: string | null;
+      status: string;
+      source: string | null;
+      fecha: string | null;
+      comision: string | null;
+      tipo: string | null;
+      llm_reviewed_at: string | null;
+      llm_review_model: string | null;
+      metadata: Record<string, unknown> | null;
+    };
+
+    type CorrRow = {
+      id: string;
+      session_id: string;
+      segment_id: string | null;
+      kind: string;
+      span_start: number | null;
+      span_end: number | null;
+      original_text: string;
+      suggested_text: string;
+      confidence: number;
+      reasoning: string | null;
+      human_review: string;
+      reviewed_by: string | null;
+      reviewed_at: string | null;
+      model: string | null;
+      llm_run_id: string | null;
+    };
+
+    const allCorrections = (correctionsRes.data ?? []) as CorrRow[];
+    const corrections = {
+      pending: allCorrections.filter((c) => c.human_review === 'pending'),
+      accepted: allCorrections.filter((c) => c.human_review === 'accepted'),
+      rejected: allCorrections.filter((c) => c.human_review === 'rejected'),
+    };
+
+    res.json({
+      ok: true,
+      session: {
+        id: session.id,
+        title: session.titulo ?? session.youtube_video_id ?? session.id,
+        youtube_video_id: session.youtube_video_id,
+        source: session.source ?? 'unknown',
+        status: session.status,
+        fecha: session.fecha,
+        comision: session.comision,
+        tipo: session.tipo,
+        llm_reviewed_at: session.llm_reviewed_at,
+        llm_review_model: session.llm_review_model,
+        metadata: session.metadata,
+      },
+      segments: segmentsRes.data ?? [],
+      corrections,
+    });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('admin_transcripts_session_detail_failed', { sessionId, error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PATCH /api/admin/transcripts/corrections/:id
+//
+// Accept or reject a single correction. Updates human_review, reviewed_by,
+// reviewed_at.
+//
+// Body: { action: 'accept' | 'reject' }
+// Returns: { ok: true, correction: <updated row> }
+// ─────────────────────────────────────────────────────────────────────────────
+transcriptsAdminRouter.patch('/corrections/:id', async (req, res) => {
+  const user = await getUserFromRequest(req);
+  if (!user) {
+    res.status(401).json({ ok: false, error: 'auth_required' });
+    return;
+  }
+
+  const correctionId = req.params.id as string;
+  const action = req.body?.action as string | undefined;
+  if (action !== 'accept' && action !== 'reject') {
+    res.status(400).json({ ok: false, error: 'action must be accept|reject' });
+    return;
+  }
+
+  try {
+    const s = supa();
+    const humanReview = action === 'accept' ? 'accepted' : 'rejected';
+
+    const { data, error } = await s
+      .from('transcript_corrections')
+      .update({
+        human_review: humanReview,
+        reviewed_by: user.id,
+        reviewed_at: new Date().toISOString(),
+      })
+      .eq('id', correctionId)
+      .select()
+      .maybeSingle();
+
+    if (error) throw new Error(error.message);
+    if (!data) {
+      res.status(404).json({ ok: false, error: 'correction_not_found' });
+      return;
+    }
+
+    res.json({ ok: true, correction: data });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('admin_transcripts_patch_correction_failed', { correctionId, error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
 // ── Reset supabase client for tests ───────────────────────────────────────────
 export function _resetSupaClient(): void {
   _supa = null;
