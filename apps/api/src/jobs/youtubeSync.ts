@@ -127,6 +127,15 @@ interface YouTubeChannelResponse {
   items: Array<{ id: string }>;
 }
 
+interface YouTubeVideoItem {
+  id: string;
+  contentDetails: { duration: string }; // ISO 8601 duration, e.g. "PT4H30M15S"
+}
+
+interface YouTubeVideosResponse {
+  items: YouTubeVideoItem[];
+}
+
 /** Parsed metadata from a video title. All fields nullable — best-effort. */
 interface ParsedTitleMeta {
   fecha: string | null;       // ISO date (YYYY-MM-DD) or null
@@ -265,6 +274,27 @@ function parseTitleMeta(title: string): ParsedTitleMeta {
   }
 }
 
+// ── ISO 8601 duration helper ──────────────────────────────────────────────────
+
+/**
+ * Parse an ISO 8601 duration string into total seconds.
+ *
+ * Handles the subset YouTube uses: PT[<H>H][<M>M][<S>S]
+ * Examples: "PT4H30M15S" → 16215, "PT45M" → 2700, "PT15S" → 15
+ *
+ * Returns 0 on any parse failure (missing/invalid input) so callers
+ * can safely use the result without null-checking arithmetic.
+ *
+ * Exported for unit testing.
+ */
+export function parseIsoDurationToSeconds(iso: string): number {
+  if (!iso) return 0;
+  const match = iso.match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
+  if (!match) return 0;
+  const [, h, m, s] = match;
+  return (Number(h) || 0) * 3600 + (Number(m) || 0) * 60 + (Number(s) || 0);
+}
+
 // ── YouTube API helpers ───────────────────────────────────────────────────────
 
 /**
@@ -376,6 +406,51 @@ async function listChannelVideos(
   return data.items ?? [];
 }
 
+/**
+ * Fetch video durations from the YouTube Data API v3 videos.list endpoint.
+ *
+ * Cost: 1 quota unit per call (regardless of how many IDs, up to 50).
+ * Negligible impact on the 10k/day free-tier budget.
+ *
+ * Returns a Map<videoId, durationSeconds | null>.
+ * A video ID maps to null if YouTube omits it from the response (can happen
+ * for age-restricted or otherwise hidden videos).
+ */
+async function fetchVideoDurations(
+  videoIds: string[],
+  apiKey: string,
+): Promise<Map<string, number | null>> {
+  const durationMap = new Map<string, number | null>();
+  if (videoIds.length === 0) return durationMap;
+
+  const url =
+    `${YT_API_BASE}/videos` +
+    `?part=contentDetails` +
+    `&id=${videoIds.map(encodeURIComponent).join(',')}` +
+    `&key=${apiKey}`;
+
+  const data = await ytApiFetch<YouTubeVideosResponse>(url, `yt:videos:durations`);
+
+  // Build a lookup from the response items
+  for (const item of data.items ?? []) {
+    durationMap.set(item.id, parseIsoDurationToSeconds(item.contentDetails?.duration ?? ''));
+  }
+
+  // Any requested ID absent from the response → null (not just missing from map)
+  for (const id of videoIds) {
+    if (!durationMap.has(id)) {
+      durationMap.set(id, null);
+    }
+  }
+
+  logger.info('youtube_sync_durations_fetched', {
+    requested: videoIds.length,
+    returned: data.items?.length ?? 0,
+  });
+
+  return durationMap;
+}
+
 // ── Supabase: existing sessions diff ─────────────────────────────────────────
 
 /**
@@ -428,6 +503,7 @@ async function insertSession(
   item: YouTubeSearchItem,
   parsed: ParsedTitleMeta,
   channelId: string,
+  durationSeconds: number | null,
 ): Promise<string> {
   const title = item.snippet.title;
   const videoId = item.id.videoId;
@@ -456,8 +532,9 @@ async function insertSession(
             sesion_num: parsed.sesion_num,
           }
         : null,
-      channel_id:   channelId,
-      published_at: publishedAt,
+      channel_id:       channelId,
+      published_at:     publishedAt,
+      duration_seconds: durationSeconds,
     },
   };
 
@@ -523,8 +600,13 @@ export async function syncYoutubeChannel(opts?: {
     return { found: 0, new: 0, skipped: 0, errors: 0, videoIds: { new: [], skipped: [], errored: [] } };
   }
 
-  // ── 5. Diff against existing sessions ───────────────────────────────────────
+  // ── 4b. Fetch video durations via videos.list?part=contentDetails ────────────
+  // Cost: 1 quota unit (negligible). Must be called before the diff so the map
+  // is available when constructing each new session's metadata.
   const allVideoIds = videos.map((v) => v.id.videoId);
+  const durationMap = await fetchVideoDurations(allVideoIds, apiKey);
+
+  // ── 5. Diff against existing sessions ───────────────────────────────────────
   const existingIds = await fetchExistingVideoIds(allVideoIds);
 
   const toInsert = videos.filter((v) => !existingIds.has(v.id.videoId));
@@ -565,7 +647,8 @@ export async function syncYoutubeChannel(opts?: {
         logger.warn('youtube_sync_title_parse_miss', { videoId, title });
       }
 
-      await insertSession(video, parsed, channelId);
+      const durationSeconds = durationMap.get(videoId) ?? null;
+      await insertSession(video, parsed, channelId, durationSeconds);
       insertedIds.push(videoId);
 
       logger.info('youtube_sync_session_inserted', {

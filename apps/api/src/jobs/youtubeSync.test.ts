@@ -14,6 +14,9 @@
  *   5. Title parser unit tests (fecha, comision, tipo, sesion_num extraction)
  *   6. Channel ID resolution is cached across calls
  *   7. YouTube API 4xx → throws immediately (no retry), error propagates
+ *   8. parseIsoDurationToSeconds — multiple format permutations + invalid input
+ *   9. duration_seconds written to metadata when video is present in videos.list response
+ *  10. duration_seconds=null when videoId is missing from videos.list response
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -69,7 +72,7 @@ vi.mock('../services/logger.js', () => ({
 
 // ── Import subject under test ─────────────────────────────────────────────────
 // Must come AFTER vi.mock() calls due to hoisting semantics.
-import { syncYoutubeChannel, _parseTitleMeta, _channelIdCache } from './youtubeSync.js';
+import { syncYoutubeChannel, _parseTitleMeta, _channelIdCache, parseIsoDurationToSeconds } from './youtubeSync.js';
 
 // ── YouTube API mock helpers ──────────────────────────────────────────────────
 
@@ -102,18 +105,30 @@ function searchResponse(videos: ReturnType<typeof makeVideo>[]) {
   };
 }
 
+/** Build a mock YouTube videos.list?part=contentDetails response. */
+function videosResponse(items: Array<{ id: string; duration: string }>) {
+  return {
+    items: items.map((v) => ({
+      id: v.id,
+      contentDetails: { duration: v.duration },
+    })),
+  };
+}
+
 /**
  * Wire up a global fetch mock that handles YouTube API calls.
  *
- * The mock dispatches on the URL prefix:
+ * The mock dispatches on the URL substring:
  *   /channels → returns channelRes
  *   /search   → returns searchRes
+ *   /videos   → returns videosRes
  *
  * Returns a vi.fn() so tests can assert call count if needed.
  */
 function mockYouTubeFetch(
   channelRes: object,
   searchRes: object,
+  videosRes: object = { items: [] },
 ): ReturnType<typeof vi.fn> {
   const mockFetch = vi.fn(async (url: string | URL | Request) => {
     const urlStr = typeof url === 'string' ? url : url.toString();
@@ -129,6 +144,13 @@ function mockYouTubeFetch(
         ok: true,
         json: async () => searchRes,
         text: async () => JSON.stringify(searchRes),
+      };
+    }
+    if (urlStr.includes('/videos')) {
+      return {
+        ok: true,
+        json: async () => videosRes,
+        text: async () => JSON.stringify(videosRes),
       };
     }
     throw new Error(`Unexpected fetch URL in test: ${urlStr}`);
@@ -169,7 +191,15 @@ describe('syncYoutubeChannel', () => {
     // vid002 already exists in sessions
     _selectResult = { data: [{ youtube_video_id: 'vid002' }], error: null };
 
-    mockYouTubeFetch(channelResponse('UCcr-canal'), searchResponse(videos));
+    mockYouTubeFetch(
+      channelResponse('UCcr-canal'),
+      searchResponse(videos),
+      videosResponse([
+        { id: 'vid001', duration: 'PT2H15M30S' },
+        { id: 'vid002', duration: 'PT1H45M' },
+        { id: 'vid003', duration: 'PT3H10M5S' },
+      ]),
+    );
 
     const result = await syncYoutubeChannel({ daysBack: 7 });
 
@@ -183,6 +213,17 @@ describe('syncYoutubeChannel', () => {
 
     // Two inserts should have been made (for vid001 and vid003)
     expect(_insertCalls).toHaveLength(2);
+
+    // Verify duration_seconds is populated from videos.list response
+    const insert1 = _insertCalls.find(
+      (c) => (c as Record<string, unknown>).youtube_video_id === 'vid001',
+    ) as Record<string, unknown>;
+    expect((insert1.metadata as Record<string, unknown>).duration_seconds).toBe(8130); // PT2H15M30S
+
+    const insert3 = _insertCalls.find(
+      (c) => (c as Record<string, unknown>).youtube_video_id === 'vid003',
+    ) as Record<string, unknown>;
+    expect((insert3.metadata as Record<string, unknown>).duration_seconds).toBe(11405); // PT3H10M5S
   });
 
   // ── Test 2: Title parse failure → inserts with parsed:null ──────────────────
@@ -193,7 +234,11 @@ describe('syncYoutubeChannel', () => {
     ];
 
     _selectResult = { data: [], error: null };
-    mockYouTubeFetch(channelResponse('UCcr-canal'), searchResponse(videos));
+    mockYouTubeFetch(
+      channelResponse('UCcr-canal'),
+      searchResponse(videos),
+      videosResponse([{ id: 'vid999', duration: 'PT45M' }]),
+    );
 
     const result = await syncYoutubeChannel();
 
@@ -227,7 +272,11 @@ describe('syncYoutubeChannel', () => {
     // Simulate DB insert failure
     _insertResult = { data: null, error: { message: 'unique violation' } };
 
-    mockYouTubeFetch(channelResponse('UCcr-canal'), searchResponse(videos));
+    mockYouTubeFetch(
+      channelResponse('UCcr-canal'),
+      searchResponse(videos),
+      videosResponse([{ id: 'vid-fail', duration: 'PT1H' }]),
+    );
 
     const result = await syncYoutubeChannel();
 
@@ -249,7 +298,14 @@ describe('syncYoutubeChannel', () => {
     // vid-a already exists
     _selectResult = { data: [{ youtube_video_id: 'vid-a' }], error: null };
 
-    mockYouTubeFetch(channelResponse('UCcr-canal'), searchResponse(videos));
+    mockYouTubeFetch(
+      channelResponse('UCcr-canal'),
+      searchResponse(videos),
+      videosResponse([
+        { id: 'vid-a', duration: 'PT2H' },
+        { id: 'vid-b', duration: 'PT1H30M' },
+      ]),
+    );
 
     const result = await syncYoutubeChannel({ dryRun: true });
 
@@ -276,7 +332,11 @@ describe('syncYoutubeChannel', () => {
     const videos = [makeVideo('vid001', 'Sesión Plenaria N°47 - 24 de Abril de 2026')];
     _selectResult = { data: [], error: null };
 
-    const mockFetch = mockYouTubeFetch(channelResponse('UCcr-canal'), searchResponse(videos));
+    const mockFetch = mockYouTubeFetch(
+      channelResponse('UCcr-canal'),
+      searchResponse(videos),
+      videosResponse([{ id: 'vid001', duration: 'PT1H' }]),
+    );
 
     // First call
     await syncYoutubeChannel({ channelHandle: '@AsambleCached' });
@@ -383,5 +443,86 @@ describe('_parseTitleMeta', () => {
     expect(_parseTitleMeta('Sesión - 1 de ENERO de 2026').fecha).toBe('2026-01-01');
     expect(_parseTitleMeta('Sesión - 15 de Diciembre de 2025').fecha).toBe('2025-12-15');
     expect(_parseTitleMeta('Sesión - 3 de Setiembre de 2026').fecha).toBe('2026-09-03');
+  });
+});
+
+// ── parseIsoDurationToSeconds unit tests ──────────────────────────────────────
+
+describe('parseIsoDurationToSeconds', () => {
+  it('parses full H+M+S format: PT4H30M15S → 16215', () => {
+    expect(parseIsoDurationToSeconds('PT4H30M15S')).toBe(16215);
+  });
+
+  it('parses minutes only: PT45M → 2700', () => {
+    expect(parseIsoDurationToSeconds('PT45M')).toBe(2700);
+  });
+
+  it('parses seconds only: PT15S → 15', () => {
+    expect(parseIsoDurationToSeconds('PT15S')).toBe(15);
+  });
+
+  it('parses hours only: PT1H → 3600', () => {
+    expect(parseIsoDurationToSeconds('PT1H')).toBe(3600);
+  });
+
+  it('parses hours + minutes: PT2H30M → 9000', () => {
+    expect(parseIsoDurationToSeconds('PT2H30M')).toBe(9000);
+  });
+
+  it('returns 0 for empty string', () => {
+    expect(parseIsoDurationToSeconds('')).toBe(0);
+  });
+
+  it('returns 0 for invalid/unrecognized input', () => {
+    expect(parseIsoDurationToSeconds('P3D')).toBe(0);
+    expect(parseIsoDurationToSeconds('not-a-duration')).toBe(0);
+    expect(parseIsoDurationToSeconds('PT')).toBe(0); // no H/M/S segments
+  });
+});
+
+// ── duration_seconds missing-from-response test ───────────────────────────────
+
+describe('syncYoutubeChannel — duration_seconds from videos.list', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _insertCalls.length = 0;
+    _selectResult = { data: [], error: null };
+    _insertResult = { data: [{ id: 'new-session-uuid' }], error: null };
+    _channelIdCache.clear();
+    process.env.YOUTUBE_API_KEY = 'test-api-key';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://test.supabase.co';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role-key';
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.YOUTUBE_API_KEY;
+  });
+
+  it('sets metadata.duration_seconds=null when videoId is absent from videos.list response', async () => {
+    const videos = [
+      makeVideo('vid-hidden', 'Sesión Plenaria N°99 - 27 de Abril de 2026'),
+    ];
+
+    _selectResult = { data: [], error: null };
+
+    // videos.list response omits vid-hidden (simulates age-restricted / hidden video)
+    mockYouTubeFetch(
+      channelResponse('UCcr-canal'),
+      searchResponse(videos),
+      videosResponse([]), // empty — vid-hidden not returned
+    );
+
+    const result = await syncYoutubeChannel();
+
+    expect(result.found).toBe(1);
+    expect(result.new).toBe(1);
+    expect(result.errors).toBe(0);
+
+    expect(_insertCalls).toHaveLength(1);
+    const inserted = _insertCalls[0] as Record<string, unknown>;
+    const metadata = inserted.metadata as Record<string, unknown>;
+    // Must be null (not undefined) — explicit null signals "looked up, not found"
+    expect(metadata.duration_seconds).toBeNull();
   });
 });
