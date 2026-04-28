@@ -148,6 +148,111 @@ internalTriggersRouter.post('/youtube-sync', async (req, res) => {
   res.json({ ok: true, sync: syncResult, processed });
 });
 
+/**
+ * POST /api/internal/process-pending
+ *
+ * Drains `pending` YouTube sessions in small batches. Designed to be called by
+ * a Cloud Scheduler cron (every 5-10 min) to handle sessions that were created
+ * by /youtube-sync but not finished within Cloud Run's 600s timeout.
+ *
+ * Auth: X-Internal-Trigger header (same secret as /youtube-sync).
+ *
+ * Body (all optional):
+ *   limit?        number   max sessions to process this call. Default 5.
+ *   skipLlmReview? boolean forwarded to processSession. Default false.
+ *
+ * Returns:
+ *   { ok: true, processed: TranscriptProcessResult[], pending_remaining: number }
+ *
+ * Why limit=5: each session takes ~30-60s. 5 × 60s = 5min, well under 600s.
+ * Why FIFO: drains oldest first for fairness across users.
+ */
+internalTriggersRouter.post('/process-pending', async (req, res) => {
+  // ── Auth: shared-secret header ─────────────────────────────────────────────
+  const secret = process.env.INTERNAL_TRIGGER_SECRET;
+  if (!secret) {
+    req.log?.error('internal_trigger_secret_not_set');
+    res.status(503).json({ ok: false, error: 'server_misconfigured' });
+    return;
+  }
+
+  const incoming = req.headers['x-internal-trigger'];
+  if (!incoming || incoming !== secret) {
+    req.log?.warn('internal_trigger_unauthorized', {
+      has_header: !!incoming,
+      ip: req.ip,
+    });
+    res.status(401).json({ ok: false, error: 'unauthorized' });
+    return;
+  }
+
+  // ── Parse body ─────────────────────────────────────────────────────────────
+  const limit: number =
+    typeof req.body?.limit === 'number' && req.body.limit > 0
+      ? Math.min(req.body.limit, 20)
+      : 5;
+  const skipLlmReview: boolean = req.body?.skipLlmReview === true;
+
+  // ── Fetch pending sessions (FIFO) ──────────────────────────────────────────
+  let pendingIds: string[] = [];
+  let pendingRemaining = 0;
+
+  try {
+    const { data, error } = await supa()
+      .from('sessions')
+      .select('id')
+      .eq('status', 'pending')
+      .eq('source', 'youtube')
+      .order('created_at', { ascending: true })
+      .limit(limit + 1); // fetch one extra to compute pending_remaining
+
+    if (error) throw new Error(error.message);
+
+    const rows = (data ?? []) as Array<{ id: string }>;
+    const toProcess = rows.slice(0, limit);
+    pendingIds = toProcess.map((r) => r.id);
+    // If we got more than `limit`, there's at least one more still pending
+    pendingRemaining = rows.length > limit ? rows.length - limit : 0;
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('process_pending_query_failed', { error: message });
+    res.status(500).json({ ok: false, error: 'query_failed', detail: message });
+    return;
+  }
+
+  // ── Process each session sequentially ─────────────────────────────────────
+  const processed: TranscriptProcessResult[] = [];
+
+  for (const sessionId of pendingIds) {
+    try {
+      const result = await processSession(sessionId, { skipLlmReview });
+      processed.push(result);
+    } catch (err) {
+      const message = (err as Error)?.message ?? String(err);
+      req.log?.error('process_pending_session_failed', { sessionId, error: message });
+      // One bad session must not kill the batch — log + continue
+      processed.push({
+        session_id: sessionId,
+        status: 'permanent_failure',
+        segments_inserted: 0,
+        corrections_inserted: 0,
+        llm_run_id: null,
+        duration_ms: 0,
+        error: message,
+      });
+    }
+  }
+
+  logger.info('process_pending_complete', {
+    processed: processed.length,
+    failures: processed.filter((p) => p.status === 'permanent_failure').length,
+    pending_remaining: pendingRemaining,
+    skipLlmReview,
+  });
+
+  res.json({ ok: true, processed, pending_remaining: pendingRemaining });
+});
+
 // ── /api/admin/transcripts router ─────────────────────────────────────────────
 
 export const transcriptsAdminRouter = Router();

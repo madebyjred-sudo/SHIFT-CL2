@@ -36,6 +36,8 @@ let _supaCallLog: { method: string; args: unknown[] }[] = [];
 // Configurable results for each supabase operation
 let _sessionLookupResult: MockResult = { data: { id: 'sess-uuid-1' }, error: null };
 let _updateResult: MockResult = { data: null, error: null };
+// Result returned when .limit() is the terminal call (used by process-pending query)
+let _limitResult: MockResult = { data: [], error: null };
 
 vi.mock('@supabase/supabase-js', () => {
   // The trick with supabase mocks: the chain must NOT be thenable until the
@@ -77,7 +79,16 @@ vi.mock('@supabase/supabase-js', () => {
         },
         limit: (...args: unknown[]) => {
           _supaCallLog.push({ method: 'limit', args });
-          return makeChain();
+          // Return a hybrid: has .single() for callers that chain further,
+          // AND has .then() so `await ...limit(n)` resolves to _limitResult
+          // when no further chaining happens.
+          const next = makeChain();
+          // Attach thenable so direct `await` resolves to _limitResult
+          (next as Record<string, unknown>)['then'] = (
+            resolve: (v: unknown) => unknown,
+            _reject: (e: unknown) => unknown,
+          ) => Promise.resolve(_limitResult).then(resolve, _reject);
+          return next;
         },
         single: () => {
           _supaCallLog.push({ method: 'single', args: [] });
@@ -204,6 +215,7 @@ beforeEach(() => {
   _fromTable = '';
   _sessionLookupResult = { data: { id: 'sess-uuid-1' }, error: null };
   _updateResult = { data: null, error: null };
+  _limitResult = { data: [], error: null };
   mockSyncYoutubeChannel.mockReset();
   mockProcessSession.mockReset();
   mockGetUserFromRequest.mockReset();
@@ -397,5 +409,185 @@ describe('POST /api/admin/transcripts/sync', () => {
 
     const successResult = body.processed.find((p) => p.status === 'success');
     expect(successResult).toBeTruthy();
+  });
+});
+
+// ── Tests: POST /api/internal/process-pending ─────────────────────────────────
+
+describe('POST /api/internal/process-pending', () => {
+  it('test P1: returns 401 when X-Internal-Trigger header is missing', async () => {
+    vi.stubEnv('INTERNAL_TRIGGER_SECRET', 'supersecret');
+    const req = makeReq({ headers: {} });
+    const res = makeRes();
+    await invokeRouterPost(
+      internalTriggersRouter,
+      '/process-pending',
+      req as Request,
+      res as unknown as Response,
+    );
+    expect(res.statusCode).toBe(401);
+    expect((res.body as { ok: boolean }).ok).toBe(false);
+    expect(mockProcessSession).not.toHaveBeenCalled();
+  });
+
+  it('test P2: correct secret + 0 pending → processed=[], pending_remaining=0', async () => {
+    vi.stubEnv('INTERNAL_TRIGGER_SECRET', 'supersecret');
+    // _limitResult already defaults to { data: [], error: null }
+    const req = makeReq({ headers: { 'x-internal-trigger': 'supersecret' } });
+    const res = makeRes();
+    await invokeRouterPost(
+      internalTriggersRouter,
+      '/process-pending',
+      req as Request,
+      res as unknown as Response,
+    );
+
+    expect(res.statusCode).toBe(200);
+    const body = res.body as { ok: boolean; processed: unknown[]; pending_remaining: number };
+    expect(body.ok).toBe(true);
+    expect(body.processed).toHaveLength(0);
+    expect(body.pending_remaining).toBe(0);
+    expect(mockProcessSession).not.toHaveBeenCalled();
+  });
+
+  it('test P3: 7 pending, limit=3 → processes 3, pending_remaining=4', async () => {
+    vi.stubEnv('INTERNAL_TRIGGER_SECRET', 'supersecret');
+
+    // limit=3 means we fetch limit+1=4 rows; we return 7 IDs but the route
+    // only slices the first `limit` from what DB returns.
+    // We simulate: DB returns 4 rows (limit+1), so pending_remaining = 7-3 = 4.
+    // Actually the route fetches limit+1 rows to peek; we give it 4 rows back.
+    _limitResult = {
+      data: [
+        { id: 'sess-1' },
+        { id: 'sess-2' },
+        { id: 'sess-3' },
+        { id: 'sess-4' }, // the extra one — proves there are more
+      ],
+      error: null,
+    };
+
+    mockProcessSession.mockResolvedValue({
+      session_id: 'sess-x',
+      status: 'success',
+      segments_inserted: 5,
+      corrections_inserted: 1,
+      llm_run_id: 'run-x',
+      duration_ms: 300,
+    });
+
+    const req = makeReq({
+      headers: { 'x-internal-trigger': 'supersecret' },
+      body: { limit: 3 },
+    });
+    const res = makeRes();
+    await invokeRouterPost(
+      internalTriggersRouter,
+      '/process-pending',
+      req as Request,
+      res as unknown as Response,
+    );
+
+    expect(res.statusCode).toBe(200);
+    const body = res.body as { ok: boolean; processed: unknown[]; pending_remaining: number };
+    expect(body.ok).toBe(true);
+    // Only 3 sessions processed (limit=3, even though 4 rows returned)
+    expect(body.processed).toHaveLength(3);
+    expect(mockProcessSession).toHaveBeenCalledTimes(3);
+    // 4 rows returned − 3 processed = 1 remaining (minimum)
+    expect(body.pending_remaining).toBe(1);
+  });
+
+  it('test P4: 5 pending, one session fails → 4 successes + 1 failure, batch continues', async () => {
+    vi.stubEnv('INTERNAL_TRIGGER_SECRET', 'supersecret');
+
+    _limitResult = {
+      data: [
+        { id: 'sess-a' },
+        { id: 'sess-b' },
+        { id: 'sess-c' },
+        { id: 'sess-d' },
+        { id: 'sess-e' },
+      ],
+      error: null,
+    };
+
+    let callIdx = 0;
+    mockProcessSession.mockImplementation(async (sessionId: string) => {
+      callIdx++;
+      if (callIdx === 3) {
+        throw new Error('transcript_fetch_failed');
+      }
+      return {
+        session_id: sessionId,
+        status: 'success',
+        segments_inserted: 4,
+        corrections_inserted: 0,
+        llm_run_id: 'run-ok',
+        duration_ms: 200,
+      };
+    });
+
+    const req = makeReq({
+      headers: { 'x-internal-trigger': 'supersecret' },
+      body: { limit: 5 },
+    });
+    const res = makeRes();
+    await invokeRouterPost(
+      internalTriggersRouter,
+      '/process-pending',
+      req as Request,
+      res as unknown as Response,
+    );
+
+    expect(res.statusCode).toBe(200);
+    const body = res.body as {
+      ok: boolean;
+      processed: Array<{ status: string; error?: string }>;
+      pending_remaining: number;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.processed).toHaveLength(5);
+    expect(mockProcessSession).toHaveBeenCalledTimes(5);
+
+    const failures = body.processed.filter((p) => p.status === 'permanent_failure');
+    const successes = body.processed.filter((p) => p.status === 'success');
+    expect(failures).toHaveLength(1);
+    expect(successes).toHaveLength(4);
+    expect(failures[0].error).toContain('transcript_fetch_failed');
+    // No extra rows returned → pending_remaining=0
+    expect(body.pending_remaining).toBe(0);
+  });
+
+  it('test P5: skipLlmReview=true → processSession called with that flag', async () => {
+    vi.stubEnv('INTERNAL_TRIGGER_SECRET', 'supersecret');
+
+    _limitResult = { data: [{ id: 'sess-skip' }], error: null };
+    mockProcessSession.mockResolvedValue({
+      session_id: 'sess-skip',
+      status: 'success',
+      segments_inserted: 3,
+      corrections_inserted: 0,
+      llm_run_id: null,
+      duration_ms: 150,
+    });
+
+    const req = makeReq({
+      headers: { 'x-internal-trigger': 'supersecret' },
+      body: { skipLlmReview: true },
+    });
+    const res = makeRes();
+    await invokeRouterPost(
+      internalTriggersRouter,
+      '/process-pending',
+      req as Request,
+      res as unknown as Response,
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(mockProcessSession).toHaveBeenCalledWith('sess-skip', { skipLlmReview: true });
+    const body = res.body as { ok: boolean; processed: unknown[] };
+    expect(body.ok).toBe(true);
+    expect(body.processed).toHaveLength(1);
   });
 });
