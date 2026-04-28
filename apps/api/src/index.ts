@@ -47,6 +47,7 @@ import { voiceRouter } from './routes/voice.js';
 import { publicDemoRouter } from './routes/publicDemo.js';
 import { podcastsRouter } from './routes/podcasts.js';
 import { transcriptsAdminRouter, internalTriggersRouter } from './routes/transcripts.js';
+import { centinelaAdminRouter, centinelaInternalRouter } from './routes/centinela.js';
 import { requestContext } from './middleware/requestContext.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { logger } from './services/logger.js';
@@ -171,6 +172,20 @@ app.use(
   '/api/internal',
   rateLimit({ bucket: 'internal', max: 60, windowMs: 60_000 }),
   internalTriggersRouter,
+);
+app.use(
+  // Centinela admin triggers — manual re-runs from the admin UI.
+  // Low cap: operator action, not polling.
+  '/api/admin/centinela',
+  rateLimit({ bucket: 'centinela', max: 60, windowMs: 60_000 }),
+  centinelaAdminRouter,
+);
+app.use(
+  // Centinela Cloud Scheduler triggers. Shares the same secret-header
+  // auth gate as the youtube-sync internal router above.
+  '/api/internal/centinela',
+  rateLimit({ bucket: 'centinela', max: 60, windowMs: 60_000 }),
+  centinelaInternalRouter,
 );
 
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
