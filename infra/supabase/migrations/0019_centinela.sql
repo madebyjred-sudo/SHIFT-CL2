@@ -286,10 +286,6 @@ comment on table centinela_alert_prefs is
 --   (b) the matching rule in reglamento_plazos
 -- and cached here so the alert engine doesn't recompute on every cron run.
 --
--- dias_restantes is a GENERATED STORED column so it stays current with
--- current_date without needing a cron update. Postgres recomputes it
--- on every read.
---
 -- expediente_id is int (not uuid) to match sil_expedientes.id. We use a
 -- logical FK (comment-documented) rather than a hard FK so this table can
 -- be populated by the scraper before the expediente row exists in Supabase
@@ -298,6 +294,16 @@ comment on table centinela_alert_prefs is
 -- PRIMARY KEY (expediente_id, tipo_plazo): one plazo per type per expediente.
 -- If the expediente transitions and the deadline resets, the engine does
 -- an UPSERT (ON CONFLICT UPDATE fecha_inicio, fecha_vencimiento, calculado_en).
+--
+-- DESIGN NOTE — dias_restantes computed on read, not stored:
+--   Postgres requires generated stored columns to use IMMUTABLE expressions.
+--   `current_date` is volatile (changes daily), so we can't generate a stored
+--   `dias_restantes`. Options were:
+--     (a) Daily cron that updates the column — adds operational burden.
+--     (b) Generated VIRTUAL column — Postgres 18+ only.
+--     (c) Compute on read in app/SQL — chosen here.
+--   The application reads `(fecha_vencimiento - current_date)::int AS dias_restantes`
+--   in its SELECTs. A view `expediente_plazos_view` exposes this for convenience.
 
 create table if not exists expediente_plazos (
   expediente_id        int not null,
@@ -318,12 +324,6 @@ create table if not exists expediente_plazos (
   fecha_vencimiento    date not null,
                        -- fecha_inicio + dias_habiles (business days),
                        -- computed by the engine using the Costa Rica calendar.
-  dias_restantes       int generated always as (
-                         (fecha_vencimiento - current_date)::int
-                       ) stored,
-                       -- Auto-updated by Postgres on every read — no cron needed.
-                       -- Negative = past due. The alert engine filters WHERE
-                       -- dias_restantes = ANY(user_prefs.deadline_thresholds).
   calculado_en         timestamptz not null default now(),
                        -- When this row was last computed by the engine.
                        -- Used for cache invalidation: if calculado_en > 24h
@@ -331,12 +331,24 @@ create table if not exists expediente_plazos (
   primary key (expediente_id, tipo_plazo)
 );
 
-create index if not exists expediente_plazos_dias_idx
-  on expediente_plazos (dias_restantes)
-  where dias_restantes >= 0;
-  -- Partial index on non-past deadlines.
-  -- Alert engine query: SELECT ... WHERE dias_restantes = ANY($thresholds)
-  -- Only future/today deadlines are alertable; negatives are ignored.
+create index if not exists expediente_plazos_vencimiento_idx
+  on expediente_plazos (fecha_vencimiento);
+  -- Partial-on-future would require an immutable predicate. We index by
+  -- vencimiento date and let the app filter `WHERE fecha_vencimiento >= current_date`.
+
+-- Convenience view for app reads — exposes dias_restantes computed on the fly.
+-- The alert engine and admin UI read from this view, not the raw table, so
+-- they don't have to repeat the date-arithmetic in every query.
+create or replace view expediente_plazos_view as
+select
+  expediente_id,
+  tipo_plazo,
+  articulo_ref,
+  fecha_inicio,
+  fecha_vencimiento,
+  (fecha_vencimiento - current_date)::int as dias_restantes,
+  calculado_en
+from expediente_plazos;
 
 alter table expediente_plazos enable row level security;
 
@@ -359,7 +371,7 @@ create policy "expediente_plazos deny authenticated update"
 
 comment on table expediente_plazos is
   'Cached Reglamento deadline calculations per expediente. Shared, not per-user. '
-  'dias_restantes is a generated column that stays fresh without cron updates. '
+  'dias_restantes is computed on read via expediente_plazos_view. '
   'Engine upserts when expediente state changes.';
 
 

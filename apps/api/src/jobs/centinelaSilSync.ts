@@ -328,10 +328,15 @@ async function loadPlazosRules(newEstado: string): Promise<ReglamentoPlazoRow[]>
 /**
  * Fetch current expediente_plazos rows so we can compare dias_restantes
  * before and after recalculation to detect threshold crossings.
+ *
+ * Reads from `expediente_plazos_view` (not the raw table) because
+ * `dias_restantes` is computed on-read by the view — Postgres rejects
+ * `current_date` in stored generated columns (it's not immutable). The
+ * view exposes the same shape with the live computation.
  */
 async function fetchCurrentPlazos(expedienteId: number): Promise<Map<string, ExpedientePlazoRow>> {
   const { data, error } = await supa()
-    .from('expediente_plazos')
+    .from('expediente_plazos_view')
     .select('tipo_plazo, dias_restantes, fecha_vencimiento')
     .eq('expediente_id', expedienteId);
 
