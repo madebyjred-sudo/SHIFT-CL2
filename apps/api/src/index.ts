@@ -46,6 +46,7 @@ import { conversationsRouter } from './routes/conversations.js';
 import { voiceRouter } from './routes/voice.js';
 import { publicDemoRouter } from './routes/publicDemo.js';
 import { podcastsRouter } from './routes/podcasts.js';
+import { transcriptsAdminRouter, internalTriggersRouter } from './routes/transcripts.js';
 import { requestContext } from './middleware/requestContext.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { logger } from './services/logger.js';
@@ -156,6 +157,20 @@ app.use(
   '/api/voice',
   rateLimit({ bucket: 'voice', max: 30, windowMs: 60_000 }),
   voiceRouter,
+);
+app.use(
+  // Transcript admin sync — manual trigger from the admin UI.
+  // Low cap: operator action, not polling. 10/min is generous.
+  '/api/admin/transcripts',
+  rateLimit({ bucket: 'transcripts_admin', max: 10, windowMs: 60_000 }),
+  transcriptsAdminRouter,
+);
+app.use(
+  // Internal Cloud Scheduler triggers. High cap because the secret
+  // header is the auth gate — rate limit is defense-in-depth only.
+  '/api/internal',
+  rateLimit({ bucket: 'internal', max: 60, windowMs: 60_000 }),
+  internalTriggersRouter,
 );
 
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
