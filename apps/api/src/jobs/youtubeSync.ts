@@ -13,11 +13,12 @@
  *   lag drops from "days" to "4-12 hours after YouTube auto-transcribes".
  *
  * API choice (YouTube Data API v3 vs scraping):
- *   - `search.list` costs 100 quota units; the free tier is 10k/day.
- *     At 1-2 cron runs per day we use 100-200 units — well under budget.
- *   - `search.list` is the only reliable way to list videos by date range
- *     from a channel handle without scraping. The RSS feed doesn't include
- *     the full date-range filter we need and has a fixed 15-video limit.
+ *   - `playlistItems.list` costs 1 quota unit per call vs 100 for `search.list`.
+ *     Every channel has a deterministic "uploads" playlist: replace the `UC`
+ *     prefix in the channel ID with `UU` to get the playlist ID.
+ *   - We use `channels.list?forHandle=` (1 unit) to resolve the channel ID,
+ *     then derive the uploads playlist ID and call `playlistItems.list` (1 unit).
+ *     Total: 2 units per cron run instead of 101.
  *
  * Idempotency:
  *   `youtube_video_id` in `sessions` doesn't have a unique DB constraint yet
@@ -54,8 +55,11 @@ import { logger } from '../services/logger.js';
 
 const DEFAULT_DAYS_BACK = 7;
 const DEFAULT_CHANNEL_HANDLE = '@AsambleaCRC';
-// search.list returns at most 50 per page. For a 7-day window on a channel
-// that posts 3-5 sessions/week, 50 is always enough. Pagination not needed.
+// playlistItems.list returns at most 50 per page (newest first). For a 7-day
+// window on a channel that posts 3-5 sessions/week, 50 is always enough.
+// Pagination is intentionally omitted for MVP — if a deeper backfill is ever
+// needed, add pageToken handling here. Document decision: adding pagination
+// costs 1 unit per page, still far cheaper than search.list (100 units).
 const MAX_RESULTS = 50;
 // YouTube Data API v3 base URL
 const YT_API_BASE = 'https://www.googleapis.com/youtube/v3';
@@ -107,20 +111,47 @@ export interface YoutubeSyncResult {
 
 // ── Internal types ────────────────────────────────────────────────────────────
 
-interface YouTubeSearchItem {
-  id: { videoId: string };
+/**
+ * One item from the playlistItems.list API response.
+ *
+ * snippet.publishedAt  — when the item was ADDED to the playlist (usually same
+ *                        as videoPublishedAt, but not guaranteed).
+ * contentDetails.videoPublishedAt — when the video was UPLOADED to YouTube.
+ *
+ * We prefer videoPublishedAt for the "when was this session" timestamp because
+ * it reflects the actual upload event, not a playlist-add event.
+ */
+interface YouTubePlaylistItem {
   snippet: {
-    publishedAt: string;   // ISO 8601
+    publishedAt: string;          // ISO 8601 — item added to playlist
     title: string;
-    description: string;
+    resourceId: { videoId: string };
     channelId: string;
+  };
+  contentDetails: {
+    videoId: string;
+    videoPublishedAt: string;     // ISO 8601 — actual video upload time
   };
 }
 
-interface YouTubeSearchResponse {
-  items: YouTubeSearchItem[];
+interface YouTubePlaylistItemsResponse {
+  items: YouTubePlaylistItem[];
   nextPageToken?: string;
   pageInfo: { totalResults: number; resultsPerPage: number };
+}
+
+/**
+ * Normalised video metadata — internal shape passed between helpers.
+ *
+ * Decoupled from the raw API response so that the rest of the job (diff,
+ * insert, dryRun reporting) doesn't care whether data came from search.list
+ * or playlistItems.list.
+ */
+interface VideoMeta {
+  videoId: string;
+  title: string;
+  publishedAt: string;  // ISO 8601 — video upload time (videoPublishedAt preferred)
+  channelId: string;
 }
 
 interface YouTubeChannelResponse {
@@ -368,42 +399,77 @@ async function resolveChannelId(handle: string, apiKey: string): Promise<string>
 }
 
 /**
- * List recent videos from a channel using search.list.
+ * List recent uploads from a channel using playlistItems.list.
  *
- * Cost: 100 units per call. The free tier is 10k/day; at 1-2 cron runs
- * per day we spend 100-200 units — well under budget.
+ * Cost: 1 quota unit per call (vs 100 for search.list).
  *
- * Returns up to MAX_RESULTS (50) videos sorted by date descending.
- * For a 7-day window on a channel posting 3-5 sessions/week, 50 is always
- * enough. Pagination is omitted intentionally (would cost another 100 units
- * per page for a backfill scenario that doesn't arise in normal operation).
+ * HOW: Every YouTube channel has an auto-generated "uploads" playlist whose ID
+ * is derived deterministically from the channel ID by replacing the `UC` prefix
+ * with `UU`. This is an undocumented but stable Google convention, widely
+ * documented in the developer community and confirmed by the YouTube Data API
+ * team. Example: channelId=UCWN0rIWneMdqRmZ4yHs5GuA → playlistId=UUWN0rIWneMdqRmZ4yHs5GuA
+ *
+ * The response is in REVERSE chronological order (newest first). We filter
+ * client-side by videoPublishedAt >= cutoff. Once we encounter a video older
+ * than the cutoff we can stop (all remaining items will be even older).
+ *
+ * Pagination: MVP fetches page 1 only (50 items). At ~3-5 sessions/week over
+ * 7 days, 50 is overkill. If a deeper backfill is needed in the future, add
+ * pageToken handling here (costs 1 unit per page — still far cheaper than
+ * search.list at 100 units).
+ *
+ * Returns an array of VideoMeta (normalised, decoupled from raw API shape).
  */
-async function listChannelVideos(
+async function listChannelUploads(
   channelId: string,
   publishedAfter: Date,
   apiKey: string,
-): Promise<YouTubeSearchItem[]> {
-  const publishedAfterIso = publishedAfter.toISOString();
+): Promise<VideoMeta[]> {
+  // Derive the uploads playlist ID: replace `UC` prefix with `UU`.
+  // This is a deterministic Google convention — every channel has exactly one
+  // uploads playlist with this ID pattern.
+  const uploadsPlaylistId = channelId.replace(/^UC/, 'UU');
+
   const url =
-    `${YT_API_BASE}/search` +
-    `?part=snippet` +
-    `&channelId=${encodeURIComponent(channelId)}` +
-    `&type=video` +
-    `&order=date` +
+    `${YT_API_BASE}/playlistItems` +
+    `?part=snippet,contentDetails` +
+    `&playlistId=${encodeURIComponent(uploadsPlaylistId)}` +
     `&maxResults=${MAX_RESULTS}` +
-    `&publishedAfter=${encodeURIComponent(publishedAfterIso)}` +
     `&key=${apiKey}`;
 
-  const data = await ytApiFetch<YouTubeSearchResponse>(url, `yt:search:${channelId}`);
+  const data = await ytApiFetch<YouTubePlaylistItemsResponse>(url, `yt:playlistItems:${channelId}`);
+
+  const cutoffMs = publishedAfter.getTime();
+  const results: VideoMeta[] = [];
+
+  for (const item of data.items ?? []) {
+    // Prefer contentDetails.videoPublishedAt (actual upload time) over
+    // snippet.publishedAt (when added to playlist — usually identical but not
+    // guaranteed for backdated uploads or channel migrations).
+    const publishedAt = item.contentDetails?.videoPublishedAt ?? item.snippet.publishedAt;
+
+    // Stop iterating once we hit a video older than the cutoff.
+    // playlistItems.list is reverse-chronological — once one video is too old,
+    // all subsequent ones will be older still.
+    if (new Date(publishedAt).getTime() < cutoffMs) break;
+
+    results.push({
+      videoId:     item.contentDetails?.videoId ?? item.snippet.resourceId.videoId,
+      title:       item.snippet.title,
+      publishedAt,
+      channelId,
+    });
+  }
 
   logger.info('youtube_sync_videos_listed', {
     channelId,
-    publishedAfter: publishedAfterIso,
-    totalResults: data.pageInfo?.totalResults ?? 0,
-    returned: data.items?.length ?? 0,
+    uploadsPlaylistId,
+    publishedAfter: publishedAfter.toISOString(),
+    returned: results.length,
+    rawItems: data.items?.length ?? 0,
   });
 
-  return data.items ?? [];
+  return results;
 }
 
 /**
@@ -500,14 +566,11 @@ async function fetchExistingVideoIds(videoIds: string[]): Promise<Set<string>> {
  * Returns the inserted session's ID, or throws on DB error.
  */
 async function insertSession(
-  item: YouTubeSearchItem,
+  item: VideoMeta,
   parsed: ParsedTitleMeta,
-  channelId: string,
   durationSeconds: number | null,
 ): Promise<string> {
-  const title = item.snippet.title;
-  const videoId = item.id.videoId;
-  const publishedAt = item.snippet.publishedAt;
+  const { title, videoId, publishedAt, channelId } = item;
 
   // Validate tipo against the sessions CHECK constraint.
   // The DB enforces check (tipo in ('plenario','comision','extraordinaria')),
@@ -591,8 +654,8 @@ export async function syncYoutubeChannel(opts?: {
   // This prevents drift: a job running at 3am vs 11pm doesn't differ in coverage.
   publishedAfter.setUTCHours(0, 0, 0, 0);
 
-  // ── 4. List recent videos ────────────────────────────────────────────────────
-  const videos = await listChannelVideos(channelId, publishedAfter, apiKey);
+  // ── 4. List recent uploads via playlistItems.list ───────────────────────────
+  const videos = await listChannelUploads(channelId, publishedAfter, apiKey);
   const found = videos.length;
 
   if (found === 0) {
@@ -603,13 +666,13 @@ export async function syncYoutubeChannel(opts?: {
   // ── 4b. Fetch video durations via videos.list?part=contentDetails ────────────
   // Cost: 1 quota unit (negligible). Must be called before the diff so the map
   // is available when constructing each new session's metadata.
-  const allVideoIds = videos.map((v) => v.id.videoId);
+  const allVideoIds = videos.map((v) => v.videoId);
   const durationMap = await fetchVideoDurations(allVideoIds, apiKey);
 
   // ── 5. Diff against existing sessions ───────────────────────────────────────
   const existingIds = await fetchExistingVideoIds(allVideoIds);
 
-  const toInsert = videos.filter((v) => !existingIds.has(v.id.videoId));
+  const toInsert = videos.filter((v) => !existingIds.has(v.videoId));
   const skippedIds = allVideoIds.filter((id) => existingIds.has(id));
 
   logger.info('youtube_sync_diff', {
@@ -620,7 +683,7 @@ export async function syncYoutubeChannel(opts?: {
 
   // ── 6. dryRun: report without inserting ─────────────────────────────────────
   if (dryRun) {
-    const dryNew = toInsert.map((v) => v.id.videoId);
+    const dryNew = toInsert.map((v) => v.videoId);
     logger.info('youtube_sync_dry_run', { wouldInsert: dryNew.length, skipped: skippedIds.length });
     return {
       found,
@@ -636,8 +699,7 @@ export async function syncYoutubeChannel(opts?: {
   const erroredItems: Array<{ videoId: string; error: string }> = [];
 
   for (const video of toInsert) {
-    const videoId = video.id.videoId;
-    const title   = video.snippet.title;
+    const { videoId, title } = video;
 
     try {
       const parsed = parseTitleMeta(title);
@@ -648,7 +710,7 @@ export async function syncYoutubeChannel(opts?: {
       }
 
       const durationSeconds = durationMap.get(videoId) ?? null;
-      await insertSession(video, parsed, channelId, durationSeconds);
+      await insertSession(video, parsed, durationSeconds);
       insertedIds.push(videoId);
 
       logger.info('youtube_sync_session_inserted', {

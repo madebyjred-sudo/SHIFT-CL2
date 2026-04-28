@@ -76,15 +76,29 @@ import { syncYoutubeChannel, _parseTitleMeta, _channelIdCache, parseIsoDurationT
 
 // ── YouTube API mock helpers ──────────────────────────────────────────────────
 
-/** Build a minimal YouTubeSearchItem fixture. */
+/**
+ * Build a minimal playlistItems.list item fixture.
+ *
+ * Shape mirrors the real YouTube Data API v3 playlistItems response:
+ *   snippet.resourceId.videoId — the video ID
+ *   snippet.publishedAt        — when the item was added to the playlist
+ *   contentDetails.videoId     — same video ID (redundant but present in API)
+ *   contentDetails.videoPublishedAt — when the video was actually uploaded
+ *
+ * We use videoPublishedAt for the "publishedAt" field in the normalised
+ * VideoMeta, so this fixture sets both to the same value for simplicity.
+ */
 function makeVideo(videoId: string, title: string, publishedAt = '2026-04-24T10:00:00Z') {
   return {
-    id: { videoId },
     snippet: {
       publishedAt,
       title,
-      description: '',
+      resourceId: { videoId },
       channelId: 'UCtest123',
+    },
+    contentDetails: {
+      videoId,
+      videoPublishedAt: publishedAt,
     },
   };
 }
@@ -97,8 +111,8 @@ function channelResponse(channelId: string) {
   };
 }
 
-/** Build a mock YouTube search.list response. */
-function searchResponse(videos: ReturnType<typeof makeVideo>[]) {
+/** Build a mock YouTube playlistItems.list response. */
+function playlistItemsResponse(videos: ReturnType<typeof makeVideo>[]) {
   return {
     items: videos,
     pageInfo: { totalResults: videos.length, resultsPerPage: 50 },
@@ -119,15 +133,15 @@ function videosResponse(items: Array<{ id: string; duration: string }>) {
  * Wire up a global fetch mock that handles YouTube API calls.
  *
  * The mock dispatches on the URL substring:
- *   /channels → returns channelRes
- *   /search   → returns searchRes
- *   /videos   → returns videosRes
+ *   /channels      → returns channelRes
+ *   /playlistItems → returns playlistRes
+ *   /videos        → returns videosRes
  *
  * Returns a vi.fn() so tests can assert call count if needed.
  */
 function mockYouTubeFetch(
   channelRes: object,
-  searchRes: object,
+  playlistRes: object,
   videosRes: object = { items: [] },
 ): ReturnType<typeof vi.fn> {
   const mockFetch = vi.fn(async (url: string | URL | Request) => {
@@ -139,11 +153,11 @@ function mockYouTubeFetch(
         text: async () => JSON.stringify(channelRes),
       };
     }
-    if (urlStr.includes('/search')) {
+    if (urlStr.includes('/playlistItems')) {
       return {
         ok: true,
-        json: async () => searchRes,
-        text: async () => JSON.stringify(searchRes),
+        json: async () => playlistRes,
+        text: async () => JSON.stringify(playlistRes),
       };
     }
     if (urlStr.includes('/videos')) {
@@ -193,7 +207,7 @@ describe('syncYoutubeChannel', () => {
 
     mockYouTubeFetch(
       channelResponse('UCcr-canal'),
-      searchResponse(videos),
+      playlistItemsResponse(videos),
       videosResponse([
         { id: 'vid001', duration: 'PT2H15M30S' },
         { id: 'vid002', duration: 'PT1H45M' },
@@ -236,7 +250,7 @@ describe('syncYoutubeChannel', () => {
     _selectResult = { data: [], error: null };
     mockYouTubeFetch(
       channelResponse('UCcr-canal'),
-      searchResponse(videos),
+      playlistItemsResponse(videos),
       videosResponse([{ id: 'vid999', duration: 'PT45M' }]),
     );
 
@@ -274,7 +288,7 @@ describe('syncYoutubeChannel', () => {
 
     mockYouTubeFetch(
       channelResponse('UCcr-canal'),
-      searchResponse(videos),
+      playlistItemsResponse(videos),
       videosResponse([{ id: 'vid-fail', duration: 'PT1H' }]),
     );
 
@@ -300,7 +314,7 @@ describe('syncYoutubeChannel', () => {
 
     mockYouTubeFetch(
       channelResponse('UCcr-canal'),
-      searchResponse(videos),
+      playlistItemsResponse(videos),
       videosResponse([
         { id: 'vid-a', duration: 'PT2H' },
         { id: 'vid-b', duration: 'PT1H30M' },
@@ -334,7 +348,7 @@ describe('syncYoutubeChannel', () => {
 
     const mockFetch = mockYouTubeFetch(
       channelResponse('UCcr-canal'),
-      searchResponse(videos),
+      playlistItemsResponse(videos),
       videosResponse([{ id: 'vid001', duration: 'PT1H' }]),
     );
 
@@ -363,7 +377,7 @@ describe('syncYoutubeChannel', () => {
 
   // ── Test 7: Zero videos returned ────────────────────────────────────────────
   it('returns all-zero result when YouTube API returns no videos', async () => {
-    mockYouTubeFetch(channelResponse('UCcr-canal'), searchResponse([]));
+    mockYouTubeFetch(channelResponse('UCcr-canal'), playlistItemsResponse([]));
 
     const result = await syncYoutubeChannel();
 
@@ -514,7 +528,7 @@ describe('syncYoutubeChannel — duration_seconds from videos.list', () => {
     // videos.list response omits vid-hidden (simulates age-restricted / hidden video)
     mockYouTubeFetch(
       channelResponse('UCcr-canal'),
-      searchResponse(videos),
+      playlistItemsResponse(videos),
       videosResponse([]), // empty — vid-hidden not returned
     );
 
