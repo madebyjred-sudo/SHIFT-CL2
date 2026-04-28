@@ -262,11 +262,38 @@ Para expedientes nuevos detectados:
 
 ### Cron 4: `agenda-scrape` daily a las 22:00 CR
 
-Scraper nuevo de `asamblea.go.cr/orden_dia/`:
-1. Bajar HTML, parsear con cheerio
-2. Extraer items por sesión + comisión
-3. UPSERT en `agenda_legislativa`
-4. Para cada item con `expediente_id` matcheando un watchlist → INSERT alert `agenda`
+**Plenario (implementado 2026-04-28):**
+
+La página pública `https://asamblea.go.cr/glcp/SitePages/ConsultaOrdenDiaPlenario.aspx` es solo un wrapper de SharePoint — los datos viven en un iframe que apunta a la misma instancia ASP.NET WebForms del SIL:
+
+```
+https://consultassil3.asamblea.go.cr/frmOrdenDiaPlenario.aspx
+```
+
+La gridview (`grvOrdenDia`) lista una sesión por fila. Cada botón de descarga dispara un `__doPostBack(grvOrdenDia, 'Select$N')` que el servidor responde con un DOCX (`Content-Type: application/octet-stream`, magic `PK\x03\x04`). El DOCX contiene los expedientes en el orden del día.
+
+**Pipeline (`apps/api/src/jobs/agendaScrape.ts`):**
+
+1. GET `frmOrdenDiaPlenario.aspx` → bootstrap session (VIEWSTATE + cookies)
+2. Parsear gridview → `{ codigo, fecha, hora, estado, postbackIndex }[]`
+3. Filtrar sesiones en `[today, today + daysAhead]` excluyendo `CANCELADA` (y `REALIZADA` salvo backfill)
+4. Por cada sesión: POST `__EVENTTARGET=grvOrdenDia` + `__EVENTARGUMENT=Select$N` → bytes DOCX
+5. `mammoth.extractRawText(bytes)` → texto plano
+6. Regex `\b(\d{2,5}\.\d{3})\b` con tope 500 → candidatos a expediente
+7. Cross-reference contra `sil_expedientes.numero` para descartar falsos positivos (números de página, fechas mal formateadas, etc.)
+8. UPSERT 1 fila por `(fecha, comision=NULL, expediente_numero)` en `agenda_legislativa`
+9. Para cada expediente con watchlist match → UPSERT alert `agenda`
+
+**Idempotencia:** ON CONFLICT DO NOTHING en `(fecha, comision, titulo)` y `(user_id, dedup_key)`.
+
+**Comisiones (Phase 2 — pending):**
+
+`https://asamblea.go.cr/glcp/SitePages/ConsultaOrdenDiaComisiones.aspx` apunta a `consultassil3.asamblea.go.cr/frmConsultaODComisiones.aspx`. La página requiere un dance de dropdowns en cascada (`ddlTipoOrgano` → postback → `ddlOrgano` → postback → `grvODComision`). Implementarlo requiere enumerar las ~80 comisiones activas y postbackear una vez por comisión por día. Plan: extender el job actual con un segundo `scrapeAgendaComisiones()` cuando llegue tracción multi-órgano. Por ahora plenario cubre ~80% del valor.
+
+**Notas operacionales:**
+
+- TLS: `consultassil3.asamblea.go.cr` no envía el certificado intermediario de GlobalSign en su handshake. Cloud Run (Node 20-alpine) tolera esto gracias a su CA bundle; Node 24 local arroja `UNABLE_TO_VERIFY_LEAF_SIGNATURE` y necesita `NODE_TLS_REJECT_UNAUTHORIZED=0` en dev. Workaround documentado en `scripts/agenda-smoke.ts`.
+- Smoke test: `set -a && source .env.local && set +a && NODE_TLS_REJECT_UNAUTHORIZED=0 npx tsx scripts/agenda-smoke.ts` (dryRun=true por default; pasar `--commit` para escribir).
 
 ### Cron 5: `centinela-mentions` triggered (no scheduled)
 

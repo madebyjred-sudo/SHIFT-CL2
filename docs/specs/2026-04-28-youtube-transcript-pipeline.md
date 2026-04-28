@@ -300,6 +300,41 @@ Mitigación:
 - Loggear errores específicos para alertar si la lib se rompe
 - Mantener ElevenLabs como fallback declarado para sesiones críticas (no automático, solo `force_provider=elevenlabs` en endpoint manual)
 
+### Cloud Run egress IP rate-limited por YouTube — bloqueo descubierto 2026-04-28
+
+**Síntoma:** El endpoint `youtube-sync` corre limpio en Cloud Run (lista 40+ sesiones nuevas, las inserta como `pending`), pero `process-pending` falla consistentemente con `no_transcript_available` para todos los videos. Mismo `videoId` corrido desde IP residencial de Bogotá descarga 1.6k segmentos sin problema.
+
+**Causa raíz:** YouTube flaggea las IPs de egress de Google Cloud (todas las regiones) como "automated traffic" en su endpoint timed-text. Las IPs residenciales pasan; las de datacenter no. Aplica al scraper de captions, NO al YouTube Data API v3 (que sí funciona con API key autenticada y se usa para listar el canal).
+
+**Workaround actual (validado, sirve para el demo):**
+
+`scripts/drain-pending-local.ts` — script que lee sesiones `status='pending'` de Supabase prod y corre `processSession()` desde la máquina local del operador. Verificado 2026-04-28: 33 sesiones procesadas, 25.248 segmentos, 593 correcciones LLM. ~25s por sesión incluyendo LLM review.
+
+```bash
+set -a && source .env.local && set +a
+npx tsx scripts/drain-pending-local.ts --limit=50
+```
+
+**Soluciones de largo plazo (ranqueadas por costo/complejidad):**
+
+1. **Vercel Cron Job (recomendado)** — Vercel asigna IPs residenciales a sus serverless functions, no datacenter. Crear un endpoint `/api/cron/process-pending` en un proyecto Next.js mínimo (o reusar el existente del frontend), agregar a `vercel.json`:
+   ```json
+   { "crons": [{ "path": "/api/cron/process-pending", "schedule": "*/15 * * * *" }] }
+   ```
+   El endpoint llama `POST $API_BASE_URL/api/internal/process-pending` con `X-Internal-Trigger`. Ventaja: gratis hasta 100 invocaciones/día (free tier), residencial.
+
+2. **GitHub Actions cron** — Mismo principio: GitHub Actions runners corren en IPs de Azure/datacenter pero distintas a Google Cloud, y YouTube parece tolerarlas. Workflow programado cada 15 min que `curl`-ea el endpoint de drain. Free para repos públicos; en privados cuenta contra los 2000 min/mes (suficiente).
+
+3. **Residential proxy rotativo** — Servicios como Bright Data, Smartproxy o Webshare ofrecen residential IPs por ~$5-15/mes. Configurar `youtube-transcript` lib para hacer fetch a través del proxy. Costo recurrente; agrega un fallible network hop. **No recomendado** para MVP.
+
+4. **YouTube Data API v3 captions endpoint** — `youtube.captions.download` permite bajar las captions oficiales con OAuth. Problema: requiere que el dueño del canal autorice tu OAuth (Asamblea Costa Rica no va a). Solo viable si conseguimos un acuerdo con la Asamblea (post-MVP).
+
+5. **Google Cloud Workstation con custom egress IP** — Cloud Run no permite egress IP estática residencial; Cloud NAT ofrece IPs de Google. Workstations idem. **No es opción.**
+
+**Decisión MVP (demo 2026-05-08):** Workaround con local drainer. **Post-MVP (Sprint 1):** Migrar a Vercel Cron Job (#1). Implementación: ~1h.
+
+**Action item:** Crear `apps/web/src/pages/api/cron/process-pending.ts` con auth `X-Internal-Trigger`, agregar `vercel.json` con schedule `*/15 * * * *`, deploy.
+
 ### Calidad variable
 
 YouTube auto-transcribe varía con calidad de audio. Sesiones con gritos, eco, varios diputados hablando a la vez = peor calidad.

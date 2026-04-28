@@ -79,7 +79,9 @@ gcloud run deploy "$SERVICE_NAME" \
   --set-env-vars "ALLOWED_ORIGINS=$ALLOWED_ORIGINS" \
   --set-env-vars "GCS_BUCKET_SIL=shift-cl2-sil" \
   --set-env-vars "GCP_PROJECT_ID=$PROJECT_ID" \
-  --set-env-vars "GCP_LOCATION=$REGION"
+  --set-env-vars "GCP_LOCATION=$REGION" \
+  --set-env-vars "YOUTUBE_API_KEY=$YOUTUBE_API_KEY" \
+  --set-env-vars "INTERNAL_TRIGGER_SECRET=$INTERNAL_TRIGGER_SECRET"
 
 # ─── 3. Print the service URL so the next step can grab it ────────────
 SERVICE_URL=$(gcloud run services describe "$SERVICE_NAME" \
