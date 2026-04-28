@@ -444,6 +444,11 @@ describe('_parseTitleMeta', () => {
     expect(_parseTitleMeta('Sesión - 15 de Diciembre de 2025').fecha).toBe('2025-12-15');
     expect(_parseTitleMeta('Sesión - 3 de Setiembre de 2026').fecha).toBe('2026-09-03');
   });
+
+  it('strips trailing N° session number from comision', () => {
+    const meta = _parseTitleMeta('Comisión de Hacienda N°15 - 21/04/2026');
+    expect(meta.comision).toBe('Hacienda');
+  });
 });
 
 // ── parseIsoDurationToSeconds unit tests ──────────────────────────────────────

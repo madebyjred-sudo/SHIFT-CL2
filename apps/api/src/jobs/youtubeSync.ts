@@ -238,7 +238,7 @@ function parseComisionFromTitle(title: string): string | null {
   if (m) {
     return m[1].trim()
       // Remove trailing session numbers like "N°47" accidentally matched
-      .replace(/\s+n[°º]\d+\s*$/, '')
+      .replace(/\s+n[°º]\d+\s*$/i, '')
       .trim();
   }
   return null;
