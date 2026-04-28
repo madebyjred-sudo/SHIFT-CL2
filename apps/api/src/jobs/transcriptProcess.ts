@@ -24,6 +24,7 @@ import { randomUUID } from 'crypto';
 import { fetchTranscript, YoutubeTranscriptError } from '../services/youtubeTranscript.js';
 import { withTimeout, withRetry } from '../services/resilience.js';
 import { logger } from '../services/logger.js';
+import { scanSessionForMentions } from './centinelaMentions.js';
 
 // ── OpenRouter ────────────────────────────────────────────────────────────────
 const OR_BASE = 'https://openrouter.ai/api/v1';
@@ -708,6 +709,25 @@ export async function processSession(
     llm_run_id: result.llm_run_id,
     duration_ms: result.duration_ms,
   });
+
+  // ── Step 7: Centinela mention scan (optional — failure must not fail the pipeline) ──
+  // Scan the newly-indexed transcript for mentions of watched entities.
+  // Any error here is caught and logged — the session is already marked indexed.
+  try {
+    const mentionsResult = await scanSessionForMentions(sessionId);
+    logger.info('transcript_process_mentions_scanned', {
+      session_id: sessionId,
+      segments_scanned: mentionsResult.segments_scanned,
+      watchlist_size: mentionsResult.watchlist_size,
+      alerts_inserted: mentionsResult.alerts_inserted,
+    });
+  } catch (err) {
+    logger.error('transcript_process_mentions_scan_failed', {
+      session_id: sessionId,
+      error: (err as Error)?.message ?? String(err),
+    });
+    // Do NOT rethrow — mention scan failure must not degrade transcript indexing.
+  }
 
   return result;
 }
