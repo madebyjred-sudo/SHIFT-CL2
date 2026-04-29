@@ -14,9 +14,10 @@ import { navigate } from '@/lib/router';
 import { cn } from '@/lib/utils';
 import {
   listWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace, exportWorkspace, importAsset,
-  type Workspace, type PptxExportResult,
+  type Workspace, type PptxExportResult, type PptxOptions,
 } from '@/services/workspaceApi';
 import { PptxResultModal } from '@/components/workspace/PptxResultModal';
+import { PptxOptionsModal } from '@/components/workspace/PptxOptionsModal';
 
 // ─── Relative time helper ────────────────────────────────────────────
 function relativeTime(iso: string): string {
@@ -48,8 +49,11 @@ function WorkspaceCard({
   const [importError, setImportError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // PPTX modal state. The modal owns the loading / ready / error display so
-  // the user always sees what's happening — no auto-downloads, no popup blocks.
+  // PPTX flow state. Two modals stack:
+  //   1. options panel → 2. result panel.
+  // The options panel pre-fills with whatever was used last time (per workspace).
+  const [pptxOptionsOpen, setPptxOptionsOpen] = useState(false);
+  const [cachedPptxOptions, setCachedPptxOptions] = useState<PptxOptions | undefined>(undefined);
   const [pptxModal, setPptxModal] = useState<{
     open: boolean;
     state: 'loading' | 'ready' | 'error';
@@ -63,14 +67,18 @@ function WorkspaceCard({
     setRenaming(false);
   };
 
-  // Internal: run a pptx export attempt and drive the modal state.
-  // `force=true` bypasses the server-side 1h cache.
-  const runPptxExport = async (force: boolean) => {
+  // Run the actual export with the options collected from the form.
+  const generatePptx = async (options: PptxOptions, force: boolean) => {
+    setPptxOptionsOpen(false);
     setPptxModal({ open: true, state: 'loading' });
     setMenuOpen(false);
     try {
-      const result = (await exportWorkspace(ws.id, 'pptx', ws.title, { force })) as PptxExportResult;
+      const result = (await exportWorkspace(ws.id, 'pptx', ws.title, {
+        force,
+        options: Object.keys(options).length > 0 ? options : undefined,
+      })) as PptxExportResult;
       setPptxModal({ open: true, state: 'ready', result });
+      setCachedPptxOptions(options);
     } catch (err) {
       const e = err as Error & { code?: string };
       setPptxModal({
@@ -85,9 +93,9 @@ function WorkspaceCard({
   const handleExport = async (format: 'md' | 'docx' | 'pptx') => {
     if (exporting) return;
     if (format === 'pptx') {
-      // Modal-driven flow — don't block the menu via `exporting` so other
-      // hovers stay snappy. The modal blocks input on its own.
-      void runPptxExport(false);
+      // Open the options panel first; submit triggers generatePptx.
+      setPptxOptionsOpen(true);
+      setMenuOpen(false);
       return;
     }
     setExporting(format);
@@ -263,6 +271,16 @@ function WorkspaceCard({
         </span>
       </div>
 
+      {/* PPTX options modal — pre-generation form. Closes itself on
+          submit by calling generatePptx, which opens the result modal. */}
+      <PptxOptionsModal
+        open={pptxOptionsOpen}
+        onClose={() => setPptxOptionsOpen(false)}
+        onSubmit={(opts) => void generatePptx(opts, /*force*/ false)}
+        initial={cachedPptxOptions}
+        workspaceTitle={ws.title}
+      />
+
       {/* PPTX result modal — global to this card; only one card at a time
           can be in pptx flight. */}
       {pptxModal && (
@@ -274,7 +292,10 @@ function WorkspaceCard({
           errorMessage={pptxModal.errorMessage}
           errorCode={pptxModal.errorCode}
           workspaceTitle={ws.title}
-          onRegenerate={() => runPptxExport(true)}
+          onRegenerate={() => {
+            setPptxModal(null);
+            setPptxOptionsOpen(true);
+          }}
         />
       )}
     </div>

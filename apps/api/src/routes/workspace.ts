@@ -445,150 +445,50 @@ workspaceRouter.post('/:id/export', async (req, res) => {
     // valid for ~1 week per Gamma's CDN policy. If we ever need permanent
     // hosting we re-host in GCS, but that's overkill for the demo.
     if (format === 'pptx') {
-      // ── Cache reuse ─────────────────────────────────────────────────────
-      // Each Gamma generation costs credits and takes 30-60s. If the user
-      // has a recent deck for THIS workspace, reuse it unless they pass
-      // `force: true`. Default freshness window: 1 hour (long enough to
-      // cover repeat clicks within a single working session, short enough
-      // that content edits don't get stuck on a stale deck).
+      // Pptx generation lives in services/workspacePptxExport so the same
+      // code path serves both the HTTP route AND the Atlas chat-tool
+      // dispatcher. We just delegate. Body params:
+      //   force?     — bypass the 1h cache (e.g. "Generar de nuevo" link)
+      //   options?   — branding/context preferences (PptxOptions); new
+      //                values invalidate the cache automatically inside
+      //                runWorkspacePptxExport.
       const force = Boolean(req.body?.force);
-      const cache = (ws as { last_pptx?: { generationId?: string; gammaUrl?: string; exportUrl?: string; generatedAt?: string; creditsUsed?: number } | null }).last_pptx;
-      if (!force && cache?.generatedAt && cache.exportUrl && cache.gammaUrl) {
-        const ageMs = Date.now() - new Date(cache.generatedAt).getTime();
-        const oneHour = 60 * 60 * 1000;
-        if (ageMs >= 0 && ageMs < oneHour) {
-          req.log?.info('workspace/export gamma pptx cache hit', {
-            workspace: id,
-            ageMs,
-            generationId: cache.generationId,
-          });
-          res.json({
-            ok: true,
-            format: 'pptx',
-            cached: true,
-            generatedAt: cache.generatedAt,
-            filename: `${safeName}.pptx`,
-            url: cache.exportUrl,
-            gammaUrl: cache.gammaUrl,
-            generationId: cache.generationId,
-            creditsUsed: cache.creditsUsed,
-          });
-          return;
-        }
-      }
-
-      // ── Fresh generation ────────────────────────────────────────────────
-      // Compose the deck source. Cover slide + per-hoja slides separated
-      // by "\n---\n" (Gamma's recognized inputTextBreaks delimiter).
-      const lines: string[] = [];
-      lines.push(`# ${ws.title}`);
-      if (ws.description) lines.push('', `${ws.description}`);
-      lines.push('', `_${ordered.length} hoja${ordered.length === 1 ? '' : 's'} · CL2_`);
-
-      for (const n of ordered) {
-        lines.push('', '---', '');
-        lines.push(`# ${n.title}`);
-        if (n.subtitle) lines.push('', `### ${n.subtitle}`);
-        const md = (n.content as Record<string, unknown>)?.md as string ?? '';
-        if (md.trim()) lines.push('', md.trim());
-      }
-
-      const inputText = lines.join('\n').slice(0, 400_000);
+      const options = (req.body?.options ?? undefined) as undefined | {
+        tono?: string; audiencia?: string; proposito?: string; marca?: string; emojis?: boolean;
+      };
+      const { runWorkspacePptxExport: runPptx } = await import('../services/workspacePptxExport.js');
       try {
-        const result = await generateAndWait(
-          {
-            inputText,
-            format: 'presentation',
-            exportAs: 'pptx',
-            // The hoja-level "\n---\n" separators are deliberate canvas
-            // structure — preserve them rather than re-paginating.
-            cardSplit: 'inputTextBreaks',
-            // We trust the user's text; let Gamma rephrase only lightly.
-            textMode: 'preserve',
-            textOptions: { language: 'es-419', tone: 'professional, legislative' },
-            imageOptions: { source: 'aiGenerated' },
-            cardOptions: { dimensions: '16x9' },
-            additionalInstructions:
-              'Tono profesional legislativo costarricense. Mantené citas a expedientes (NN.NNN) y nombres propios sin reformular.',
-          },
-          { maxDurationMs: 5 * 60 * 1000 },
-        );
-
-        // Persist the result so future clicks within ~1h reuse it. Failure
-        // to persist is non-fatal: the generation already happened, the URL
-        // is in the response, the cache just won't be populated. Specifically
-        // tolerate "column missing" errors so the endpoint keeps working in
-        // environments where migration 0020 hasn't been applied yet.
-        const cachePayload = {
-          generationId: result.generationId,
-          gammaUrl: result.gammaUrl,
-          exportUrl: result.exportUrl,
-          generatedAt: new Date().toISOString(),
-        };
-        try {
-          const { error: cacheErr } = await supa()
-            .from('workspaces')
-            .update({ last_pptx: cachePayload, updated_at: new Date().toISOString() })
-            .eq('id', id)
-            .eq('user_id', userId);
-          if (cacheErr) {
-            req.log?.warn('workspace/export gamma pptx cache write failed', {
-              workspace: id, error: cacheErr.message,
-            });
-          }
-        } catch (cacheErr) {
-          req.log?.warn('workspace/export gamma pptx cache write threw', {
-            workspace: id, error: (cacheErr as Error).message,
-          });
-        }
-
-        req.log?.info('workspace/export gamma pptx ok', {
-          workspace: id,
-          hojas: ordered.length,
-          generationId: result.generationId,
-          chars: inputText.length,
+        const result = await runPptx({ workspaceId: id, userId, force, options });
+        req.log?.info('workspace/export pptx ok', {
+          workspace: id, hojas: ordered.length, generationId: result.generationId, cached: result.cached,
         });
-
         res.json({
           ok: true,
           format: 'pptx',
-          cached: false,
-          generatedAt: cachePayload.generatedAt,
-          filename: `${safeName}.pptx`,
-          url: result.exportUrl,           // signed download (≈1 week TTL)
-          gammaUrl: result.gammaUrl,       // editable deck on gamma.app
+          cached: result.cached,
+          generatedAt: result.generatedAt,
+          filename: result.filename,
+          url: result.exportUrl,
+          gammaUrl: result.gammaUrl,
           generationId: result.generationId,
         });
         return;
       } catch (err) {
         if (err instanceof GammaApiError) {
-          req.log?.warn('workspace/export gamma pptx failed', {
-            workspace: id,
-            code: err.code,
-            httpStatus: err.httpStatus,
-            error: err.message,
+          req.log?.warn('workspace/export pptx failed', {
+            workspace: id, code: err.code, error: err.message,
           });
-          // Map Gamma error codes to HTTP statuses the client can handle.
           const statusMap: Record<string, number> = {
-            auth: 503,                  // server misconfigured
-            insufficient_credits: 402,  // billing
-            forbidden: 403,             // plan limitation
-            bad_request: 400,
-            rate_limited: 429,
-            timeout: 504,
-            failed: 502,
-            no_export_url: 502,
-            upstream: 502,
-            network: 502,
+            auth: 503, insufficient_credits: 402, forbidden: 403,
+            bad_request: 400, rate_limited: 429, timeout: 504,
+            failed: 502, no_export_url: 502, upstream: 502, network: 502,
           };
           res.status(statusMap[err.code] ?? 500).json({
-            ok: false,
-            error: err.code,
-            detail: err.message,
+            ok: false, error: err.code, detail: err.message,
           });
           return;
         }
-        throw err; // rethrow non-Gamma errors → outer catch returns 500
+        throw err;
       }
     }
 

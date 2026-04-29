@@ -49,11 +49,59 @@ export class WorkspaceNotFoundError extends Error {
   }
 }
 
+/**
+ * Per-presentation client preferences. All optional. When set, the values
+ * are composed into Gamma's `additionalInstructions` field — that's the
+ * only knob the public Gamma API exposes for stylistic + content guidance
+ * (the `themeId` parameter exists too but requires user-saved themes,
+ * which we don't surface yet).
+ *
+ * Cached on `workspaces.last_pptx.options` so the next button click pre-
+ * populates the form with last time's choices.
+ */
+export interface PptxOptions {
+  /** "ejecutivo, seco" / "didáctico" / "persuasivo" / "técnico". */
+  tono?: string;
+  /** "Diputados de Hacendarios" / "Equipo de comunicación" / etc. */
+  audiencia?: string;
+  /** Free text — what the user wants the deck to argue or showcase. */
+  proposito?: string;
+  /** Brand voice / visual notes. e.g. "Mantener vocabulario formal,
+   *  evitar tecnicismos. Logo de Asamblea, paleta sobria.". */
+  marca?: string;
+  /** Emojis si/no. Defaults false. Decks legislativos casi nunca los quieren. */
+  emojis?: boolean;
+}
+
 interface RunOpts {
   workspaceId: string;
   userId: string | null;
   /** Bypass the ~1h cache when true. */
   force?: boolean;
+  /** Optional per-call branding/context options. When omitted, the cached
+   *  options on the workspace row are reused (so re-clicks keep the same
+   *  flavor without re-asking). */
+  options?: PptxOptions;
+}
+
+/**
+ * Compose the Gamma `additionalInstructions` payload from user options +
+ * sane defaults. Pure — no DB. Easy to unit test.
+ */
+function buildAdditionalInstructions(opts: PptxOptions | undefined): string {
+  const parts: string[] = [
+    'Tono profesional legislativo costarricense por defecto.',
+    'Mantené citas a expedientes (NN.NNN) y nombres propios sin reformular.',
+    'No uses lenguaje de marketing — registro técnico-político.',
+  ];
+  if (opts?.tono) parts.push(`Tono específico: ${opts.tono}.`);
+  if (opts?.audiencia) parts.push(`Audiencia objetivo: ${opts.audiencia}. Adaptá nivel de detalle y términos técnicos.`);
+  if (opts?.proposito) parts.push(`Propósito de esta presentación: ${opts.proposito}.`);
+  if (opts?.marca) parts.push(`Lineamientos de marca: ${opts.marca}.`);
+  if (opts?.emojis === false || opts?.emojis === undefined) {
+    parts.push('NO uses emojis ni iconos decorativos en el texto de las slides.');
+  }
+  return parts.join(' ');
 }
 
 /**
@@ -68,7 +116,7 @@ export async function runWorkspacePptxExport(opts: RunOpts): Promise<WorkspacePp
 
   // ── Load workspace + nodes ─────────────────────────────────────────
   // SELECT with last_pptx; fall back without it for pre-migration envs.
-  type WsRow = { id: string; title: string; description: string | null; last_pptx?: (WorkspacePptxResult & { creditsUsed?: number }) | null };
+  type WsRow = { id: string; title: string; description: string | null; last_pptx?: (WorkspacePptxResult & { creditsUsed?: number; options?: PptxOptions }) | null };
   let ws: WsRow;
   {
     const r = await supa()
@@ -96,11 +144,21 @@ export async function runWorkspacePptxExport(opts: RunOpts): Promise<WorkspacePp
     .replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '_') || 'workspace';
 
   // ── Cache reuse ────────────────────────────────────────────────────
+  // Cache returns the prior deck when:
+  //   - force=false, AND
+  //   - the cache is < 1h old, AND
+  //   - either no new options were passed, OR the new options match what
+  //     was cached (deep-equal as JSON). The latter rule prevents the
+  //     options modal from quietly returning a stale deck after the user
+  //     just changed their tone/audience.
   const cache = ws.last_pptx;
   if (!force && cache?.generatedAt && cache.exportUrl && cache.gammaUrl) {
     const ageMs = Date.now() - new Date(cache.generatedAt).getTime();
     const oneHour = 60 * 60 * 1000;
-    if (ageMs >= 0 && ageMs < oneHour) {
+    const optionsChanged = opts.options
+      ? JSON.stringify(opts.options) !== JSON.stringify(cache.options ?? null)
+      : false;
+    if (ageMs >= 0 && ageMs < oneHour && !optionsChanged) {
       logger.info('workspace_pptx_cache_hit', { workspaceId, ageMs, generationId: cache.generationId });
       return {
         generationId: cache.generationId,
@@ -155,19 +213,26 @@ export async function runWorkspacePptxExport(opts: RunOpts): Promise<WorkspacePp
       textOptions: { language: 'es-419', tone: 'professional, legislative' },
       imageOptions: { source: 'aiGenerated' },
       cardOptions: { dimensions: '16x9' },
-      additionalInstructions:
-        'Tono profesional legislativo costarricense. Mantené citas a expedientes (NN.NNN) y nombres propios sin reformular.',
+      additionalInstructions: buildAdditionalInstructions(
+        // Use explicit options when caller passed them, else fall back to
+        // whatever the user saved last time on this workspace, else nothing.
+        opts.options ?? ws.last_pptx?.options ?? undefined,
+      ),
     },
     { maxDurationMs: 5 * 60 * 1000 },
   );
   const generatedAt = new Date().toISOString();
 
   // ── Persist cache (best-effort) ───────────────────────────────────
+  // Stash the options we used too — next time the user opens the modal
+  // it pre-populates with their last choices, so they're not re-typing
+  // "tono ejecutivo" every time.
   const cachePayload = {
     generationId: gen.generationId,
     gammaUrl: gen.gammaUrl,
     exportUrl: gen.exportUrl,
     generatedAt,
+    options: opts.options ?? ws.last_pptx?.options ?? undefined,
   };
   try {
     const { error: upErr } = await supa()

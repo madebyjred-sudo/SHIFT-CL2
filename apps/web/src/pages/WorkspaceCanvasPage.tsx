@@ -42,8 +42,9 @@ import {
   listNodes, createNode, updateNode, deleteNode, getNode, importAsset,
   type WorkspaceNode,
 } from '@/services/workspaceApi';
-import { updateWorkspace, exportWorkspace, type PptxExportResult } from '@/services/workspaceApi';
+import { updateWorkspace, exportWorkspace, type PptxExportResult, type PptxOptions } from '@/services/workspaceApi';
 import { PptxResultModal } from '@/components/workspace/PptxResultModal';
+import { PptxOptionsModal } from '@/components/workspace/PptxOptionsModal';
 import { supabase } from '@/lib/supabase';
 
 // ─── Node type registration ───────────────────────────────────────────
@@ -143,6 +144,17 @@ function CanvasInner({
   // canvas toolbar. The button sits NEXT to the podcast button so the
   // "presentation as artifact" affordance is visually parallel to the
   // "podcast as artifact" one.
+  //
+  // Two modals stack here:
+  //   1. PptxOptionsModal — pre-generation form (tono, audiencia,
+  //      propósito, marca). Pre-fills with whatever was used last time.
+  //   2. PptxResultModal — loading / ready / error after generation.
+  //
+  // The button click opens (1); submitting (1) closes it and opens (2).
+  // "Generar de nuevo" inside (2) re-opens (1) so the user can tweak
+  // the options instead of regenerating with the same prompt.
+  const [pptxOptionsOpen, setPptxOptionsOpen] = useState(false);
+  const [cachedPptxOptions, setCachedPptxOptions] = useState<PptxOptions | undefined>(undefined);
   const [pptxModal, setPptxModal] = useState<{
     open: boolean;
     state: 'loading' | 'ready' | 'error';
@@ -151,11 +163,18 @@ function CanvasInner({
     errorCode?: string;
   } | null>(null);
 
-  const runPptxExport = useCallback(async (force: boolean) => {
+  // The actual generator call. Always reaches the backend with the
+  // options we just collected from the form.
+  const generatePptx = useCallback(async (options: PptxOptions, force: boolean) => {
+    setPptxOptionsOpen(false);
     setPptxModal({ open: true, state: 'loading' });
     try {
-      const result = (await exportWorkspace(workspaceId, 'pptx', title, { force })) as PptxExportResult;
+      const result = (await exportWorkspace(workspaceId, 'pptx', title, {
+        force,
+        options: Object.keys(options).length > 0 ? options : undefined,
+      })) as PptxExportResult;
       setPptxModal({ open: true, state: 'ready', result });
+      setCachedPptxOptions(options);
     } catch (err) {
       const e = err as Error & { code?: string };
       setPptxModal({ open: true, state: 'error', errorMessage: e.message, errorCode: e.code });
@@ -763,13 +782,12 @@ function CanvasInner({
               {/* "Audio del board" button — only visible when no strip showing */}
               <BoardAudioCTA workspaceId={workspaceId} onClick={() => setPodcastOpen(true)} />
 
-              {/* "Generar PPT" — symmetric with the audio button. Opens
-                  the same modal the workspace card uses (loading +
-                  ready/error states + cache reuse). The button stays
-                  visible regardless of whether a deck exists; the modal
-                  itself surfaces "Generar de nuevo" when applicable. */}
+              {/* "Presentación" — opens the options panel first so the
+                  user can tell Gamma the tono / audiencia / propósito /
+                  marca. Submitting the options panel kicks the actual
+                  generation (which then surfaces in PptxResultModal). */}
               <button
-                onClick={() => void runPptxExport(false)}
+                onClick={() => setPptxOptionsOpen(true)}
                 disabled={pptxModal?.state === 'loading'}
                 title="Generar presentación con Gamma"
                 className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white dark:bg-[#1c1c1c] border border-cl2-burgundy/20 dark:border-cl2-burgundy/30 shadow-sm text-[13px] font-medium text-cl2-burgundy dark:text-cl2-burgundy/90 hover:bg-cl2-burgundy/[0.04] dark:hover:bg-cl2-burgundy/[0.10] transition-colors disabled:opacity-60 disabled:cursor-wait"
@@ -839,7 +857,16 @@ function CanvasInner({
       {/* ── Context menu portal ───────────────────────────────────── */}
       {ctxMenu.element}
 
-      {/* ── PPTX modal (board → Gamma deck) ───────────────────────── */}
+      {/* ── PPTX options modal (pre-generation form) ──────────────── */}
+      <PptxOptionsModal
+        open={pptxOptionsOpen}
+        onClose={() => setPptxOptionsOpen(false)}
+        onSubmit={(opts) => void generatePptx(opts, /*force*/ false)}
+        initial={cachedPptxOptions}
+        workspaceTitle={title}
+      />
+
+      {/* ── PPTX result modal (board → Gamma deck) ────────────────── */}
       {pptxModal && (
         <PptxResultModal
           open={pptxModal.open}
@@ -849,7 +876,11 @@ function CanvasInner({
           errorMessage={pptxModal.errorMessage}
           errorCode={pptxModal.errorCode}
           workspaceTitle={title}
-          onRegenerate={() => void runPptxExport(true)}
+          onRegenerate={() => {
+            // Re-open the options modal so the user can tweak before regenerating.
+            setPptxModal(null);
+            setPptxOptionsOpen(true);
+          }}
         />
       )}
 

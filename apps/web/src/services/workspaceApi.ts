@@ -251,17 +251,29 @@ export async function importAsset(
  * (top-to-bottom, left-to-right by canvas position) into one document.
  * Triggers a browser download.
  */
+export interface PptxOptions {
+  tono?: string;
+  audiencia?: string;
+  proposito?: string;
+  marca?: string;
+  emojis?: boolean;
+}
+
 export async function exportWorkspace(
   workspaceId: string,
   format: 'md' | 'docx' | 'pptx',
   workspaceTitle?: string,
-  opts?: { force?: boolean },
+  opts?: { force?: boolean; options?: PptxOptions },
 ): Promise<PptxExportResult | void> {
   const headers = await authHeaders();
   const res = await fetch(`${BASE}/${workspaceId}/export`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ format, force: opts?.force ?? false }),
+    body: JSON.stringify({
+      format,
+      force: opts?.force ?? false,
+      ...(opts?.options ? { options: opts.options } : {}),
+    }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));

@@ -470,17 +470,32 @@ centinelaUserRouter.post('/alerts/read-all', async (req, res) => {
 });
 
 // ── GET /api/centinela/watchlist ───────────────────────────────────────────
+//
+// The schema stores label/notes inside `metadata jsonb` (see migration 0019).
+// We unwrap it here so the client gets a flat shape — keeps the UI simple
+// and means we can evolve metadata without breaking the API contract.
 centinelaUserRouter.get('/watchlist', async (req, res) => {
   const userId = await requireUser(req, res);
   if (!userId) return;
   try {
     const { data, error } = await supa()
       .from('centinela_watchlist')
-      .select('id, entity_type, entity_id, label, notes, created_at')
+      .select('id, entity_type, entity_id, source, metadata, created_at')
       .eq('user_id', userId)
       .order('created_at', { ascending: false });
     if (error) throw new Error(error.message);
-    res.json({ ok: true, items: data ?? [] });
+    const items = (data ?? []).map((r) => {
+      const meta = (r.metadata ?? {}) as { label?: string; notes?: string };
+      return {
+        id: r.id as string,
+        entity_type: r.entity_type as string,
+        entity_id: r.entity_id as string,
+        label: meta.label ?? null,
+        notes: meta.notes ?? null,
+        created_at: r.created_at as string,
+      };
+    });
+    res.json({ ok: true, items });
   } catch (err) {
     const message = (err as Error)?.message ?? String(err);
     res.status(500).json({ ok: false, error: message });
@@ -490,9 +505,13 @@ centinelaUserRouter.get('/watchlist', async (req, res) => {
 // ── POST /api/centinela/watchlist ──────────────────────────────────────────
 //
 // Body: { entity_type, entity_id, label?, notes? }
-// Conflict on (user_id, entity_type, entity_id) returns 200 with existing row
-// rather than 409 — the UX of "add to watchlist" should be idempotent from
-// the user's perspective.
+//
+// IMPORTANT (2026-04-29 bug fix): the actual unique constraint is on
+// (user_id, entity_type, entity_id, source) — NOT just the first three.
+// Earlier code used the wrong onConflict columns AND tried to insert
+// `label`/`notes` as flat columns. Both wrong: those fields live inside
+// `metadata jsonb`, and `source` defaults to 'manual' so we can include
+// it explicitly in the conflict key.
 centinelaUserRouter.post('/watchlist', async (req, res) => {
   const userId = await requireUser(req, res);
   if (!userId) return;
@@ -500,26 +519,54 @@ centinelaUserRouter.post('/watchlist', async (req, res) => {
     entity_type?: string; entity_id?: string; label?: string; notes?: string;
   };
   if (!entity_type || !entity_id) {
-    res.status(400).json({ ok: false, error: 'entity_type and entity_id required' });
+    res.status(400).json({ ok: false, error: 'entity_type_and_entity_id_required' });
     return;
   }
   if (!['expediente', 'diputado', 'tema'].includes(entity_type)) {
-    res.status(400).json({ ok: false, error: 'invalid entity_type', hint: 'expediente|diputado|tema' });
+    res.status(400).json({ ok: false, error: 'invalid_entity_type', hint: 'expediente|diputado|tema' });
     return;
   }
+
+  const metadata: Record<string, unknown> = {};
+  if (label) metadata.label = label;
+  if (notes) metadata.notes = notes;
+
   try {
     const { data, error } = await supa()
       .from('centinela_watchlist')
       .upsert(
-        { user_id: userId, entity_type, entity_id, label: label ?? null, notes: notes ?? null },
-        { onConflict: 'user_id,entity_type,entity_id', ignoreDuplicates: false },
+        {
+          user_id: userId,
+          entity_type,
+          entity_id,
+          source: 'manual',
+          metadata,
+        },
+        {
+          onConflict: 'user_id,entity_type,entity_id,source',
+          ignoreDuplicates: false,
+        },
       )
-      .select('id, entity_type, entity_id, label, notes, created_at')
+      .select('id, entity_type, entity_id, source, metadata, created_at')
       .single();
     if (error) throw new Error(error.message);
-    res.json({ ok: true, item: data });
+    const meta = (data.metadata ?? {}) as { label?: string; notes?: string };
+    res.json({
+      ok: true,
+      item: {
+        id: data.id,
+        entity_type: data.entity_type,
+        entity_id: data.entity_id,
+        label: meta.label ?? null,
+        notes: meta.notes ?? null,
+        created_at: data.created_at,
+      },
+    });
   } catch (err) {
     const message = (err as Error)?.message ?? String(err);
+    req.log?.warn('centinela_watchlist_add_failed', {
+      userId, entity_type, entity_id, error: message,
+    });
     res.status(500).json({ ok: false, error: message });
   }
 });

@@ -187,16 +187,23 @@ function WatchlistSidebar({
   const [sLoading, setSLoading] = useState(false);
   const [sError, setSError] = useState<string | null>(null);
   const [addedIds, setAddedIds] = useState<Set<string>>(new Set());
+  // Surface add failures inline — silent swallows hide real bugs (we just
+  // had one where the backend was rejecting every insert because of a
+  // schema mismatch and the UI gave no indication).
+  const [addError, setAddError] = useState<string | null>(null);
 
   const handlePick = async (picked: { entity_id: string; label: string }) => {
     setSubmitting(true);
+    setAddError(null);
     try {
       await onAdd(draftType, picked.entity_id, picked.label);
       setDraftValue('');
       setMode('idle');
     } catch (err) {
+      const message = (err as Error).message ?? 'falló';
+      setAddError(message);
       // eslint-disable-next-line no-console
-      console.warn('[Watchlist] add failed:', (err as Error).message);
+      console.warn('[Watchlist] add failed:', message);
     } finally {
       setSubmitting(false);
     }
@@ -225,10 +232,16 @@ function WatchlistSidebar({
   };
 
   const acceptSuggestion = async (s: WatchlistSuggestion) => {
+    setAddError(null);
     try {
       await onAdd(s.entity_type, s.entity_id, s.label);
       setAddedIds((cur) => new Set([...cur, s.entity_id]));
-    } catch { /* swallow */ }
+    } catch (err) {
+      const message = (err as Error).message ?? 'falló';
+      setAddError(message);
+      // eslint-disable-next-line no-console
+      console.warn('[Watchlist] suggestion add failed:', message);
+    }
   };
 
   return (
@@ -294,6 +307,11 @@ function WatchlistSidebar({
               {submitting ? 'Agregando…' : 'Enter para agregar lo escrito'}
             </p>
           </div>
+          {addError && (
+            <div className="mt-1 px-2 py-1.5 rounded-md bg-red-50 dark:bg-red-900/15 text-[10.5px] text-red-700 dark:text-red-300 border border-red-200/50 dark:border-red-900/30">
+              No se pudo agregar: {addError}
+            </div>
+          )}
         </div>
       )}
 
@@ -360,6 +378,11 @@ function WatchlistSidebar({
                   </div>
                 );
               })}
+            </div>
+          )}
+          {addError && !sError && (
+            <div className="mt-1 px-2 py-1.5 rounded-md bg-red-50 dark:bg-red-900/15 text-[10.5px] text-red-700 dark:text-red-300 border border-red-200/50 dark:border-red-900/30">
+              No se pudo agregar: {addError}
             </div>
           )}
         </div>
