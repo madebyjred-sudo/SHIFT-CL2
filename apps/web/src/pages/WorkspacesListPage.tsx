@@ -14,8 +14,9 @@ import { navigate } from '@/lib/router';
 import { cn } from '@/lib/utils';
 import {
   listWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace, exportWorkspace, importAsset,
-  type Workspace,
+  type Workspace, type PptxExportResult,
 } from '@/services/workspaceApi';
+import { PptxResultModal } from '@/components/workspace/PptxResultModal';
 
 // ─── Relative time helper ────────────────────────────────────────────
 function relativeTime(iso: string): string {
@@ -47,23 +48,54 @@ function WorkspaceCard({
   const [importError, setImportError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // PPTX modal state. The modal owns the loading / ready / error display so
+  // the user always sees what's happening — no auto-downloads, no popup blocks.
+  const [pptxModal, setPptxModal] = useState<{
+    open: boolean;
+    state: 'loading' | 'ready' | 'error';
+    result?: PptxExportResult;
+    errorMessage?: string;
+    errorCode?: string;
+  } | null>(null);
+
   const commitRename = () => {
     if (draft.trim() && draft !== ws.title) onRename(draft.trim());
     setRenaming(false);
   };
 
+  // Internal: run a pptx export attempt and drive the modal state.
+  // `force=true` bypasses the server-side 1h cache.
+  const runPptxExport = async (force: boolean) => {
+    setPptxModal({ open: true, state: 'loading' });
+    setMenuOpen(false);
+    try {
+      const result = (await exportWorkspace(ws.id, 'pptx', ws.title, { force })) as PptxExportResult;
+      setPptxModal({ open: true, state: 'ready', result });
+    } catch (err) {
+      const e = err as Error & { code?: string };
+      setPptxModal({
+        open: true,
+        state: 'error',
+        errorMessage: e.message,
+        errorCode: e.code,
+      });
+    }
+  };
+
   const handleExport = async (format: 'md' | 'docx' | 'pptx') => {
     if (exporting) return;
+    if (format === 'pptx') {
+      // Modal-driven flow — don't block the menu via `exporting` so other
+      // hovers stay snappy. The modal blocks input on its own.
+      void runPptxExport(false);
+      return;
+    }
     setExporting(format);
     try {
       await exportWorkspace(ws.id, format, ws.title);
-    } catch (err) {
-      // PPTX failures (Gamma quota, network, plan limits) are visible enough
-      // that swallowing them silently feels broken — log to console so the
-      // user can copy the message if they ask. MD/DOCX failures stay silent
-      // because they're effectively impossible (synchronous local generation).
-      // eslint-disable-next-line no-console
-      if (format === 'pptx') console.warn('[WorkspacesListPage] pptx export failed:', err);
+    } catch {
+      // MD/DOCX failures are effectively impossible (synchronous local
+      // generation); swallow rather than surface noise.
     } finally {
       setExporting(null);
       setMenuOpen(false);
@@ -159,13 +191,11 @@ function WorkspaceCard({
               <div className="border-t border-black/6 dark:border-white/8 my-1" />
               <button
                 onClick={() => handleExport('pptx')}
-                disabled={exporting !== null}
+                disabled={pptxModal?.state === 'loading'}
                 className="w-full text-left px-3 py-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/8 transition-colors flex items-center gap-2 disabled:opacity-50"
               >
                 <Presentation className="w-3.5 h-3.5 text-cl2-burgundy" />
-                {exporting === 'pptx'
-                  ? 'Generando con Gamma… (~30-60s)'
-                  : 'Exportar a presentación'}
+                Generar presentación
               </button>
               <button
                 onClick={() => handleExport('docx')}
@@ -232,6 +262,21 @@ function WorkspaceCard({
           {relativeTime(ws.updated_at)}
         </span>
       </div>
+
+      {/* PPTX result modal — global to this card; only one card at a time
+          can be in pptx flight. */}
+      {pptxModal && (
+        <PptxResultModal
+          open={pptxModal.open}
+          onClose={() => setPptxModal(null)}
+          state={pptxModal.state}
+          result={pptxModal.result}
+          errorMessage={pptxModal.errorMessage}
+          errorCode={pptxModal.errorCode}
+          workspaceTitle={ws.title}
+          onRegenerate={() => runPptxExport(true)}
+        />
+      )}
     </div>
   );
 }

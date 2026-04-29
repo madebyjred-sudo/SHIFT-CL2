@@ -194,6 +194,23 @@ tools:
       Reescribe el content de una hoja existente (modo EDIT). Se
       activa cuando hay selected_node_id en el turn y el agent es
       Atlas. Mantiene el título + subtítulo, reemplaza content.md.
+  - name: generate_presentation
+    type: native
+    description: |
+      Toma el workspace activo y lo convierte en una presentación
+      (.pptx) usando Gamma. Atlas dispara esta tool cuando el usuario
+      pide explícitamente una presentación / deck / PPT / slides
+      ("hacé una presentación de esto", "convertí esto en deck",
+      "necesito un PPT para mañana"). Reusa cache si fue generado en
+      la última hora (no quema créditos por re-clicks). Devuelve
+      gammaUrl (deck editable) + url (descarga .pptx). El UI muestra
+      el modal de resultado automáticamente — el agent solo confirma
+      "listo, te abro la presentación" en su respuesta.
+
+      NO uses esta tool sin pedido explícito del usuario. Si está
+      armando hojas y mencionás "podríamos hacer un PPT también",
+      esperá la confirmación; no dispares la generación de motu
+      proprio (cuesta créditos).
 
 response_contract:
   must_include_index: true

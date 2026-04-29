@@ -154,24 +154,35 @@ export async function deleteNode(workspaceId: string, nodeId: string): Promise<v
 /**
  * Result for pptx exports. Backend returns JSON with a signed Gamma URL
  * (≈1 week TTL) instead of streaming bytes — generation can take 30s-3min,
- * so the API blocks server-side and the client just opens the resulting
- * link in a new tab.
+ * so the API blocks server-side and returns the metadata for the UI to
+ * present.
+ *
+ * IMPORTANT — UX choice: callers MUST NOT auto-trigger the download via an
+ * anchor click. Browsers treat an `<a>.click()` after a 30s+ async block as
+ * a popup (the click context is lost) and silently block it. Always render
+ * a modal/card with explicit "Abrir" / "Descargar" buttons that the user
+ * clicks themselves; that click context is preserved by the browser.
  */
 export interface PptxExportResult {
   ok: true;
   format: 'pptx';
+  cached: boolean;       // true when the API returned a cached deck (<1h old)
+  generatedAt?: string;  // ISO timestamp the deck was last generated
   filename: string;
   url: string;          // signed download URL (the .pptx file)
   gammaUrl: string;     // editable deck on gamma.app
   generationId: string;
+  creditsUsed?: number;
 }
 
 export async function exportNode(
   workspaceId: string,
   nodeId: string,
-  format: 'md' | 'docx' | 'pptx',
+  format: 'md' | 'docx',
   hojaTitle?: string,
-): Promise<PptxExportResult | void> {
+): Promise<void> {
+  // pptx removed from this single-hoja endpoint — workspace-level deck is
+  // the productive surface; per-hoja decks were noise.
   const headers = await authHeaders();
   const res = await fetch(`${BASE}/${workspaceId}/nodes/${nodeId}/export`, {
     method: 'POST',
@@ -184,22 +195,6 @@ export async function exportNode(
       ?? (body as { error?: string }).error
       ?? `HTTP ${res.status}`;
     throw new Error(`Export failed: ${detail}`);
-  }
-
-  // PPTX is async-server-side: backend returns JSON envelope, not bytes.
-  if (format === 'pptx') {
-    const data = (await res.json()) as PptxExportResult;
-    // Trigger download via temporary anchor — leaves the deck open in a tab
-    // for the user to also edit/share. No blob involved (the URL is on
-    // Gamma's CDN with proper Content-Disposition).
-    const safe = (hojaTitle ?? 'hoja').replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '_') || 'hoja';
-    const a = document.createElement('a');
-    a.href = data.url;
-    a.download = `${safe}.pptx`;
-    a.target = '_blank';
-    a.rel = 'noopener noreferrer';
-    a.click();
-    return data;
   }
 
   const blob = await res.blob();
@@ -260,32 +255,32 @@ export async function exportWorkspace(
   workspaceId: string,
   format: 'md' | 'docx' | 'pptx',
   workspaceTitle?: string,
+  opts?: { force?: boolean },
 ): Promise<PptxExportResult | void> {
   const headers = await authHeaders();
   const res = await fetch(`${BASE}/${workspaceId}/export`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ format }),
+    body: JSON.stringify({ format, force: opts?.force ?? false }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     const detail = (body as { detail?: string; error?: string }).detail
       ?? (body as { error?: string }).error
       ?? `HTTP ${res.status}`;
-    throw new Error(`Export failed: ${detail}`);
+    const err = new Error(`Export failed: ${detail}`);
+    // Surface the error code so the caller can branch (e.g. show a
+    // billing CTA on insufficient_credits, retry CTA on timeout).
+    (err as Error & { code?: string }).code = (body as { error?: string }).error;
+    throw err;
   }
   const safeName = (workspaceTitle ?? 'workspace')
     .replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '_') || 'workspace';
 
   if (format === 'pptx') {
-    const data = (await res.json()) as PptxExportResult;
-    const a = document.createElement('a');
-    a.href = data.url;
-    a.download = `${safeName}.pptx`;
-    a.target = '_blank';
-    a.rel = 'noopener noreferrer';
-    a.click();
-    return data;
+    // No auto-download. Return the metadata; the modal renders the
+    // explicit "Abrir / Descargar" buttons. See PptxExportResult docstring.
+    return (await res.json()) as PptxExportResult;
   }
 
   const blob = await res.blob();

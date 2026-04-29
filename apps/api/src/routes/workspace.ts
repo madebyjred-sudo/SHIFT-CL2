@@ -359,12 +359,28 @@ workspaceRouter.post('/:id/export', async (req, res) => {
   try {
     // Fetch workspace metadata + all nodes in one round-trip.
     const [{ data: ws, error: wsErr }, { data: nodes, error: nErr }] = await Promise.all([
-      supa()
-        .from('workspaces')
-        .select('id, title, description')
-        .eq('id', id)
-        .eq('user_id', userId)
-        .single(),
+      // SELECT with last_pptx (added by migration 0020). The query is
+      // resilient: if the column doesn't exist yet (pre-migration env),
+      // fall back to a SELECT without it so the export endpoint keeps
+      // working — cache logic just degrades to no-cache.
+      (async () => {
+        const r = await supa()
+          .from('workspaces')
+          .select('id, title, description, last_pptx')
+          .eq('id', id)
+          .eq('user_id', userId)
+          .single();
+        if (r.error && /last_pptx/.test(r.error.message)) {
+          // Column missing → retry without it.
+          return supa()
+            .from('workspaces')
+            .select('id, title, description')
+            .eq('id', id)
+            .eq('user_id', userId)
+            .single();
+        }
+        return r;
+      })(),
       supa()
         .from('workspace_nodes')
         .select('id, title, subtitle, content, x, y, color, type')
@@ -429,6 +445,39 @@ workspaceRouter.post('/:id/export', async (req, res) => {
     // valid for ~1 week per Gamma's CDN policy. If we ever need permanent
     // hosting we re-host in GCS, but that's overkill for the demo.
     if (format === 'pptx') {
+      // ── Cache reuse ─────────────────────────────────────────────────────
+      // Each Gamma generation costs credits and takes 30-60s. If the user
+      // has a recent deck for THIS workspace, reuse it unless they pass
+      // `force: true`. Default freshness window: 1 hour (long enough to
+      // cover repeat clicks within a single working session, short enough
+      // that content edits don't get stuck on a stale deck).
+      const force = Boolean(req.body?.force);
+      const cache = (ws as { last_pptx?: { generationId?: string; gammaUrl?: string; exportUrl?: string; generatedAt?: string; creditsUsed?: number } | null }).last_pptx;
+      if (!force && cache?.generatedAt && cache.exportUrl && cache.gammaUrl) {
+        const ageMs = Date.now() - new Date(cache.generatedAt).getTime();
+        const oneHour = 60 * 60 * 1000;
+        if (ageMs >= 0 && ageMs < oneHour) {
+          req.log?.info('workspace/export gamma pptx cache hit', {
+            workspace: id,
+            ageMs,
+            generationId: cache.generationId,
+          });
+          res.json({
+            ok: true,
+            format: 'pptx',
+            cached: true,
+            generatedAt: cache.generatedAt,
+            filename: `${safeName}.pptx`,
+            url: cache.exportUrl,
+            gammaUrl: cache.gammaUrl,
+            generationId: cache.generationId,
+            creditsUsed: cache.creditsUsed,
+          });
+          return;
+        }
+      }
+
+      // ── Fresh generation ────────────────────────────────────────────────
       // Compose the deck source. Cover slide + per-hoja slides separated
       // by "\n---\n" (Gamma's recognized inputTextBreaks delimiter).
       const lines: string[] = [];
@@ -465,6 +514,34 @@ workspaceRouter.post('/:id/export', async (req, res) => {
           { maxDurationMs: 5 * 60 * 1000 },
         );
 
+        // Persist the result so future clicks within ~1h reuse it. Failure
+        // to persist is non-fatal: the generation already happened, the URL
+        // is in the response, the cache just won't be populated. Specifically
+        // tolerate "column missing" errors so the endpoint keeps working in
+        // environments where migration 0020 hasn't been applied yet.
+        const cachePayload = {
+          generationId: result.generationId,
+          gammaUrl: result.gammaUrl,
+          exportUrl: result.exportUrl,
+          generatedAt: new Date().toISOString(),
+        };
+        try {
+          const { error: cacheErr } = await supa()
+            .from('workspaces')
+            .update({ last_pptx: cachePayload, updated_at: new Date().toISOString() })
+            .eq('id', id)
+            .eq('user_id', userId);
+          if (cacheErr) {
+            req.log?.warn('workspace/export gamma pptx cache write failed', {
+              workspace: id, error: cacheErr.message,
+            });
+          }
+        } catch (cacheErr) {
+          req.log?.warn('workspace/export gamma pptx cache write threw', {
+            workspace: id, error: (cacheErr as Error).message,
+          });
+        }
+
         req.log?.info('workspace/export gamma pptx ok', {
           workspace: id,
           hojas: ordered.length,
@@ -475,6 +552,8 @@ workspaceRouter.post('/:id/export', async (req, res) => {
         res.json({
           ok: true,
           format: 'pptx',
+          cached: false,
+          generatedAt: cachePayload.generatedAt,
           filename: `${safeName}.pptx`,
           url: result.exportUrl,           // signed download (≈1 week TTL)
           gammaUrl: result.gammaUrl,       // editable deck on gamma.app
