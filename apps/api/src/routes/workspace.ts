@@ -1987,6 +1987,41 @@ async function runArchitect(workspaceId: string, prompt: string): Promise<{
     console.log(`[architect] SIL context fetched in ${Date.now() - t_pre}ms · ${silContext.length} chars`);
   }
 
+  // Existing canvas content as context for Atlas. Same fix as Lexa — without
+  // this, Atlas was building new hojas blind, with zero awareness of what
+  // the user already had on the canvas. Result: duplicate analysis, repeated
+  // titles, hojas that contradict prior ones the user wrote.
+  // Cap: 6 hojas × 4K chars ≈ 24K — leaves headroom in the 16K max_tokens
+  // response window since the model uses input context separately.
+  const ARCHITECT_CONTEXT_PER_HOJA = 4_000;
+  const { data: existingHojas } = await supa()
+    .from('workspace_nodes')
+    .select('title, subtitle, content, type')
+    .eq('workspace_id', workspaceId)
+    .in('type', ['hoja', 'note', 'document'])
+    .order('updated_at', { ascending: false })
+    .limit(6);
+  const canvasContextBlocks = (existingHojas ?? [])
+    .map((n) => {
+      const c = (n.content ?? {}) as Record<string, unknown>;
+      const md = typeof c.md === 'string' ? c.md.trim() : '';
+      const extracted = typeof c.extracted_text === 'string' ? c.extracted_text.trim() : '';
+      const body = md || extracted;
+      if (!body) return null;
+      const trimmed = body.length > ARCHITECT_CONTEXT_PER_HOJA
+        ? body.slice(0, ARCHITECT_CONTEXT_PER_HOJA) + '\n[…]'
+        : body;
+      const subtitle = (n as { subtitle?: string }).subtitle;
+      const tag = n.type === 'document' ? 'Documento' : 'Hoja';
+      const header = subtitle ? `"${n.title}" — ${subtitle}` : `"${n.title}"`;
+      return `[${tag} ya en el canvas] ${header}:\n${trimmed}`;
+    })
+    .filter((s): s is string => Boolean(s));
+  const canvasContext = canvasContextBlocks.length > 0
+    ? '\n\nEL CANVAS YA TIENE EL SIGUIENTE CONTENIDO (no lo dupliques — extendé, complementá o referenciá):\n\n' +
+      canvasContextBlocks.join('\n\n---\n\n')
+    : '';
+
   // Find the next free starting Y so multiple architect runs stack vertically
   // instead of overwriting each other on the canvas grid.
   const { data: existing } = await supa()
@@ -2011,7 +2046,7 @@ async function runArchitect(workspaceId: string, prompt: string): Promise<{
     body: JSON.stringify({
       model: process.env.ARCHITECT_MODEL ?? 'google/gemini-3.1-flash-lite-preview',
       messages: [
-        { role: 'system', content: ARCHITECT_SYSTEM + silContext },
+        { role: 'system', content: ARCHITECT_SYSTEM + silContext + canvasContext },
         { role: 'user', content: prompt },
       ],
       max_tokens: 16000,
@@ -2355,15 +2390,29 @@ NO incluyas prosa. Solo el objeto JSON.`;
   if (intent === 'chat') {
     // Workspace context as a scope_system_prompt — openRouterStream
     // injects this between agent.persona and the user query.
-    const [{ data: ws }, { data: selNode }, { data: assetNodes }] = await Promise.all([
+    //
+    // FOUR queries in parallel:
+    //   1. Workspace metadata (title + description)
+    //   2. The selected hoja, if any (full content)
+    //   3. Asset nodes (PDFs/DOCXs the user dropped on the canvas)
+    //   4. Hoja nodes (the user-authored pages on the canvas)  ← ADDED 2026-04-29
+    //
+    // Bug context: previously we only fetched (1)(2)(3). Hojas the user
+    // wrote with Atlas / Lexa-inline / TipTap had their content
+    // completely missing from Lexa's context — she could see titles in
+    // the [Otras hojas] line but not the actual text. Result: "no puedo
+    // leer el contenido, pegámelo aquí". This 4th query fixes it.
+    const [
+      { data: ws },
+      { data: selNode },
+      { data: assetNodes },
+      { data: hojaNodes },
+    ] = await Promise.all([
       supa().from('workspaces').select('title, description').eq('id', id).single(),
       selectedNodeId
         ? supa().from('workspace_nodes').select('title, content, type').eq('id', selectedNodeId).eq('workspace_id', id).single()
         : Promise.resolve({ data: null }),
-      // Pull asset nodes that have extracted text — these are the
-      // PDFs/DOCXs the user dropped on the canvas. We forward their
-      // bodies as context so Lexa can answer "qué dice este documento"
-      // for any of them, not just the selected one. We cap at 3 docs and
+      // (3) Asset nodes — extracted text from PDFs/DOCXs. Cap at 3 docs,
       // 8K chars each (24K total) to keep the system prompt sane.
       supa()
         .from('workspace_nodes')
@@ -2372,6 +2421,17 @@ NO incluyas prosa. Solo el objeto JSON.`;
         .in('type', ['document'])
         .order('updated_at', { ascending: false })
         .limit(3),
+      // (4) Hoja nodes — user-authored pages with markdown content.
+      // Cap at 8 hojas, 5K chars each (40K total) — Sonnet 4.6 has 200K
+      // context, this leaves comfortable headroom for tools / RAG.
+      // Order by updated_at desc so recently-edited hojas win the cap.
+      supa()
+        .from('workspace_nodes')
+        .select('id, title, subtitle, content, type')
+        .eq('workspace_id', id)
+        .in('type', ['hoja', 'note'])
+        .order('updated_at', { ascending: false })
+        .limit(8),
     ]);
 
     // Helper — pulls a markdown OR extracted_text body out of a node.
@@ -2400,12 +2460,31 @@ NO incluyas prosa. Solo el objeto JSON.`;
       })
       .filter((s): s is string => Boolean(s));
 
+    // Hojas the user authored (Atlas / Lexa inline / TipTap). Same shape
+    // as assetBlocks but tagged differently so the model treats them
+    // appropriately ("hoja" = co-authored note, "documento" = imported file).
+    // Tighter per-doc cap because users tend to have more hojas than docs.
+    const HOJA_CONTEXT_PER_DOC = 5_000;
+    const hojaBlocks = (hojaNodes ?? [])
+      .filter((n) => n.id !== selectedNodeId) // selected one already shown
+      .map((n) => {
+        const body = nodeBody(n as Record<string, unknown>);
+        if (!body) return null;
+        const trimmed = body.length > HOJA_CONTEXT_PER_DOC
+          ? body.slice(0, HOJA_CONTEXT_PER_DOC) + '\n[…]'
+          : body;
+        const subtitle = (n as { subtitle?: string }).subtitle;
+        const header = subtitle ? `"${n.title}" — ${subtitle}` : `"${n.title}"`;
+        return `[Hoja en canvas] ${header}:\n${trimmed}`;
+      })
+      .filter((s): s is string => Boolean(s));
+
     // We OVERRIDE the agent persona's "only use numbered extracts" rule
     // when there is canvas/hoja content in the prompt, otherwise Sonnet
     // hallucinates that it can't read documents the user attached. This
     // sub-prompt is explicit and goes BEFORE the content blocks so the
     // model reads the rules first.
-    const hasAnyCanvasContent = !!selBody || assetBlocks.length > 0;
+    const hasAnyCanvasContent = !!selBody || assetBlocks.length > 0 || hojaBlocks.length > 0;
     const canvasReadingRules = hasAnyCanvasContent
       ? [
           '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
@@ -2415,14 +2494,22 @@ NO incluyas prosa. Solo el objeto JSON.`;
           'DIRECTAMENTE el contenido de las hojas y documentos que el usuario',
           'puso en su canvas. NO son resultados de RAG ni necesitan tools.',
           '',
-          '• Si te preguntan sobre [Hoja seleccionada] o [Documento en canvas],',
-          '  RESPONDÉ usando ese texto literal — sí podés leerlo, está acá abajo.',
+          'Vas a ver tres tipos de bloque:',
+          '  [Hoja seleccionada]   la hoja activa con foco — prioritaria',
+          '  [Hoja en canvas]      otras hojas que el usuario escribió',
+          '  [Documento en canvas] PDFs/DOCXs que el usuario importó',
+          '',
+          '• PODÉS y DEBÉS leer todos esos bloques. NO digas "pegámelo aquí" ni',
+          '  "no puedo ver el contenido" — sí podés, está literalmente abajo.',
           '• Citás el bloque por su título entrecomillado (ej: según "informe',
           '  técnico 22.403"...) — NO uses la convención [N] aquí, esos números',
           '  son sólo para extractos del SIL/transcripciones.',
-          '• Si el usuario pide un análisis del documento, hacelo: resumen,',
-          '  puntos clave, observaciones legislativas. Tenés permiso para',
+          '• Si el usuario pide análisis: resumen, puntos clave, observaciones',
+          '  legislativas, comparativas entre hojas — hacelo. Tenés permiso para',
           '  extrapolar y opinar profesionalmente sobre el texto provisto.',
+          '• Si pide algo que requiere conectar varios bloques (ej. "compará la',
+          '  hoja A con el documento B"), hacelo en una sola pasada — no le',
+          '  pidas que vuelva a pegar nada.',
           '• Las tools (search_sil_corpus, search_reglamento, etc.) las usás',
           '  solo si el usuario pregunta por algo que NO está en el canvas.',
           '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
@@ -2435,9 +2522,19 @@ NO incluyas prosa. Solo el objeto JSON.`;
       selNode
         ? `[Hoja seleccionada] "${(selNode as Record<string,unknown>).title}":\n${selBody ?? '(sin contenido textual — puede ser una imagen, audio o documento sin extracción)'}`
         : '',
+      ...hojaBlocks,
       ...assetBlocks,
-      hojaToitles.length > 0
-        ? `[Otras hojas del workspace] ${hojaToitles.map(h => `"${h.title}"`).join(', ')}`
+      // Fallback list of titles ONLY for hojas that didn't make the
+      // content cap (>8 hojas in the workspace). Lexa knows they exist
+      // even if she can't read them all in one turn.
+      hojaToitles.length > (hojaBlocks.length + (selNode ? 1 : 0))
+        ? `[Hojas adicionales del workspace, no incluidas arriba] ${hojaToitles
+            .filter((h) =>
+              h.id !== selectedNodeId &&
+              !hojaBlocks.some((b) => b.includes(`"${h.title}"`)),
+            )
+            .map((h) => `"${h.title}"`)
+            .join(', ')}`
         : '',
       `Para preguntas factuales sobre legislación general que NO se refieren al canvas, usá las tools de búsqueda SIL/Reglamento/grafo igual que en el chat principal.`,
     ].filter(Boolean).join('\n\n');
