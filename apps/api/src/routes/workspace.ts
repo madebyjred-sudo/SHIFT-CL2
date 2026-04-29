@@ -21,6 +21,7 @@ import { openRouterStream } from '../services/openRouterClient.js';
 import { getExpedienteById } from '../services/silClient.js';
 import { getTranscripcionById, fetchTranscriptJson, type TranscriptBlob } from '../services/legacyCl2Client.js';
 import { requireQuota, logAiCall } from '../services/aiQuota.js';
+import { generateAndWait, GammaApiError } from '../services/gammaApi.js';
 
 export const workspaceRouter = Router();
 
@@ -350,8 +351,8 @@ workspaceRouter.post('/:id/export', async (req, res) => {
   const { id } = req.params;
 
   const format = (req.body?.format ?? 'md') as string;
-  if (!['md', 'docx'].includes(format)) {
-    res.status(400).json({ ok: false, error: 'invalid_format', hint: 'md|docx' });
+  if (!['md', 'docx', 'pptx'].includes(format)) {
+    res.status(400).json({ ok: false, error: 'invalid_format', hint: 'md|docx|pptx' });
     return;
   }
 
@@ -415,6 +416,101 @@ workspaceRouter.post('/:id/export', async (req, res) => {
       res.setHeader('Content-Disposition', `attachment; filename="${safeName}.md"`);
       res.send(body);
       return;
+    }
+
+    // ── PPTX via Gamma API ────────────────────────────────────────────────
+    // Strategy: build the SAME markdown the md format produces, but use
+    // explicit "\n---\n" slide breaks (already present between hojas) so
+    // Gamma respects the canvas structure 1:1. Each hoja becomes one or
+    // more cards. Workspace title + description form the cover.
+    //
+    // We block until completion (max ~5min) and return a JSON envelope with
+    // the signed download URL. The client opens it in a new tab; the URL is
+    // valid for ~1 week per Gamma's CDN policy. If we ever need permanent
+    // hosting we re-host in GCS, but that's overkill for the demo.
+    if (format === 'pptx') {
+      // Compose the deck source. Cover slide + per-hoja slides separated
+      // by "\n---\n" (Gamma's recognized inputTextBreaks delimiter).
+      const lines: string[] = [];
+      lines.push(`# ${ws.title}`);
+      if (ws.description) lines.push('', `${ws.description}`);
+      lines.push('', `_${ordered.length} hoja${ordered.length === 1 ? '' : 's'} · CL2_`);
+
+      for (const n of ordered) {
+        lines.push('', '---', '');
+        lines.push(`# ${n.title}`);
+        if (n.subtitle) lines.push('', `### ${n.subtitle}`);
+        const md = (n.content as Record<string, unknown>)?.md as string ?? '';
+        if (md.trim()) lines.push('', md.trim());
+      }
+
+      const inputText = lines.join('\n').slice(0, 400_000);
+      try {
+        const result = await generateAndWait(
+          {
+            inputText,
+            format: 'presentation',
+            exportAs: 'pptx',
+            // The hoja-level "\n---\n" separators are deliberate canvas
+            // structure — preserve them rather than re-paginating.
+            cardSplit: 'inputTextBreaks',
+            // We trust the user's text; let Gamma rephrase only lightly.
+            textMode: 'preserve',
+            textOptions: { language: 'es-419', tone: 'professional, legislative' },
+            imageOptions: { source: 'aiGenerated' },
+            cardOptions: { dimensions: '16x9' },
+            additionalInstructions:
+              'Tono profesional legislativo costarricense. Mantené citas a expedientes (NN.NNN) y nombres propios sin reformular.',
+          },
+          { maxDurationMs: 5 * 60 * 1000 },
+        );
+
+        req.log?.info('workspace/export gamma pptx ok', {
+          workspace: id,
+          hojas: ordered.length,
+          generationId: result.generationId,
+          chars: inputText.length,
+        });
+
+        res.json({
+          ok: true,
+          format: 'pptx',
+          filename: `${safeName}.pptx`,
+          url: result.exportUrl,           // signed download (≈1 week TTL)
+          gammaUrl: result.gammaUrl,       // editable deck on gamma.app
+          generationId: result.generationId,
+        });
+        return;
+      } catch (err) {
+        if (err instanceof GammaApiError) {
+          req.log?.warn('workspace/export gamma pptx failed', {
+            workspace: id,
+            code: err.code,
+            httpStatus: err.httpStatus,
+            error: err.message,
+          });
+          // Map Gamma error codes to HTTP statuses the client can handle.
+          const statusMap: Record<string, number> = {
+            auth: 503,                  // server misconfigured
+            insufficient_credits: 402,  // billing
+            forbidden: 403,             // plan limitation
+            bad_request: 400,
+            rate_limited: 429,
+            timeout: 504,
+            failed: 502,
+            no_export_url: 502,
+            upstream: 502,
+            network: 502,
+          };
+          res.status(statusMap[err.code] ?? 500).json({
+            ok: false,
+            error: err.code,
+            detail: err.message,
+          });
+          return;
+        }
+        throw err; // rethrow non-Gamma errors → outer catch returns 500
+      }
     }
 
     // ─── DOCX ─────────────────────────────────────────────────────
@@ -836,7 +932,7 @@ workspaceRouter.post('/:id/export', async (req, res) => {
 });
 
 // POST /api/workspace/:id/nodes/:nodeId/export
-// body: { format: 'md' | 'docx' | 'pdf' }
+// body: { format: 'md' | 'docx' | 'pdf' | 'pptx' }
 workspaceRouter.post('/:id/nodes/:nodeId/export', async (req, res) => {
   const userId = await requireUser(req, res);
   if (!userId) return;
@@ -844,8 +940,8 @@ workspaceRouter.post('/:id/nodes/:nodeId/export', async (req, res) => {
   if (!await ownedWorkspace(userId, id, res)) return;
 
   const format = (req.body?.format ?? 'md') as string;
-  if (!['md', 'docx', 'pdf'].includes(format)) {
-    res.status(400).json({ ok: false, error: 'invalid_format' });
+  if (!['md', 'docx', 'pdf', 'pptx'].includes(format)) {
+    res.status(400).json({ ok: false, error: 'invalid_format', hint: 'md|docx|pdf|pptx' });
     return;
   }
 
@@ -902,8 +998,67 @@ workspaceRouter.post('/:id/nodes/:nodeId/export', async (req, res) => {
       return;
     }
 
+    // ── PPTX via Gamma ────────────────────────────────────────────────────
+    // Single-hoja PPTX. Smaller input → smaller deck. We let Gamma auto-split
+    // into ~6-8 cards (a single hoja rarely deserves more) and lean on the
+    // "condense" textMode so dense paragraphs become bullets.
+    if (format === 'pptx') {
+      const inputLines: string[] = [];
+      inputLines.push(`# ${node.title}`);
+      if (node.subtitle) inputLines.push('', `### ${node.subtitle}`);
+      if (mdContent.trim()) inputLines.push('', mdContent.trim());
+      const inputText = inputLines.join('\n').slice(0, 400_000);
+
+      try {
+        const result = await generateAndWait(
+          {
+            inputText,
+            format: 'presentation',
+            exportAs: 'pptx',
+            cardSplit: 'auto',
+            numCards: Math.max(4, Math.min(10, Math.ceil(mdContent.length / 600))),
+            textMode: 'condense',
+            textOptions: { language: 'es-419', tone: 'professional, legislative' },
+            imageOptions: { source: 'aiGenerated' },
+            cardOptions: { dimensions: '16x9' },
+          },
+          { maxDurationMs: 5 * 60 * 1000 },
+        );
+        req.log?.info('workspace/node-export gamma pptx ok', {
+          workspace: id, node: nodeId,
+          generationId: result.generationId,
+          chars: inputText.length,
+        });
+        res.json({
+          ok: true,
+          format: 'pptx',
+          filename: `${safeName}.pptx`,
+          url: result.exportUrl,
+          gammaUrl: result.gammaUrl,
+          generationId: result.generationId,
+        });
+        return;
+      } catch (err) {
+        if (err instanceof GammaApiError) {
+          req.log?.warn('workspace/node-export gamma pptx failed', {
+            workspace: id, node: nodeId, code: err.code, error: err.message,
+          });
+          const statusMap: Record<string, number> = {
+            auth: 503, insufficient_credits: 402, forbidden: 403,
+            bad_request: 400, rate_limited: 429, timeout: 504,
+            failed: 502, no_export_url: 502, upstream: 502, network: 502,
+          };
+          res.status(statusMap[err.code] ?? 500).json({
+            ok: false, error: err.code, detail: err.message,
+          });
+          return;
+        }
+        throw err;
+      }
+    }
+
     // PDF — Phase 1
-    res.status(501).json({ ok: false, error: 'pdf_phase1', hint: 'PDF export coming in Phase 1. Use MD or DOCX for now.' });
+    res.status(501).json({ ok: false, error: 'pdf_phase1', hint: 'PDF export coming in Phase 1. Use MD, DOCX or PPTX for now.' });
   } catch (err) {
     req.log?.warn('workspace/export failed', { error: (err as Error).message });
     res.status(500).json({ ok: false, error: (err as Error).message });

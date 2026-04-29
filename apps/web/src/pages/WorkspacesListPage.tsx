@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Plus, BookOpen, Archive, Trash2, MoreHorizontal,
-  LayoutGrid, Clock, CheckSquare, FileDown, FileText, Upload,
+  LayoutGrid, Clock, CheckSquare, FileDown, FileText, Upload, Presentation,
 } from 'lucide-react';
 import { TopDock } from '@/components/top-dock';
 import { navigate } from '@/lib/router';
@@ -42,7 +42,7 @@ function WorkspaceCard({
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(ws.title);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [exporting, setExporting] = useState<'md' | 'docx' | null>(null);
+  const [exporting, setExporting] = useState<'md' | 'docx' | 'pptx' | null>(null);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -52,13 +52,19 @@ function WorkspaceCard({
     setRenaming(false);
   };
 
-  const handleExport = async (format: 'md' | 'docx') => {
+  const handleExport = async (format: 'md' | 'docx' | 'pptx') => {
     if (exporting) return;
     setExporting(format);
     try {
       await exportWorkspace(ws.id, format, ws.title);
-    } catch { /* swallow — failure shows nothing, user can retry */ }
-    finally {
+    } catch (err) {
+      // PPTX failures (Gamma quota, network, plan limits) are visible enough
+      // that swallowing them silently feels broken — log to console so the
+      // user can copy the message if they ask. MD/DOCX failures stay silent
+      // because they're effectively impossible (synchronous local generation).
+      // eslint-disable-next-line no-console
+      if (format === 'pptx') console.warn('[WorkspacesListPage] pptx export failed:', err);
+    } finally {
       setExporting(null);
       setMenuOpen(false);
     }
@@ -151,6 +157,16 @@ function WorkspaceCard({
 
               {/* ── Export submenu ─────────────────────────────────── */}
               <div className="border-t border-black/6 dark:border-white/8 my-1" />
+              <button
+                onClick={() => handleExport('pptx')}
+                disabled={exporting !== null}
+                className="w-full text-left px-3 py-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/8 transition-colors flex items-center gap-2 disabled:opacity-50"
+              >
+                <Presentation className="w-3.5 h-3.5 text-cl2-burgundy" />
+                {exporting === 'pptx'
+                  ? 'Generando con Gamma… (~30-60s)'
+                  : 'Exportar a presentación'}
+              </button>
               <button
                 onClick={() => handleExport('docx')}
                 disabled={exporting !== null}

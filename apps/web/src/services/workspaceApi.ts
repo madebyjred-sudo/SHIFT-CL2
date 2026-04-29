@@ -151,24 +151,63 @@ export async function deleteNode(workspaceId: string, nodeId: string): Promise<v
 
 // ─── Export ───────────────────────────────────────────────────────────
 
+/**
+ * Result for pptx exports. Backend returns JSON with a signed Gamma URL
+ * (≈1 week TTL) instead of streaming bytes — generation can take 30s-3min,
+ * so the API blocks server-side and the client just opens the resulting
+ * link in a new tab.
+ */
+export interface PptxExportResult {
+  ok: true;
+  format: 'pptx';
+  filename: string;
+  url: string;          // signed download URL (the .pptx file)
+  gammaUrl: string;     // editable deck on gamma.app
+  generationId: string;
+}
+
 export async function exportNode(
   workspaceId: string,
   nodeId: string,
-  format: 'md' | 'docx',
-): Promise<void> {
+  format: 'md' | 'docx' | 'pptx',
+  hojaTitle?: string,
+): Promise<PptxExportResult | void> {
   const headers = await authHeaders();
   const res = await fetch(`${BASE}/${workspaceId}/nodes/${nodeId}/export`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ format }),
   });
-  if (!res.ok) throw new Error(`Export failed: HTTP ${res.status}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const detail = (body as { detail?: string; error?: string }).detail
+      ?? (body as { error?: string }).error
+      ?? `HTTP ${res.status}`;
+    throw new Error(`Export failed: ${detail}`);
+  }
+
+  // PPTX is async-server-side: backend returns JSON envelope, not bytes.
+  if (format === 'pptx') {
+    const data = (await res.json()) as PptxExportResult;
+    // Trigger download via temporary anchor — leaves the deck open in a tab
+    // for the user to also edit/share. No blob involved (the URL is on
+    // Gamma's CDN with proper Content-Disposition).
+    const safe = (hojaTitle ?? 'hoja').replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '_') || 'hoja';
+    const a = document.createElement('a');
+    a.href = data.url;
+    a.download = `${safe}.pptx`;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.click();
+    return data;
+  }
+
   const blob = await res.blob();
   const ext = format === 'docx' ? 'docx' : 'md';
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `hoja.${ext}`;
+  a.download = `${(hojaTitle ?? 'hoja').replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '_') || 'hoja'}.${ext}`;
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -219,9 +258,9 @@ export async function importAsset(
  */
 export async function exportWorkspace(
   workspaceId: string,
-  format: 'md' | 'docx',
+  format: 'md' | 'docx' | 'pptx',
   workspaceTitle?: string,
-): Promise<void> {
+): Promise<PptxExportResult | void> {
   const headers = await authHeaders();
   const res = await fetch(`${BASE}/${workspaceId}/export`, {
     method: 'POST',
@@ -230,12 +269,27 @@ export async function exportWorkspace(
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error((body as { error?: string }).error ?? `Export failed: HTTP ${res.status}`);
+    const detail = (body as { detail?: string; error?: string }).detail
+      ?? (body as { error?: string }).error
+      ?? `HTTP ${res.status}`;
+    throw new Error(`Export failed: ${detail}`);
   }
-  const blob = await res.blob();
-  const ext = format === 'docx' ? 'docx' : 'md';
   const safeName = (workspaceTitle ?? 'workspace')
     .replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '_') || 'workspace';
+
+  if (format === 'pptx') {
+    const data = (await res.json()) as PptxExportResult;
+    const a = document.createElement('a');
+    a.href = data.url;
+    a.download = `${safeName}.pptx`;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.click();
+    return data;
+  }
+
+  const blob = await res.blob();
+  const ext = format === 'docx' ? 'docx' : 'md';
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;

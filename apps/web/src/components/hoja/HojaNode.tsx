@@ -33,7 +33,7 @@ import TextAlign from '@tiptap/extension-text-align';
 import Typography from '@tiptap/extension-typography';
 import CharacterCount from '@tiptap/extension-character-count';
 import {
-  GripHorizontal, Trash2, Download, Copy, Palette, Check,
+  GripHorizontal, Trash2, Download, Copy, Palette, Check, Presentation, Loader2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { updateNode, exportNode, type NodeColor, type WorkspaceNode } from '@/services/workspaceApi';
@@ -85,6 +85,9 @@ export function HojaNode({ id, data, selected }: { id: string; data: HojaNodeDat
   }, [lastSavedAt]);
   const [voiceAppendOpen, setVoiceAppendOpen] = useState(false);
   const [copyState, setCopyState] = useState<'idle' | 'copied'>('idle');
+  // Gamma PPTX export — block UI while generation runs (~30-60s typical).
+  // Failures get a console message and revert the icon so the user can retry.
+  const [pptxState, setPptxState] = useState<'idle' | 'loading' | 'error'>('idle');
 
   // Slash command state — drives the SIL picker, the Lexa inline prompt
   // and the template picker. The pending range tracks where in the
@@ -371,11 +374,47 @@ export function HojaNode({ id, data, selected }: { id: string; data: HojaNodeDat
 
           {/* Export MD */}
           <button
-            onClick={(e) => { e.stopPropagation(); exportNode(workspaceId, id, 'md').catch(() => null); }}
+            onClick={(e) => { e.stopPropagation(); exportNode(workspaceId, id, 'md', title).catch(() => null); }}
             className="p-1.5 rounded-lg hover:bg-black/8 dark:hover:bg-white/10 transition-colors text-[#0e1745]/50 dark:text-white/50"
             title="Exportar .md"
           >
             <Download className="w-3.5 h-3.5" />
+          </button>
+
+          {/* Export PPTX (Gamma) — async, ~30-60s. Disable while generating. */}
+          <button
+            disabled={pptxState === 'loading'}
+            onClick={async (e) => {
+              e.stopPropagation();
+              setPptxState('loading');
+              try {
+                await exportNode(workspaceId, id, 'pptx', title);
+                setPptxState('idle');
+              } catch (err) {
+                // eslint-disable-next-line no-console
+                console.warn('[HojaNode] pptx export failed:', err);
+                setPptxState('error');
+                // Auto-revert after 3s so the next click works.
+                setTimeout(() => setPptxState('idle'), 3000);
+              }
+            }}
+            className={cn(
+              'p-1.5 rounded-lg transition-colors',
+              pptxState === 'loading'
+                ? 'text-cl2-burgundy bg-cl2-burgundy/10 cursor-wait'
+                : pptxState === 'error'
+                ? 'text-red-500 bg-red-50 dark:bg-red-900/20'
+                : 'text-[#0e1745]/50 dark:text-white/50 hover:bg-black/8 dark:hover:bg-white/10',
+            )}
+            title={
+              pptxState === 'loading' ? 'Generando con Gamma… (~30-60s)'
+              : pptxState === 'error' ? 'Falló — clickeá de nuevo para reintentar'
+              : 'Exportar como presentación (Gamma)'
+            }
+          >
+            {pptxState === 'loading'
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : <Presentation className="w-3.5 h-3.5" />}
           </button>
 
           {/* Delete */}
