@@ -47,7 +47,7 @@ import { voiceRouter } from './routes/voice.js';
 import { publicDemoRouter } from './routes/publicDemo.js';
 import { podcastsRouter } from './routes/podcasts.js';
 import { transcriptsAdminRouter, internalTriggersRouter } from './routes/transcripts.js';
-import { centinelaAdminRouter, centinelaInternalRouter } from './routes/centinela.js';
+import { centinelaAdminRouter, centinelaInternalRouter, centinelaUserRouter } from './routes/centinela.js';
 import { requestContext } from './middleware/requestContext.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { logger } from './services/logger.js';
@@ -186,6 +186,14 @@ app.use(
   '/api/internal/centinela',
   rateLimit({ bucket: 'centinela', max: 60, windowMs: 60_000 }),
   centinelaInternalRouter,
+);
+app.use(
+  // Centinela user-facing endpoints — feed, watchlist, prefs, summary.
+  // Auth: getUserIdFromRequest (Supabase JWT). Rate limit is generous —
+  // the page polls /summary on focus and after every mutation.
+  '/api/centinela',
+  rateLimit({ bucket: 'centinela', max: 240, windowMs: 60_000 }),
+  centinelaUserRouter,
 );
 
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {

@@ -481,6 +481,28 @@ export function AnimatedAiInput({
                 { citations: chunk.payload as ChunkCitation[] },
                 activeSessionId,
               );
+            } else if (chunk.type === 'pptx_status') {
+              // Atlas's generate_presentation tool kicked off (or errored).
+              // Show a "generando…" pill on the message; the actual card
+              // arrives on `pptx_ready`.
+              const p = chunk.payload as { status?: string };
+              if (p?.status === 'starting') {
+                updateMessage(assistantId, { pptxLoading: true }, activeSessionId);
+              } else if (p?.status === 'error') {
+                updateMessage(assistantId, { pptxLoading: false }, activeSessionId);
+              }
+            } else if (chunk.type === 'pptx_ready') {
+              // Deck is ready — attach the URLs to the message so the
+              // renderer shows the "Abrir / Descargar" card inline.
+              const p = chunk.payload as {
+                filename: string; url: string; gammaUrl: string;
+                generationId: string; cached: boolean; generatedAt?: string;
+              };
+              updateMessage(
+                assistantId,
+                { pptxResult: p, pptxLoading: false },
+                activeSessionId,
+              );
             } else if (chunk.type === 'error') {
               const payload = chunk.payload as
                 | { code?: string; message?: string }
@@ -798,6 +820,41 @@ export function AnimatedAiInput({
                             </div>
                             {msg.citations && msg.citations.length > 0 && (
                               <CitationCards citations={msg.citations} />
+                            )}
+                            {msg.pptxLoading && !msg.pptxResult && (
+                              <div className="mt-2 inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-cl2-burgundy/10 text-cl2-burgundy text-[11px] font-medium">
+                                <span className="w-1.5 h-1.5 rounded-full bg-cl2-burgundy animate-pulse" />
+                                Generando presentación con Gamma…
+                              </div>
+                            )}
+                            {msg.pptxResult && (
+                              <div className="mt-3 space-y-2 max-w-md">
+                                <a
+                                  href={msg.pptxResult.gammaUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="block group rounded-xl border border-black/8 dark:border-white/10 hover:border-cl2-burgundy/40 dark:hover:border-cl2-burgundy/40 bg-gradient-to-br from-cl2-burgundy/5 to-transparent dark:from-cl2-burgundy/10 dark:to-transparent p-3.5 transition-all"
+                                >
+                                  <div className="flex items-center justify-between gap-3">
+                                    <div className="min-w-0">
+                                      <div className="text-[12px] font-medium text-[#0e1745] dark:text-white">
+                                        Abrir presentación en Gamma
+                                      </div>
+                                      <div className="text-[10.5px] text-[#0e1745]/55 dark:text-white/55 mt-0.5 truncate">
+                                        {msg.pptxResult.filename} · {msg.pptxResult.cached ? 'desde caché' : 'recién generada'}
+                                      </div>
+                                    </div>
+                                    <span className="text-cl2-burgundy text-[14px] group-hover:translate-x-0.5 transition-transform">↗</span>
+                                  </div>
+                                </a>
+                                <a
+                                  href={msg.pptxResult.url}
+                                  download={msg.pptxResult.filename}
+                                  className="flex items-center gap-2 px-3 py-2 rounded-lg bg-black/3 dark:bg-white/5 hover:bg-black/6 dark:hover:bg-white/8 text-[11px] text-[#0e1745]/70 dark:text-white/70 font-medium transition-colors w-fit"
+                                >
+                                  ⬇ Descargar .pptx
+                                </a>
+                              </div>
                             )}
                             {msg.confidence && (
                               <ConfidenceBadge confidence={msg.confidence} />

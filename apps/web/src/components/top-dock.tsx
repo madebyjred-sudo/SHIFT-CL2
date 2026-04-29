@@ -15,18 +15,20 @@ export function TopDock({ onOpenHistory, onToggleHistory, isHistoryOpen }: TopDo
   const { theme, toggleTheme } = useTheme();
   const path = useRoute();
   const { replay: replayTour, hasCompleted: tourCompleted } = useOnboarding();
-  const currentView: 'chat' | 'live' | 'sil' | 'audios' | 'admin' | 'hojas' =
+  const currentView: 'chat' | 'live' | 'sil' | 'audios' | 'admin' | 'hojas' | 'centinela' =
     path.startsWith('/admin') ? 'admin'
     : path.startsWith('/sil') ? 'sil'
     : path.startsWith('/audios') ? 'audios'
     : path.startsWith('/hojas') ? 'hojas'
+    : path.startsWith('/centinela') ? 'centinela'
     : path.startsWith('/sesiones') || path.startsWith('/expediente') ? 'live'
     : 'chat';
-  const handleNavigate = (view: 'chat' | 'live' | 'sil' | 'audios' | 'admin' | 'hojas') => {
+  const handleNavigate = (view: 'chat' | 'live' | 'sil' | 'audios' | 'admin' | 'hojas' | 'centinela') => {
     if (view === 'admin') navigate('/admin/overview');
     else if (view === 'sil') navigate('/sil');
     else if (view === 'audios') navigate('/audios');
     else if (view === 'hojas') navigate('/hojas');
+    else if (view === 'centinela') navigate('/centinela');
     else navigate(view === 'live' ? '/sesiones' : '/');
   };
 

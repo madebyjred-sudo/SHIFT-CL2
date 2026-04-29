@@ -28,11 +28,29 @@
  */
 
 import { Router, type Request, type Response } from 'express';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { syncCentinelaWatchlist } from '../jobs/centinelaSilSync.js';
 import { scrapeAgenda } from '../jobs/agendaScrape.js';
 import { detectSimilarExpedientes } from '../jobs/centinelaSimilarDetect.js';
-import { getUserFromRequest, type AuthedUser } from '../services/auth.js';
+import { getUserFromRequest, getUserIdFromRequest, type AuthedUser } from '../services/auth.js';
 import { logger } from '../services/logger.js';
+
+// ── Lazy Supabase client (service role) ──────────────────────────────────────
+let _supa: SupabaseClient | null = null;
+function supa(): SupabaseClient {
+  if (_supa) return _supa;
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) throw new Error('supabase env missing for centinela router');
+  _supa = createClient(url, key, { auth: { persistSession: false } });
+  return _supa;
+}
+
+async function requireUser(req: Request, res: Response): Promise<string | null> {
+  const userId = await getUserIdFromRequest(req);
+  if (!userId) { res.status(401).json({ ok: false, error: 'auth_required' }); return null; }
+  return userId;
+}
 
 // ── Auth helpers ──────────────────────────────────────────────────────────────
 
@@ -299,6 +317,292 @@ centinelaAdminRouter.post('/detect-similar', async (req, res) => {
   } catch (err) {
     const message = (err as Error)?.message ?? String(err);
     req.log?.error('centinela_admin_detect_similar_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// USER-FACING ROUTER — /api/centinela
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Powers the /centinela page in the SPA: alerts feed, watchlist CRUD, prefs,
+// and a summary endpoint that drives the dynamic page header (counts).
+//
+// All endpoints are RLS-aware: we always scope by `user_id = auth.uid()`
+// pulled from the Supabase JWT. We use the service-role client for writes
+// (because some related tables don't expose RLS-friendly read paths) but
+// every query carries an explicit user_id filter so a leaked token can't
+// see another user's data.
+
+export const centinelaUserRouter = Router();
+
+// ── GET /api/centinela/summary ─────────────────────────────────────────────
+//
+// Drives the page hero copy: "X alertas nuevas · Y en tu watchlist".
+// Cheap and chatty — UI fetches this on mount and after any watchlist /
+// alerts mutation to refresh the header.
+centinelaUserRouter.get('/summary', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  try {
+    const [unreadAlerts, totalAlerts, watchlistItems, prefs] = await Promise.all([
+      supa().from('centinela_alerts').select('id', { count: 'exact', head: true })
+        .eq('user_id', userId).is('read_at', null),
+      supa().from('centinela_alerts').select('id', { count: 'exact', head: true })
+        .eq('user_id', userId),
+      supa().from('centinela_watchlist').select('id', { count: 'exact', head: true })
+        .eq('user_id', userId),
+      supa().from('centinela_alert_prefs').select('digest_enabled, channels, alert_types_on')
+        .eq('user_id', userId).maybeSingle(),
+    ]);
+
+    // Severity breakdown for the unread bucket — drives the "X críticas, Y
+    // info" subline in the hero.
+    const { data: severityRows } = await supa()
+      .from('centinela_alerts')
+      .select('severity')
+      .eq('user_id', userId)
+      .is('read_at', null);
+
+    const severity: Record<string, number> = { info: 0, warning: 0, critical: 0 };
+    for (const r of (severityRows ?? []) as Array<{ severity: string }>) {
+      severity[r.severity] = (severity[r.severity] ?? 0) + 1;
+    }
+
+    res.json({
+      ok: true,
+      unread: unreadAlerts.count ?? 0,
+      total: totalAlerts.count ?? 0,
+      watchlist: watchlistItems.count ?? 0,
+      severity,
+      prefs: prefs.data ?? null,
+    });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.warn('centinela_summary_failed', { userId, error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ── GET /api/centinela/feed ────────────────────────────────────────────────
+//
+// Paginated alerts feed. Default sort is created_at DESC (newest first).
+// Filters: type, severity, unread_only.
+//
+// Query params:
+//   limit         number  default 20, max 100
+//   cursor        ISO timestamp; returns alerts created_at < cursor
+//   type          'state_change' | 'deadline' | 'mention' | 'agenda' | 'similar' | 'digest_weekly'
+//   severity      'info' | 'warning' | 'critical'
+//   unread_only   '1' to filter to unread only
+centinelaUserRouter.get('/feed', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const limit = Math.min(Math.max(parseInt((req.query.limit as string) ?? '20', 10) || 20, 1), 100);
+  const cursor = (req.query.cursor as string) ?? null;
+  const type = (req.query.type as string) ?? null;
+  const severity = (req.query.severity as string) ?? null;
+  const unreadOnly = (req.query.unread_only as string) === '1';
+
+  try {
+    let q = supa()
+      .from('centinela_alerts')
+      .select('id, alert_type, entity_type, entity_id, severity, payload, dedup_key, read_at, created_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (cursor) q = q.lt('created_at', cursor);
+    if (type) q = q.eq('alert_type', type);
+    if (severity) q = q.eq('severity', severity);
+    if (unreadOnly) q = q.is('read_at', null);
+
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+
+    const items = data ?? [];
+    const nextCursor = items.length === limit
+      ? (items[items.length - 1] as { created_at: string }).created_at
+      : null;
+
+    res.json({ ok: true, items, nextCursor });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.warn('centinela_feed_failed', { userId, error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ── POST /api/centinela/alerts/:id/read ────────────────────────────────────
+centinelaUserRouter.post('/alerts/:id/read', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const { id } = req.params;
+  try {
+    const { error } = await supa()
+      .from('centinela_alerts')
+      .update({ read_at: new Date().toISOString() })
+      .eq('id', id)
+      .eq('user_id', userId);
+    if (error) throw new Error(error.message);
+    res.json({ ok: true });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ── POST /api/centinela/alerts/read-all ────────────────────────────────────
+centinelaUserRouter.post('/alerts/read-all', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  try {
+    const { error } = await supa()
+      .from('centinela_alerts')
+      .update({ read_at: new Date().toISOString() })
+      .eq('user_id', userId)
+      .is('read_at', null);
+    if (error) throw new Error(error.message);
+    res.json({ ok: true });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ── GET /api/centinela/watchlist ───────────────────────────────────────────
+centinelaUserRouter.get('/watchlist', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  try {
+    const { data, error } = await supa()
+      .from('centinela_watchlist')
+      .select('id, entity_type, entity_id, label, notes, created_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, items: data ?? [] });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ── POST /api/centinela/watchlist ──────────────────────────────────────────
+//
+// Body: { entity_type, entity_id, label?, notes? }
+// Conflict on (user_id, entity_type, entity_id) returns 200 with existing row
+// rather than 409 — the UX of "add to watchlist" should be idempotent from
+// the user's perspective.
+centinelaUserRouter.post('/watchlist', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const { entity_type, entity_id, label, notes } = (req.body ?? {}) as {
+    entity_type?: string; entity_id?: string; label?: string; notes?: string;
+  };
+  if (!entity_type || !entity_id) {
+    res.status(400).json({ ok: false, error: 'entity_type and entity_id required' });
+    return;
+  }
+  if (!['expediente', 'diputado', 'tema'].includes(entity_type)) {
+    res.status(400).json({ ok: false, error: 'invalid entity_type', hint: 'expediente|diputado|tema' });
+    return;
+  }
+  try {
+    const { data, error } = await supa()
+      .from('centinela_watchlist')
+      .upsert(
+        { user_id: userId, entity_type, entity_id, label: label ?? null, notes: notes ?? null },
+        { onConflict: 'user_id,entity_type,entity_id', ignoreDuplicates: false },
+      )
+      .select('id, entity_type, entity_id, label, notes, created_at')
+      .single();
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, item: data });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ── DELETE /api/centinela/watchlist/:id ────────────────────────────────────
+centinelaUserRouter.delete('/watchlist/:id', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const { id } = req.params;
+  try {
+    const { error } = await supa()
+      .from('centinela_watchlist')
+      .delete()
+      .eq('id', id)
+      .eq('user_id', userId);
+    if (error) throw new Error(error.message);
+    res.json({ ok: true });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ── GET /api/centinela/prefs ───────────────────────────────────────────────
+centinelaUserRouter.get('/prefs', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  try {
+    const { data, error } = await supa()
+      .from('centinela_alert_prefs')
+      .select('*')
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+
+    // Return defaults when the user has never opened settings — saves a
+    // separate "have you initialized?" round-trip on the client.
+    const prefs = data ?? {
+      user_id: userId,
+      channels: { in_app: true, email: false, slack: false, whatsapp: false, telegram: false },
+      alert_types_on: ['state_change', 'deadline', 'mention', 'agenda'],
+      digest_enabled: false,
+      quiet_hours: null,
+    };
+    res.json({ ok: true, prefs });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ── PATCH /api/centinela/prefs ─────────────────────────────────────────────
+//
+// Body: subset of {channels, alert_types_on, digest_enabled, quiet_hours}.
+// Upsert semantics — first call creates the row.
+centinelaUserRouter.patch('/prefs', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const { channels, alert_types_on, digest_enabled, quiet_hours } = (req.body ?? {}) as {
+    channels?: Record<string, boolean>;
+    alert_types_on?: string[];
+    digest_enabled?: boolean;
+    quiet_hours?: { start?: string; end?: string; tz?: string } | null;
+  };
+
+  // Build a sparse update — only include fields that were explicitly sent.
+  // This lets the client toggle a single channel without re-sending the rest.
+  const update: Record<string, unknown> = { user_id: userId };
+  if (channels !== undefined) update.channels = channels;
+  if (alert_types_on !== undefined) update.alert_types_on = alert_types_on;
+  if (digest_enabled !== undefined) update.digest_enabled = digest_enabled;
+  if (quiet_hours !== undefined) update.quiet_hours = quiet_hours;
+
+  try {
+    const { data, error } = await supa()
+      .from('centinela_alert_prefs')
+      .upsert(update, { onConflict: 'user_id' })
+      .select('*')
+      .single();
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, prefs: data });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
     res.status(500).json({ ok: false, error: message });
   }
 });

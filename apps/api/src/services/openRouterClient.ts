@@ -43,6 +43,15 @@ interface StreamArgs {
   // match over ElevenLabs segments, with timecodes returned for citation.
   // Pragmatic stand-in for full RAG (Phase 3 of docs/issues/001).
   scope_legacy_session_id?: number | null;
+  // When set, enables `generate_presentation` for Atlas. The tool composes
+  // every hoja in this workspace into a Gamma deck and emits a `pptx_ready`
+  // chunk to the client. Without this scope, Atlas can't generate decks
+  // (it doesn't know which workspace).
+  scope_workspace_id?: string | null;
+  // Authenticated user — required for tools that touch user-scoped data
+  // (currently: generate_presentation, which UPDATEs workspaces.last_pptx).
+  // Caller (chat router) should set this from the verified Supabase JWT.
+  user_id?: string | null;
   // Prior turns of this conversation, in OAI {role,content} shape. Without
   // this, every turn is a "first turn" to the LLM (it can't see what it
   // said last time, so references like "el #1" or "expandí esa idea" miss).
@@ -175,6 +184,35 @@ function hasReglamentoTool(agentTools: Array<Record<string, unknown>>): boolean 
 function hasGraphTool(agentTools: Array<Record<string, unknown>>): boolean {
   return agentTools.some((t) => t.name === 'query_legislative_graph');
 }
+
+function hasGeneratePresentationTool(agentTools: Array<Record<string, unknown>>): boolean {
+  return agentTools.some((t) => t.name === 'generate_presentation');
+}
+
+// generate_presentation — Atlas tool that turns the active workspace into
+// a Gamma deck. Same pipeline as POST /api/workspace/:id/export with
+// format='pptx'. The tool dispatcher emits a `pptx_ready` chunk to the
+// client so the chat UI can render an inline card with the gammaUrl +
+// exportUrl. Cache reuse is handled server-side: re-clicks within ~1h
+// don't burn credits.
+const GENERATE_PRESENTATION_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'generate_presentation',
+    description:
+      'Genera una presentación (.pptx) del workspace activo usando Gamma. Disparalo SOLO cuando el usuario pide explícitamente una presentación / deck / PPT / slides ("hacé una presentación de esto", "convertí esto en deck", "necesito un PPT"). NO lo dispares de motu proprio mientras armás hojas — cada generación cuesta ~3-7 créditos y toma 30-60s. La tool reusa cache si fue generado en la última hora; pasá force=true para forzar regeneración.',
+    parameters: {
+      type: 'object',
+      properties: {
+        force: {
+          type: 'boolean',
+          description: 'Si true, ignora la cache y regenera el deck. Default false.',
+        },
+      },
+      required: [],
+    },
+  },
+};
 
 // query_legislative_graph — wraps Cerebro's LightRAG.
 // LightRAG's three modes:
@@ -490,6 +528,14 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // the cost asymmetry concrete.
   if (hasGraphTool(agent.tools) && args.deep_insight) {
     tools.push(QUERY_LEGISLATIVE_GRAPH_TOOL);
+  }
+  // generate_presentation — only available when the chat is scoped to a
+  // workspace AND the agent yaml declares the tool (Atlas does, Lexa/
+  // Centinela don't). Without scope_workspace_id we don't know which
+  // canvas to convert, so we hide the tool entirely rather than letting
+  // the model attempt and fail.
+  if (hasGeneratePresentationTool(agent.tools) && args.scope_workspace_id) {
+    tools.push(GENERATE_PRESENTATION_TOOL);
   }
 
   if (tools.length === 0) {
@@ -1024,6 +1070,101 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
           role: 'tool',
           tool_call_id: tc.id,
           content: `Error al consultar el grafo: ${result.detail}. Caé a search_sil_corpus para esta pregunta.`,
+        });
+      }
+      continue;
+    }
+
+    if (tc.function.name === 'generate_presentation') {
+      // Atlas tool: convert the active workspace into a Gamma deck.
+      // The chat MUST be scoped to a workspace (scope_workspace_id set);
+      // we already gate registration on this, but defensive check anyway.
+      if (!args.scope_workspace_id) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify({
+            error: 'no_workspace_scope',
+            hint: 'La presentación requiere abrir un workspace primero.',
+          }),
+        });
+        continue;
+      }
+
+      let parsedArgs: { force?: boolean } = {};
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments || '{}');
+      } catch {
+        // Empty or malformed args is fine for this tool — defaults to force=false.
+      }
+
+      // Emit a status chunk so the chat UI can render "generando…" inline
+      // while we wait. Without this, the user would see Atlas's prose
+      // response only after the 30-60s Gamma round-trip completes.
+      args.onChunk({
+        type: 'pptx_status',
+        payload: { status: 'starting', workspace_id: args.scope_workspace_id },
+      });
+
+      if (!args.user_id) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify({
+            error: 'auth_required',
+            hint: 'No tengo identidad del usuario para generar el deck.',
+          }),
+        });
+        continue;
+      }
+
+      try {
+        const { runWorkspacePptxExport } = await import('./workspacePptxExport.js');
+        const result = await runWorkspacePptxExport({
+          workspaceId: args.scope_workspace_id,
+          userId: args.user_id,
+          force: parsedArgs.force ?? false,
+        });
+
+        // Push the structured event the chat UI renders as a card.
+        args.onChunk({
+          type: 'pptx_ready',
+          payload: {
+            filename: result.filename,
+            url: result.exportUrl,
+            gammaUrl: result.gammaUrl,
+            generationId: result.generationId,
+            cached: result.cached,
+            generatedAt: result.generatedAt,
+          },
+        });
+
+        // Tell the model what happened so its prose response can reference
+        // the deck without re-asking the user.
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content:
+            `Presentación generada con Gamma (${result.cached ? 'cache' : 'fresca'}).\n` +
+            `Editable: ${result.gammaUrl}\n` +
+            `Descarga: ${result.exportUrl}\n` +
+            `Filename: ${result.filename}\n\n` +
+            `INSTRUCCIONES:\n` +
+            `1. Confirmale al usuario que está lista (1-2 frases).\n` +
+            `2. NO pegues las URLs en tu respuesta — el frontend ya las muestra como botones.\n` +
+            `3. Sugerí qué podría editar en Gamma si querés (cover, orden de cards, etc.).`,
+        });
+      } catch (err) {
+        const message = (err as Error).message ?? 'unknown';
+        const code = (err as Error & { code?: string }).code ?? 'unknown';
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify({ error: code, detail: message }),
+        });
+        args.onChunk({
+          type: 'pptx_status',
+          payload: { status: 'error', code, detail: message },
         });
       }
       continue;

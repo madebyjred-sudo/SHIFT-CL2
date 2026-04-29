@@ -25,7 +25,18 @@ export type ChatChunk =
   | { type: 'confidence'; payload: unknown }
   | { type: 'error'; payload: unknown }
   | { type: 'done'; payload?: unknown }
-  | { type: 'workspace_action'; payload: WorkspaceActionPayload };
+  | { type: 'workspace_action'; payload: WorkspaceActionPayload }
+  | { type: 'pptx_status'; payload: { status: 'starting' | 'polling' | 'error'; code?: string; detail?: string } }
+  | { type: 'pptx_ready'; payload: PptxReadyPayload };
+
+export interface PptxReadyPayload {
+  filename: string;
+  url: string;
+  gammaUrl: string;
+  generationId: string;
+  cached: boolean;
+  generatedAt?: string;
+}
 
 export interface WorkspaceActionPayload {
   intent: 'build' | 'edit_selected' | 'edit_by_match';
@@ -65,10 +76,14 @@ async function getAuthToken(): Promise<string | undefined> {
 export async function streamChat(opts: StreamChatOptions): Promise<void> {
   const token = await getAuthToken();
 
-  // For session scope, send legacy_session_id; workspace scope not used here.
+  // Forward the scope to the BFF.
+  // - session scope → legacy_session_id (drives sessionContextLoader)
+  // - workspace scope → workspace_id (unlocks Atlas's generate_presentation tool)
   const scopePayload =
     opts.scope?.kind === 'session'
       ? { legacy_session_id: opts.scope.legacy_session_id }
+      : opts.scope?.kind === 'workspace'
+      ? { workspace_id: opts.scope.workspace_id }
       : undefined;
 
   const res = await fetch('/api/chat/stream', {

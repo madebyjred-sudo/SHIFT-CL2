@@ -162,3 +162,8 @@ export function matchWorkspaceId(path: string): string | null {
   const m = path.match(/^\/hojas\/([0-9a-f-]{36})\/?$/i);
   return m ? m[1] : null;
 }
+
+/** Match `/centinela` — Centinela page (alerts feed + watchlist + prefs). */
+export function isCentinela(path: string): boolean {
+  return /^\/centinela\/?$/.test(path);
+}

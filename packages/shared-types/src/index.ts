@@ -106,9 +106,21 @@ export interface CerebroStreamChunk {
     | 'citation'
     | 'conversation'
     | 'confidence'
+    | 'pptx_status'   // Atlas pptx tool: lifecycle event ("starting" | "polling" | etc.)
+    | 'pptx_ready'    // Atlas pptx tool: deck completed, includes gammaUrl + exportUrl
     | 'done'
     | 'error';
   payload?: unknown;
+}
+
+/** Payload for `pptx_ready` chunk emitted by Atlas's generate_presentation tool. */
+export interface PptxReadyPayload {
+  filename: string;
+  url: string;          // signed download URL (Gamma CDN, ~1 week TTL)
+  gammaUrl: string;     // editable deck on gamma.app
+  generationId: string;
+  cached: boolean;
+  generatedAt?: string;
 }
 
 export interface ConfidencePayload {

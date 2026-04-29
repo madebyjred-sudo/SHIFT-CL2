@@ -136,6 +136,20 @@ export type Message = {
   deepInsight?: boolean;
   citations?: ChunkCitation[];
   confidence?: Confidence;
+  /** Inline card payload — set when Atlas's generate_presentation tool
+   *  finishes. Renders an "Abrir en Gamma + Descargar .pptx" card below
+   *  the message body. */
+  pptxResult?: {
+    filename: string;
+    url: string;
+    gammaUrl: string;
+    generationId: string;
+    cached: boolean;
+    generatedAt?: string;
+  };
+  /** True while a pptx tool call is in flight. UI shows an inline progress
+   *  pill ("Generando con Gamma…"); replaced by pptxResult when done. */
+  pptxLoading?: boolean;
 };
 
 /**

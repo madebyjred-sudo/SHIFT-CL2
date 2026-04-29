@@ -9,7 +9,7 @@ import { OnboardingProvider } from './components/onboarding/OnboardingProvider';
 import { SupabaseAuthView } from './components/SupabaseAuthView';
 import { AuthCallback } from './components/AuthCallback';
 import { useSupabaseStore } from './store/useSupabaseStore';
-import { useRoute, matchSesionId, matchExpedienteNumero, matchAdminSection, isSilBrowse, isLandingPage, isWorkspacesList, matchWorkspaceId, isAudiosPage, matchPodcastShareToken } from './lib/router';
+import { useRoute, matchSesionId, matchExpedienteNumero, matchAdminSection, isSilBrowse, isLandingPage, isWorkspacesList, matchWorkspaceId, isAudiosPage, matchPodcastShareToken, isCentinela } from './lib/router';
 import { SesionesListPage } from './pages/SesionesListPage';
 import { SesionViewPage } from './pages/SesionViewPage';
 import { SubirSesionPage } from './pages/SubirSesionPage';
@@ -17,6 +17,7 @@ import { ExpedienteViewPage } from './pages/ExpedienteViewPage';
 import { AdminApp } from './pages/admin/AdminApp';
 import { SilBrowsePage } from './pages/SilBrowsePage';
 import { WorkspacesListPage } from './pages/WorkspacesListPage';
+import { CentinelaPage } from './pages/CentinelaPage';
 import { WorkspaceCanvasPage } from './pages/WorkspaceCanvasPage';
 import { LandingPage } from './pages/LandingPage';
 import { AudiosPage } from './pages/AudiosPage';
@@ -112,6 +113,8 @@ export default function App() {
             <WorkspacesListPage />
           ) : workspaceId ? (
             <WorkspaceCanvasPage id={workspaceId} />
+          ) : isCentinela(path) ? (
+            <CentinelaPage />
           ) : (
           <div className="h-screen flex flex-col bg-gray-50 dark:bg-mesh text-gray-900 dark:text-white font-sans relative overflow-hidden transition-colors duration-500">
             {/* Pixel dotted overlay — barely visible */}

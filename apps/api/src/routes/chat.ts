@@ -110,6 +110,15 @@ chatRouter.post('/stream', async (req, res) => {
       ? body.scope.legacy_session_id
       : null;
 
+  // Workspace scope: when the user is chatting from /hojas/:id, the client
+  // should pass scope.workspace_id. This unlocks Atlas's generate_presentation
+  // tool — without it, the model can't know which canvas to convert.
+  const scopeWorkspaceIdRaw = (body.scope as { workspace_id?: unknown } | undefined)?.workspace_id;
+  const scopeWorkspaceId =
+    typeof scopeWorkspaceIdRaw === 'string' && /^[0-9a-f-]{36}$/i.test(scopeWorkspaceIdRaw)
+      ? scopeWorkspaceIdRaw
+      : null;
+
   let scopeSystemPrompt: string | undefined;
   if (scopeLegacySessionId !== null) {
     try {
@@ -192,6 +201,8 @@ chatRouter.post('/stream', async (req, res) => {
       dynamic_rag_prompt: dynamicRagPrompt,
       scope_system_prompt: scopeSystemPrompt,
       scope_legacy_session_id: scopeLegacySessionId,
+      scope_workspace_id: scopeWorkspaceId,
+      user_id: userId ?? null,
       // Forward conversation history sent by the client (keeps the model
       // aware of prior turns). The frontend trims to its own window; the
       // server caps at MAX_HISTORY_MESSAGES as a safety net.
