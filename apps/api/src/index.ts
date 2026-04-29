@@ -48,6 +48,7 @@ import { publicDemoRouter } from './routes/publicDemo.js';
 import { podcastsRouter } from './routes/podcasts.js';
 import { transcriptsAdminRouter, internalTriggersRouter } from './routes/transcripts.js';
 import { centinelaAdminRouter, centinelaInternalRouter, centinelaUserRouter } from './routes/centinela.js';
+import { onboardingRouter } from './routes/onboarding.js';
 import { requestContext } from './middleware/requestContext.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { logger } from './services/logger.js';
@@ -194,6 +195,14 @@ app.use(
   '/api/centinela',
   rateLimit({ bucket: 'centinela', max: 240, windowMs: 60_000 }),
   centinelaUserRouter,
+);
+app.use(
+  // Onboarding wizard endpoints — profile + magic-help + watchlist suggestions.
+  // The magic-help / suggest-watchlist routes call OpenRouter, so the rate
+  // limit is tighter than read-only summary polling.
+  '/api/onboarding',
+  rateLimit({ bucket: 'onboarding', max: 30, windowMs: 60_000 }),
+  onboardingRouter,
 );
 
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {

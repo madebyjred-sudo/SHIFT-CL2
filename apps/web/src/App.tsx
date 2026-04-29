@@ -6,6 +6,7 @@ import { ChatProvider } from './lib/chat-context';
 import { ThemeProvider } from './lib/theme-context';
 import { ErrorBoundary } from './components/error-boundary';
 import { OnboardingProvider } from './components/onboarding/OnboardingProvider';
+import { OnboardingGate } from './components/onboarding/OnboardingGate';
 import { SupabaseAuthView } from './components/SupabaseAuthView';
 import { AuthCallback } from './components/AuthCallback';
 import { useSupabaseStore } from './store/useSupabaseStore';
@@ -95,6 +96,7 @@ export default function App() {
       <ThemeProvider>
         <ChatProvider>
           <OnboardingProvider>
+          <OnboardingGate />
           {path === '/sesiones/subir' ? (
             <SubirSesionPage />
           ) : path === '/sesiones' ? (
