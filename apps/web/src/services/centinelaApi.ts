@@ -147,6 +147,24 @@ export async function getPrefs(): Promise<Prefs> {
   return r.prefs;
 }
 
+// ─── Autocomplete ─────────────────────────────────────────────────────
+
+export interface AutocompleteItem {
+  entity_id: string;
+  label: string;
+  hint: string;
+}
+
+export async function autocomplete(
+  type: 'expediente' | 'diputado',
+  q: string,
+): Promise<AutocompleteItem[]> {
+  const r = await apiFetch<{ ok: true; items: AutocompleteItem[] }>(
+    `/autocomplete?type=${type}&q=${encodeURIComponent(q)}`,
+  );
+  return r.items;
+}
+
 export async function updatePrefs(input: Partial<{
   channels: Channels;
   alert_types_on: AlertType[];

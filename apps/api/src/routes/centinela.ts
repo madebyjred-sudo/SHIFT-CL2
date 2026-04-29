@@ -571,6 +571,113 @@ centinelaUserRouter.get('/prefs', async (req, res) => {
   }
 });
 
+// ── GET /api/centinela/autocomplete?type=expediente|diputado&q=… ───────────
+//
+// Powers the watchlist add field's typeahead. Two modes:
+//
+//   type=expediente  Match by numero prefix ("24.4" → 24.400-24.499) AND by
+//                    titulo ILIKE. Combined into one ranked list. Returns
+//                    `entity_id` (the canonical "24.429" form) + `label`
+//                    (titulo).
+//
+//   type=diputado    Distinct values from sil_expedientes.proponente
+//                    (we don't have a clean diputados table yet). Returns
+//                    `entity_id` and `label` set equal — we use the
+//                    apellido string as both the human label and the watch
+//                    key. Sufficient for matching mentions in transcripts
+//                    via pg_trgm fuzzy.
+//
+// No auth gate beyond requireUser — these are list reads of public-ish
+// legislative data. Limit 8 hardcoded.
+centinelaUserRouter.get('/autocomplete', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const type = (req.query.type as string) ?? '';
+  const q = ((req.query.q as string) ?? '').trim();
+  if (!type || !['expediente', 'diputado'].includes(type)) {
+    res.status(400).json({ ok: false, error: 'invalid_type', hint: 'type=expediente|diputado' });
+    return;
+  }
+  if (q.length < 2) {
+    // Bail early on too-short queries — saves DB hits and avoids noise.
+    res.json({ ok: true, items: [] });
+    return;
+  }
+
+  try {
+    if (type === 'expediente') {
+      // Numero match is anchored — "24.4" should beat free-text matches that
+      // happen to contain "24.4" inside a paragraph. Two queries, dedup.
+      const [byNumero, byTitle] = await Promise.all([
+        supa()
+          .from('sil_expedientes')
+          .select('numero, titulo, proponente, fecha_presentacion')
+          .ilike('numero', `${q}%`)
+          .limit(8),
+        supa()
+          .from('sil_expedientes')
+          .select('numero, titulo, proponente, fecha_presentacion')
+          .ilike('titulo', `%${q}%`)
+          .limit(8),
+      ]);
+      const seen = new Set<string>();
+      const items: Array<{ entity_id: string; label: string; hint: string }> = [];
+      for (const row of [...(byNumero.data ?? []), ...(byTitle.data ?? [])]) {
+        const r = row as { numero: string; titulo: string; proponente: string | null; fecha_presentacion: string | null };
+        if (seen.has(r.numero)) continue;
+        seen.add(r.numero);
+        const fechaSlim = r.fecha_presentacion?.slice(0, 4) ?? '';
+        const hintParts: string[] = [];
+        if (r.proponente) hintParts.push(r.proponente);
+        if (fechaSlim) hintParts.push(fechaSlim);
+        items.push({
+          entity_id: r.numero,
+          label: r.titulo ?? r.numero,
+          hint: hintParts.join(' · '),
+        });
+        if (items.length >= 8) break;
+      }
+      res.json({ ok: true, items });
+      return;
+    }
+
+    if (type === 'diputado') {
+      // No clean diputados table yet — derive from sil_expedientes.proponente.
+      // ILIKE on the source column with DISTINCT-on at the app layer (Postgres
+      // doesn't expose distinct() on PostgREST cleanly).
+      const { data, error } = await supa()
+        .from('sil_expedientes')
+        .select('proponente')
+        .ilike('proponente', `%${q}%`)
+        .not('proponente', 'is', null)
+        .limit(120);
+      if (error) throw new Error(error.message);
+
+      // Rank by occurrence count (more bills authored = more likely match).
+      const counts = new Map<string, number>();
+      for (const row of (data ?? []) as Array<{ proponente: string }>) {
+        const key = row.proponente.trim();
+        if (!key) continue;
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+      const items = [...counts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 8)
+        .map(([name, count]) => ({
+          entity_id: name,
+          label: name,
+          hint: `${count} expediente${count === 1 ? '' : 's'}`,
+        }));
+      res.json({ ok: true, items });
+      return;
+    }
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.warn('centinela_autocomplete_failed', { type, q, error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
 // ── PATCH /api/centinela/prefs ─────────────────────────────────────────────
 //
 // Body: subset of {channels, alert_types_on, digest_enabled, quiet_hours}.

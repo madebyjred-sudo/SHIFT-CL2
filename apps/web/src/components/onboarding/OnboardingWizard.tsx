@@ -304,7 +304,7 @@ function ProfileStep({
           onBlur={() => persist({ cargo })}
           placeholder="Diputada por Cartago, asistente legislativa, miembro Comisión Hacendarios…"
           rows={2}
-          className="w-full px-3 py-2 rounded-lg bg-black/3 dark:bg-white/5 border border-black/8 dark:border-white/10 text-[13px] resize-none focus:outline-none focus:border-cl2-burgundy/40"
+          className="w-full px-3 py-2 rounded-lg bg-black/3 dark:bg-white/5 border border-black/8 dark:border-white/10 text-[13px] text-[#0e1745] dark:text-white placeholder:text-[#0e1745]/35 dark:placeholder:text-white/30 resize-none focus:outline-none focus:border-cl2-burgundy/40"
         />
         {suggestions?.field === 'cargo' && (
           <SuggestionPill
@@ -342,7 +342,7 @@ function ProfileStep({
           onBlur={() => persist({ enfoque })}
           placeholder="Reforma fiscal, transparencia presupuestaria, pequeña empresa, derechos digitales…"
           rows={3}
-          className="w-full px-3 py-2 rounded-lg bg-black/3 dark:bg-white/5 border border-black/8 dark:border-white/10 text-[13px] resize-none focus:outline-none focus:border-cl2-burgundy/40"
+          className="w-full px-3 py-2 rounded-lg bg-black/3 dark:bg-white/5 border border-black/8 dark:border-white/10 text-[13px] text-[#0e1745] dark:text-white placeholder:text-[#0e1745]/35 dark:placeholder:text-white/30 resize-none focus:outline-none focus:border-cl2-burgundy/40"
         />
         {suggestions?.field === 'enfoque' && suggestions.items.length > 0 && (
           <div className="mt-2 space-y-1.5">

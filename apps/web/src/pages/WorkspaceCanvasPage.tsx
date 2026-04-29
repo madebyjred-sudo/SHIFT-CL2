@@ -21,7 +21,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import {
-  ArrowLeft, Copy, Headphones, Plus, Layers, Sparkles, Trash2, Upload, ZoomIn,
+  ArrowLeft, Copy, Headphones, Plus, Layers, Sparkles, Trash2, Upload, ZoomIn, Presentation,
 } from 'lucide-react';
 import { TopDock } from '@/components/top-dock';
 import { HojaNode } from '@/components/hoja/HojaNode';
@@ -42,7 +42,8 @@ import {
   listNodes, createNode, updateNode, deleteNode, getNode, importAsset,
   type WorkspaceNode,
 } from '@/services/workspaceApi';
-import { updateWorkspace } from '@/services/workspaceApi';
+import { updateWorkspace, exportWorkspace, type PptxExportResult } from '@/services/workspaceApi';
+import { PptxResultModal } from '@/components/workspace/PptxResultModal';
 import { supabase } from '@/lib/supabase';
 
 // ─── Node type registration ───────────────────────────────────────────
@@ -137,6 +138,29 @@ function CanvasInner({
   const [lexaQuickOpen, setLexaQuickOpen] = useState(false);
   const [pendingClickFlow, setPendingClickFlow] = useState<{ x: number; y: number } | null>(null);
   const [podcastNode, setPodcastNode] = useState<{ id: string; title: string } | null>(null);
+
+  // Pptx flow — same modal the workspace card uses, just opened from the
+  // canvas toolbar. The button sits NEXT to the podcast button so the
+  // "presentation as artifact" affordance is visually parallel to the
+  // "podcast as artifact" one.
+  const [pptxModal, setPptxModal] = useState<{
+    open: boolean;
+    state: 'loading' | 'ready' | 'error';
+    result?: PptxExportResult;
+    errorMessage?: string;
+    errorCode?: string;
+  } | null>(null);
+
+  const runPptxExport = useCallback(async (force: boolean) => {
+    setPptxModal({ open: true, state: 'loading' });
+    try {
+      const result = (await exportWorkspace(workspaceId, 'pptx', title, { force })) as PptxExportResult;
+      setPptxModal({ open: true, state: 'ready', result });
+    } catch (err) {
+      const e = err as Error & { code?: string };
+      setPptxModal({ open: true, state: 'error', errorMessage: e.message, errorCode: e.code });
+    }
+  }, [workspaceId, title]);
 
   // Chat-panel width (resizable splitter). Min = 340 (the previous
   // fixed xl size); Max = 340 × 1.618 ≈ 550. Persists per-user via
@@ -739,6 +763,23 @@ function CanvasInner({
               {/* "Audio del board" button — only visible when no strip showing */}
               <BoardAudioCTA workspaceId={workspaceId} onClick={() => setPodcastOpen(true)} />
 
+              {/* "Generar PPT" — symmetric with the audio button. Opens
+                  the same modal the workspace card uses (loading +
+                  ready/error states + cache reuse). The button stays
+                  visible regardless of whether a deck exists; the modal
+                  itself surfaces "Generar de nuevo" when applicable. */}
+              <button
+                onClick={() => void runPptxExport(false)}
+                disabled={pptxModal?.state === 'loading'}
+                title="Generar presentación con Gamma"
+                className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white dark:bg-[#1c1c1c] border border-cl2-burgundy/20 dark:border-cl2-burgundy/30 shadow-sm text-[13px] font-medium text-cl2-burgundy dark:text-cl2-burgundy/90 hover:bg-cl2-burgundy/[0.04] dark:hover:bg-cl2-burgundy/[0.10] transition-colors disabled:opacity-60 disabled:cursor-wait"
+              >
+                <Presentation className="w-4 h-4" />
+                <span className="hidden md:inline">
+                  {pptxModal?.state === 'loading' ? 'Generando…' : 'Presentación'}
+                </span>
+              </button>
+
               {/* Nueva hoja (manual) — voice path moved into the
                   right-click "Pedile a Lexa" + the chat panel mic. */}
               <button
@@ -797,6 +838,20 @@ function CanvasInner({
 
       {/* ── Context menu portal ───────────────────────────────────── */}
       {ctxMenu.element}
+
+      {/* ── PPTX modal (board → Gamma deck) ───────────────────────── */}
+      {pptxModal && (
+        <PptxResultModal
+          open={pptxModal.open}
+          onClose={() => setPptxModal(null)}
+          state={pptxModal.state}
+          result={pptxModal.result}
+          errorMessage={pptxModal.errorMessage}
+          errorCode={pptxModal.errorCode}
+          workspaceTitle={title}
+          onRegenerate={() => void runPptxExport(true)}
+        />
+      )}
 
       {/* ── Podcast modal (board → audio) ───────────────────────── */}
       <PodcastModal

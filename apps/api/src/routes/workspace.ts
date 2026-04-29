@@ -2277,7 +2277,24 @@ const TURN_CLASSIFIER_MODEL  = process.env.TURN_CLASSIFIER_MODEL  ?? 'google/gem
 const TURN_CHAT_MODEL        = process.env.TURN_CHAT_MODEL        ?? 'minimax/minimax-m2';
 const TURN_EDIT_MODEL        = process.env.TURN_EDIT_MODEL        ?? 'google/gemini-3.1-flash-lite-preview';
 
-type TurnIntent = 'chat' | 'build' | 'edit_selected' | 'edit_by_match';
+type TurnIntent = 'chat' | 'build' | 'edit_selected' | 'edit_by_match' | 'pptx';
+
+/**
+ * Detect "user is asking for a presentation" — runs before the architect
+ * gets to mis-classify the query as a build intent. We only fire on
+ * unambiguous keywords; ambiguous mentions ("ese análisis para presentar
+ * mañana") still route to whatever the user picked. This intentionally
+ * favors false negatives (recall < precision) — a missed pptx hint just
+ * means the user has to click the canvas button instead.
+ */
+function looksLikePptxRequest(query: string): boolean {
+  const q = query.toLowerCase();
+  // Verbs + noun pairs. A bare "presentación" without verb (e.g. "esta es
+  // mi presentación del proyecto X") doesn't qualify — the verb is the
+  // intent signal.
+  const pattern = /(?:hac[eé]|cre[aá]|gener[aá]|armad?|pasa(?:me)?|convert[ií]|necesit[oa])\s+(?:una|un|el|la|esto\s+(?:en|a))?\s*(?:presentaci[oó]n|deck|pptx?|slides|powerpoint|diapositivas)/;
+  return pattern.test(q);
+}
 
 workspaceRouter.post('/:id/turn', async (req, res) => {
   const userId = await requireUser(req, res);
@@ -2336,11 +2353,21 @@ workspaceRouter.post('/:id/turn', async (req, res) => {
   //   Atlas → edit_selected si hay nodo seleccionado, sino build
   //           (Atlas es el constructor — siempre produce estructura)
   if (requestedAgentId) {
-    intent = agentId === 'lexa'
-      ? 'chat'
-      : (selectedNodeId ? 'edit_selected' : 'build');
+    // Pptx pre-empt: independent of agent_id, an unambiguous "hacé una
+    // presentación" should produce a deck — not be silently routed into
+    // the architect's "build hojas" mode (which is what was happening
+    // before this branch existed). The keyword detector is intentionally
+    // tight; ambiguous mentions still flow to the picker default.
+    if (looksLikePptxRequest(query)) {
+      intent = 'pptx';
+      req.log?.info('turn/pptx_detected', { agentId, query: query.slice(0, 80) });
+    } else {
+      intent = agentId === 'lexa'
+        ? 'chat'
+        : (selectedNodeId ? 'edit_selected' : 'build');
+      req.log?.info('turn/agent_picker', { agentId, intent, selectedNodeId });
+    }
     classifierTargetNodeId = selectedNodeId ?? null;
-    req.log?.info('turn/agent_picker', { agentId, intent, selectedNodeId });
   } else if (mode === 'manual' && forcedIntent) {
     intent = forcedIntent;
   } else {
@@ -2573,6 +2600,36 @@ NO incluyas prosa. Solo el objeto JSON.`;
       res.json({ ok: true, intent: 'build', ...result });
     } catch (err) {
       res.status(502).json({ ok: false, error: (err as Error).message });
+    }
+    return;
+  }
+
+  // ── pptx: delegate to Gamma exporter ──────────────────────────────
+  // JSON response (not SSE) — the modal-driven UX wants a single envelope
+  // it can render. The frontend turns this into a card under the message.
+  if (intent === 'pptx') {
+    try {
+      const { runWorkspacePptxExport } = await import('../services/workspacePptxExport.js');
+      const result = await runWorkspacePptxExport({
+        workspaceId: id,
+        userId,
+        force: false,
+      });
+      res.json({
+        ok: true,
+        intent: 'pptx',
+        filename: result.filename,
+        url: result.exportUrl,
+        gammaUrl: result.gammaUrl,
+        generationId: result.generationId,
+        cached: result.cached,
+        generatedAt: result.generatedAt,
+      });
+    } catch (err) {
+      const code = (err as Error & { code?: string }).code ?? 'pptx_failed';
+      const message = (err as Error)?.message ?? 'unknown';
+      req.log?.warn('turn/pptx_failed', { workspace: id, code, error: message });
+      res.status(502).json({ ok: false, intent: 'pptx', error: code, detail: message });
     }
     return;
   }

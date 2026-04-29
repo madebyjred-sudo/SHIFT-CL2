@@ -449,31 +449,62 @@ export function AnimatedAiInput({
               buffer += chunk.payload;
               updateMessage(assistantId, { content: buffer }, activeSessionId);
             } else if (chunk.type === 'workspace_action') {
-              const p = chunk.payload as WorkspaceActionPayload;
-              const intentLabel = p.intent === 'build'
-                ? 'Construir hojas'
-                : p.intent === 'edit_selected'
-                  ? 'Editar hoja seleccionada'
-                  : 'Editar hoja';
-              const actionBody = p.intent === 'build'
-                ? `_Hojas generadas — ver canvas._`
-                : `_Hoja actualizada — ver canvas._`;
-              updateMessage(
-                assistantId,
-                {
-                  content: `**Detecté: ${intentLabel}**\n\n${actionBody}`,
-                },
-                activeSessionId,
-              );
-              // Fire parent callback for canvas mutation
-              if (onWorkspaceAction) {
-                onWorkspaceAction({
-                  intent: p.intent,
-                  nodes: p.nodes,
-                  node_id: p.node_id,
-                  new_content: p.new_content,
-                  target_match_confidence: p.target_match_confidence,
-                });
+              const p = chunk.payload as WorkspaceActionPayload & {
+                url?: string; gammaUrl?: string; filename?: string;
+                generationId?: string; cached?: boolean; generatedAt?: string;
+              };
+              if (p.intent === 'pptx' && p.url && p.gammaUrl && p.filename) {
+                // Pptx response — render the same inline card as the
+                // openRouter dispatcher path. Body copy is short — the
+                // card itself does the heavy lifting. Skip the canvas
+                // mutation callback since pptx doesn't touch nodes.
+                updateMessage(
+                  assistantId,
+                  {
+                    content: p.cached
+                      ? 'Tu presentación está lista (la había generado hace poco).'
+                      : 'Listo, te dejé la presentación.',
+                    pptxResult: {
+                      filename: p.filename,
+                      url: p.url,
+                      gammaUrl: p.gammaUrl,
+                      generationId: p.generationId ?? '',
+                      cached: Boolean(p.cached),
+                      generatedAt: p.generatedAt,
+                    },
+                    pptxLoading: false,
+                  },
+                  activeSessionId,
+                );
+              } else {
+                const intentLabel = p.intent === 'build'
+                  ? 'Construir hojas'
+                  : p.intent === 'edit_selected'
+                    ? 'Editar hoja seleccionada'
+                    : 'Editar hoja';
+                const actionBody = p.intent === 'build'
+                  ? `_Hojas generadas — ver canvas._`
+                  : `_Hoja actualizada — ver canvas._`;
+                updateMessage(
+                  assistantId,
+                  {
+                    content: `**Detecté: ${intentLabel}**\n\n${actionBody}`,
+                  },
+                  activeSessionId,
+                );
+                // Fire parent callback for canvas mutation. The else branch
+                // we're in already excludes 'pptx', so TS just needs the
+                // narrowing nudge to know `p.intent` is one of the canvas
+                // intents.
+                if (onWorkspaceAction && p.intent !== 'pptx') {
+                  onWorkspaceAction({
+                    intent: p.intent,
+                    nodes: p.nodes,
+                    node_id: p.node_id,
+                    new_content: p.new_content,
+                    target_match_confidence: p.target_match_confidence,
+                  });
+                }
               }
             } else if (chunk.type === 'citation' && Array.isArray(chunk.payload)) {
               updateMessage(

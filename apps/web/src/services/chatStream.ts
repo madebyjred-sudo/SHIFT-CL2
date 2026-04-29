@@ -39,12 +39,19 @@ export interface PptxReadyPayload {
 }
 
 export interface WorkspaceActionPayload {
-  intent: 'build' | 'edit_selected' | 'edit_by_match';
+  intent: 'build' | 'edit_selected' | 'edit_by_match' | 'pptx';
   ok: boolean;
   nodes?: import('@/services/workspaceApi').WorkspaceNode[];
   node_id?: string;
   new_content?: string;
   target_match_confidence?: number;
+  // pptx-specific fields, populated when intent='pptx'
+  url?: string;
+  gammaUrl?: string;
+  filename?: string;
+  generationId?: string;
+  cached?: boolean;
+  generatedAt?: string;
   [key: string]: unknown;
 }
 

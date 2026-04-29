@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Eye, AlertTriangle, AlertCircle, Bell, BellOff, Plus, X, Filter,
-  Trash2, Sparkles, Mail, Slack, MessageSquareMore, Calendar,
+  Trash2, Sparkles, Mail, Slack, MessageSquareMore, Loader2, Check,
   CheckCheck, Inbox, Clock,
 } from 'lucide-react';
 import { TopDock } from '@/components/top-dock';
@@ -29,6 +29,8 @@ import {
   type AlertType, type AlertSeverity, type CentinelaAlert,
   type WatchlistItem, type Prefs, type Summary,
 } from '@/services/centinelaApi';
+import { AutocompleteInput } from '@/components/centinela/AutocompleteInput';
+import { suggestWatchlist, getProfile, type WatchlistSuggestion } from '@/services/onboardingApi';
 
 // ─── Relative time helper ───────────────────────────────────────────────────
 function relativeTime(iso: string): string {
@@ -156,6 +158,18 @@ function AlertRow({
 }
 
 // ─── Watchlist sidebar ──────────────────────────────────────────────────────
+//
+// Three modes layered on top of each other (mutually exclusive):
+//   1. Closed             — just the [+ Agregar] / [✨ Sugerir] CTAs.
+//   2. Adding (manual)    — type tabs + AutocompleteInput. Number in head?
+//                            it autocompletes from the SIL by titulo or numero.
+//                            Apellido in head? it suggests proponentes ranked
+//                            by occurrence. Free-text fallback for temas.
+//   3. Suggesting (auto)  — Centinela reads the user's profile and proposes
+//                            5 watchlist items. One-click [Vigilar].
+//
+// We share the same component the onboarding wizard uses for consistency —
+// a regular user who skipped onboarding can still hit the magic-help here.
 function WatchlistSidebar({
   items, onAdd, onRemove,
 }: {
@@ -163,25 +177,58 @@ function WatchlistSidebar({
   onAdd: (entity_type: 'expediente' | 'diputado' | 'tema', entity_id: string, label?: string) => Promise<void>;
   onRemove: (id: string) => void;
 }) {
-  const [adding, setAdding] = useState(false);
+  const [mode, setMode] = useState<'idle' | 'adding' | 'suggesting'>('idle');
   const [draftType, setDraftType] = useState<'expediente' | 'diputado' | 'tema'>('expediente');
-  const [draftId, setDraftId] = useState('');
+  const [draftValue, setDraftValue] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  const submit = async () => {
-    const id = draftId.trim();
-    if (!id) return;
+  // Suggesting state
+  const [suggestions, setSuggestions] = useState<WatchlistSuggestion[]>([]);
+  const [sLoading, setSLoading] = useState(false);
+  const [sError, setSError] = useState<string | null>(null);
+  const [addedIds, setAddedIds] = useState<Set<string>>(new Set());
+
+  const handlePick = async (picked: { entity_id: string; label: string }) => {
     setSubmitting(true);
     try {
-      await onAdd(draftType, id);
-      setDraftId('');
-      setAdding(false);
+      await onAdd(draftType, picked.entity_id, picked.label);
+      setDraftValue('');
+      setMode('idle');
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn('[Watchlist] add failed:', (err as Error).message);
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const startSuggesting = async () => {
+    setMode('suggesting');
+    setSLoading(true);
+    setSError(null);
+    setAddedIds(new Set());
+    try {
+      // Read the user's profile so Centinela can ground its suggestions on
+      // the cargo + enfoque the user filled at onboarding (or skipped).
+      const profile = await getProfile().catch(() => null);
+      const result = await suggestWatchlist({
+        cargo: profile?.cargo ?? undefined,
+        enfoque: profile?.enfoque ?? undefined,
+        temas: profile?.temas ?? [],
+      });
+      setSuggestions(result);
+    } catch (err) {
+      setSError((err as Error).message);
+    } finally {
+      setSLoading(false);
+    }
+  };
+
+  const acceptSuggestion = async (s: WatchlistSuggestion) => {
+    try {
+      await onAdd(s.entity_type, s.entity_id, s.label);
+      setAddedIds((cur) => new Set([...cur, s.entity_id]));
+    } catch { /* swallow */ }
   };
 
   return (
@@ -191,23 +238,33 @@ function WatchlistSidebar({
         <span className="text-[11px] text-[#0e1745]/50 dark:text-white/45">{items.length}</span>
       </div>
 
-      {!adding && (
-        <button
-          onClick={() => setAdding(true)}
-          className="w-full mb-3 flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-cl2-burgundy/10 hover:bg-cl2-burgundy/15 text-cl2-burgundy text-[12px] font-medium transition-colors"
-        >
-          <Plus className="w-3.5 h-3.5" />
-          Agregar
-        </button>
+      {mode === 'idle' && (
+        <div className="mb-3 grid grid-cols-2 gap-2">
+          <button
+            onClick={() => setMode('adding')}
+            className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-cl2-burgundy/10 hover:bg-cl2-burgundy/15 text-cl2-burgundy text-[12px] font-medium transition-colors"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Agregar
+          </button>
+          <button
+            onClick={() => void startSuggesting()}
+            className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-black/4 dark:bg-white/[0.06] hover:bg-black/8 dark:hover:bg-white/[0.10] text-[#0e1745]/75 dark:text-white/75 text-[12px] font-medium transition-colors"
+            title="Centinela lee tu perfil y propone qué vigilar"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-cl2-burgundy" />
+            Sugerir
+          </button>
+        </div>
       )}
 
-      {adding && (
+      {mode === 'adding' && (
         <div className="mb-3 p-3 rounded-lg bg-black/3 dark:bg-white/5 space-y-2">
           <div className="flex gap-1">
             {(['expediente', 'diputado', 'tema'] as const).map((t) => (
               <button
                 key={t}
-                onClick={() => setDraftType(t)}
+                onClick={() => { setDraftType(t); setDraftValue(''); }}
                 className={cn(
                   'flex-1 px-2 py-1 rounded text-[10px] font-medium uppercase tracking-wide transition-colors',
                   draftType === t
@@ -219,29 +276,92 @@ function WatchlistSidebar({
               </button>
             ))}
           </div>
-          <input
-            value={draftId}
-            onChange={(e) => setDraftId(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && void submit()}
-            placeholder={draftType === 'expediente' ? '24.429' : draftType === 'diputado' ? 'Apellidos' : 'fintech, seguridad…'}
-            className="w-full px-2.5 py-1.5 rounded bg-white dark:bg-black/30 border border-black/10 dark:border-white/10 text-[12px] focus:outline-none focus:border-cl2-burgundy/40"
+          <AutocompleteInput
+            type={draftType}
+            value={draftValue}
+            onChange={setDraftValue}
+            onPick={handlePick}
             autoFocus
           />
           <div className="flex gap-2">
             <button
-              onClick={() => { setAdding(false); setDraftId(''); }}
+              onClick={() => { setMode('idle'); setDraftValue(''); }}
               className="px-2 py-1 text-[11px] text-[#0e1745]/55 dark:text-white/50 hover:text-[#0e1745] dark:hover:text-white"
             >
               Cancelar
             </button>
+            <p className="ml-auto text-[10px] text-[#0e1745]/40 dark:text-white/35 self-center">
+              {submitting ? 'Agregando…' : 'Enter para agregar lo escrito'}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {mode === 'suggesting' && (
+        <div className="mb-3 p-3 rounded-lg bg-black/3 dark:bg-white/5 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 text-[11px] font-medium text-cl2-burgundy">
+              <Sparkles className="w-3 h-3" />
+              Centinela propone
+            </div>
             <button
-              onClick={submit}
-              disabled={!draftId.trim() || submitting}
-              className="ml-auto px-3 py-1 text-[11px] font-medium rounded bg-cl2-burgundy text-white hover:bg-cl2-burgundy/90 disabled:opacity-50"
+              onClick={() => setMode('idle')}
+              className="text-[11px] text-[#0e1745]/55 dark:text-white/50 hover:text-[#0e1745] dark:hover:text-white"
             >
-              {submitting ? 'Agregando…' : 'Agregar'}
+              Cerrar
             </button>
           </div>
+
+          {sLoading ? (
+            <div className="flex items-center justify-center gap-2 py-4 text-[11.5px] text-[#0e1745]/50 dark:text-white/45">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              Leyendo tu perfil…
+            </div>
+          ) : sError ? (
+            <div className="text-[11px] text-red-600 dark:text-red-400 leading-relaxed">
+              {sError}. Probá de nuevo o agregá manualmente.
+            </div>
+          ) : suggestions.length === 0 ? (
+            <div className="text-[11px] text-[#0e1745]/50 dark:text-white/45 leading-relaxed">
+              No tengo perfil suficiente todavía para sugerir. Volvé al onboarding o agregá manualmente.
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {suggestions.map((s, i) => {
+                const isAdded = addedIds.has(s.entity_id);
+                return (
+                  <div
+                    key={i}
+                    className={cn(
+                      'p-2 rounded-md border transition-colors',
+                      isAdded
+                        ? 'bg-cl2-burgundy/8 border-cl2-burgundy/20'
+                        : 'bg-white dark:bg-white/[0.04] border-black/8 dark:border-white/10',
+                    )}
+                  >
+                    <div className="flex items-start gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[12px] font-medium text-[#0e1745] dark:text-white">{s.label}</div>
+                        <div className="text-[10.5px] text-[#0e1745]/55 dark:text-white/50 mt-0.5 leading-snug">{s.rationale}</div>
+                      </div>
+                      <button
+                        onClick={() => !isAdded && void acceptSuggestion(s)}
+                        disabled={isAdded}
+                        className={cn(
+                          'flex-shrink-0 px-2 py-1 rounded text-[10px] font-medium transition-colors flex items-center gap-1',
+                          isAdded
+                            ? 'bg-cl2-burgundy/15 text-cl2-burgundy cursor-default'
+                            : 'bg-cl2-burgundy text-white hover:bg-cl2-burgundy/90',
+                        )}
+                      >
+                        {isAdded ? <><Check className="w-2.5 h-2.5" /> ok</> : <><Plus className="w-2.5 h-2.5" /> vigilar</>}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
