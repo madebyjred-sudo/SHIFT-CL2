@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { PodcastModal } from '@/components/podcasts/PodcastModal';
 import { SendToWorkspaceModal } from '@/components/SendToWorkspaceModal';
+import { CentinelaHeroStrip } from '@/components/centinela/CentinelaHeroStrip';
 import type { ImportSource } from '@/services/workspaceApi';
 
 import { cn } from '@/lib/utils';
@@ -761,25 +762,33 @@ export function AnimatedAiInput({
       {/* ── Hero intro ────────────────────────────────────────────────────── */}
       <AnimatePresence>
         {messages.length === 0 && !value && !isWorkspaceScope && (
-          <div className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full flex flex-col items-center gap-4 px-4">
-            <motion.h1
-              initial={{ opacity: 0, y: 15, filter: 'blur(6px)' }}
-              animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
-              exit={{ opacity: 0, y: -15, filter: 'blur(6px)' }}
-              className="font-display text-xl md:text-2xl lg:text-[26px] font-light text-[#0e1745]/75 dark:text-white/75 text-center tracking-tight inline-flex items-baseline justify-center gap-2 whitespace-nowrap"
-            >
-              <span className="font-light">¿Qué necesitás</span>
-              <TextLoop
-                className="font-medium"
-                style={{ color: agentInfo.color }}
+          <>
+            {/* Centinela strip — sits above the rotating headline. The
+                component handles its own three states (alerts, calm,
+                empty) and self-loads on mount. Stays out of the way
+                if the user is unauthenticated (silent failure). */}
+            <CentinelaHeroStrip />
+
+            <div className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full flex flex-col items-center gap-4 px-4">
+              <motion.h1
+                initial={{ opacity: 0, y: 15, filter: 'blur(6px)' }}
+                animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+                exit={{ opacity: 0, y: -15, filter: 'blur(6px)' }}
+                className="font-display text-xl md:text-2xl lg:text-[26px] font-light text-[#0e1745]/75 dark:text-white/75 text-center tracking-tight inline-flex items-baseline justify-center gap-2 whitespace-nowrap"
               >
-                {getAgentBestUses(selectedAgent).map((text) => (
-                  <span key={text}>{text}</span>
-                ))}
-              </TextLoop>
-              <span className="font-light text-[#0e1745]/75 dark:text-white/75 -ml-1.5">?</span>
-            </motion.h1>
-          </div>
+                <span className="font-light">¿Qué necesitás</span>
+                <TextLoop
+                  className="font-medium"
+                  style={{ color: agentInfo.color }}
+                >
+                  {getAgentBestUses(selectedAgent).map((text) => (
+                    <span key={text}>{text}</span>
+                  ))}
+                </TextLoop>
+                <span className="font-light text-[#0e1745]/75 dark:text-white/75 -ml-1.5">?</span>
+              </motion.h1>
+            </div>
+          </>
         )}
       </AnimatePresence>
 
