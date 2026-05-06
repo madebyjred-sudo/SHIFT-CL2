@@ -17,28 +17,28 @@ const almas: Alma[] = [
   {
     glyph: "⚖",
     name: "Lexa",
-    role: "Plenario",
+    role: "La que responde",
     toneVar: "--cl2-burgundy",
     rule: "Si el archivo no respalda, se detiene.",
-    signal: "Cita acta + timecode al segundo",
+    signal: "Pregunta corta, cita al folio",
     angle: 225,
   },
   {
     glyph: "📑",
     name: "Atlas",
-    role: "Comisiones",
+    role: "El que arma",
     toneVar: "--cl2-ochre",
-    rule: "No habla de leyes que no estén en SIL.",
-    signal: "Cruza dictamen + voto nominal",
+    rule: "Construye briefs, matrices, presentaciones.",
+    signal: "Encargá un trabajo, llega listo",
     angle: 330,
   },
   {
     glyph: "📡",
     name: "Centinela",
-    role: "Watchlist",
+    role: "El que vigila",
     toneVar: "--cl2-rose",
-    rule: "Penaliza prensa, prefiere el acta.",
-    signal: "Bandera de confianza explícita",
+    rule: "Mira el archivo y la agenda 24 horas.",
+    signal: "Te avisa antes que nadie",
     angle: 90,
   },
 ];
@@ -198,17 +198,16 @@ export const Almas = () => {
   };
 
   return (
-    <Section id="almas" eyebrow="Tres almas · un equipo" kicker="04 / quién responde">
+    <Section id="almas" eyebrow="Tres oficios · un equipo" kicker="03 / con quién trabajás">
       <Reveal>
         <div className="mb-12 max-w-[820px]">
           <h2 className="display display--lg">
             No es un chat. Son <em>tres asesores</em>
             <br />
-            que leen lo mismo, distinto.
+            que hacen tres trabajos distintos.
           </h2>
           <p className="lede mt-5">
-            Mismo archivo en el centro, tres criterios distintos alrededor. Cada uno con su
-            umbral de confianza y su forma de citar. Ninguno inventa.
+            Cada uno con un oficio claro. Lexa responde con cita. Atlas arma el trabajo. Centinela vigila lo que vos no podés mirar todo el día. Trabajan juntos sobre la misma memoria.
           </p>
         </div>
       </Reveal>

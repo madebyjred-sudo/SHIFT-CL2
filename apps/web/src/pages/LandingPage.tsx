@@ -26,11 +26,12 @@
 import { ViewportFrame } from '@/components/landing/cl2/ViewportFrame';
 import { Hero } from '@/components/landing/cl2/Hero';
 import { Problem } from '@/components/landing/cl2/Problem';
-import { Capabilities } from '@/components/landing/cl2/Capabilities';
+import { MemoriaViva } from '@/components/landing/cl2/MemoriaViva';
 import { Almas } from '@/components/landing/cl2/Almas';
+import { Capabilities } from '@/components/landing/cl2/Capabilities';
 import { Comparison } from '@/components/landing/cl2/Comparison';
 import { LiveProof } from '@/components/landing/cl2/LiveProof';
-import { Testimonials } from '@/components/landing/cl2/Testimonials';
+import { CtaCloser } from '@/components/landing/cl2/CtaCloser';
 import { FAQ } from '@/components/landing/cl2/FAQ';
 import { Manifesto } from '@/components/landing/cl2/Manifesto';
 import { Footer } from '@/components/landing/cl2/Footer';
@@ -43,13 +44,25 @@ export function LandingPage() {
       <ViewportFrame />
       <div className="relative z-10">
         <main>
+          {/* Flujo psicológico:
+              Hero          → status positioning ("el mejor preparado")
+              Problem       → loss aversion ("lo que perdés sin esto")
+              MemoriaViva   → authority sin alarde técnico (cerebro creciente)
+              Almas         → personification (3 oficios, no features)
+              Capabilities  → escenarios concretos (availability heuristic)
+              Comparison    → contrast effect (vs IA general / archivo nativo / método tradicional)
+              LiveProof     → reciprocity + IKEA effect (probalo antes de pedir)
+              CtaCloser     → scarcity ("10 fracciones en 2026")
+              FAQ           → regret aversion (resolver dudas residuales)
+              Manifesto     → unity principle + Lindy effect (cierre filosófico) */}
           <Hero />
           <Problem />
-          <Capabilities />
+          <MemoriaViva />
           <Almas />
+          <Capabilities />
           <Comparison />
           <LiveProof />
-          <Testimonials />
+          <CtaCloser />
           <FAQ />
           <Manifesto />
         </main>

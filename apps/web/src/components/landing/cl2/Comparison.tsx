@@ -5,21 +5,21 @@ import { Section, Reveal } from "./Primitives";
 type Cell = string | "check" | "cross" | "partial" | "manual";
 
 const rows: [string, Cell, Cell, Cell, Cell][] = [
-  ["Pensado para", "Despachos legislativos, prensa, análisis", "Empresas con monitoreo regulatorio", "Uso general", "Quien tenga tiempo"],
-  ["Cobertura del archivo", "SIL + comisiones + plenarias desde 1998", "Proyectos en curso, decretos", "Lo que esté en internet abierto", "PDFs descargados a mano"],
-  ["Citas verificables", "check", "partial", "cross", "manual"],
-  ["Cita al folio / minuto", "check", "cross", "cross", "manual"],
-  ["Voto nominal cruzable", "check", "cross", "cross", "manual"],
-  ["Diff entre versiones", "check", "cross", "cross", "manual"],
-  ["Adaptación al despacho", "check", "cross", "cross", "cross"],
-  ["Tiempo a una respuesta", "~ 2 segundos", "~ 1 día (por reportes)", "~ 30 segundos sin cita", "~ días"],
+  ["Pensado para", "Despachos legislativos costarricenses", "Cualquiera", "Quien sepa buscar", "Quien tenga tiempo"],
+  ["Conoce el archivo de la Asamblea", "check", "cross", "partial", "manual"],
+  ["Cita verificable al folio o minuto", "check", "cross", "cross", "manual"],
+  ["No inventa cuando no sabe", "check", "cross", "cross", "manual"],
+  ["Recuerda las posiciones de tu despacho", "check", "cross", "cross", "cross"],
+  ["Vigila lo que cambia mientras dormís", "check", "cross", "cross", "cross"],
+  ["Te entrega el brief y la presentación", "check", "cross", "partial", "manual"],
+  ["Tiempo a una respuesta útil", "~ 2 segundos", "~ 30 segundos sin cita", "~ horas buscando", "~ días"],
 ];
 
 const cols = [
   { name: "cl2", hint: "memoria institucional", ours: true },
-  { name: "Alertas corporativas", hint: "monitoreo de impacto", ours: false },
-  { name: "IA general", hint: "asistente abierto", ours: false },
-  { name: "Status quo manual", hint: "PDFs + carpetas", ours: false },
+  { name: "IA general", hint: "responde sobre todo, no sabe nada de la Asamblea", ours: false },
+  { name: "El archivo nativo", hint: "guarda los documentos, no los lee", ours: false },
+  { name: "El método tradicional", hint: "carpetas, PDFs y memoria del asesor", ours: false },
 ];
 
 const renderCell = (v: Cell, ours: boolean) => {
@@ -45,16 +45,16 @@ export const Comparison = () => {
   const [hoverOursCol, setHoverOursCol] = useState(false);
 
   return (
-    <Section id="comparativa" eyebrow="Comparativa honesta" kicker="05 / contra qué">
+    <Section id="comparativa" eyebrow="cl2 vs lo que ya usaban" kicker="05 / contra qué">
       <Reveal>
         <div className="flex items-end justify-between gap-8 flex-wrap mb-10">
           <h2 className="display display--lg max-w-[720px]">
-            No competimos por alertas.
+            Lo que ya tenían
             <br />
-            <em>Competimos por la cita.</em>
+            <em>no estaba pensado para esto.</em>
           </h2>
           <p className="lede max-w-[380px] text-[15px]">
-            Cada herramienta resuelve algo. Esta tabla muestra qué resuelve cada una mejor.
+            Cada alternativa resuelve algo. Ninguna estaba diseñada para el día a día de un despacho legislativo costarricense — hasta cl2.
           </p>
         </div>
       </Reveal>
@@ -204,7 +204,7 @@ export const Comparison = () => {
       </Reveal>
 
       <p className="mt-5 text-[11.5px] text-cl2-ink/50 font-mono">
-        Comparativa basada en pruebas internas · marzo 2026 · sin nombrar marcas comerciales
+        Tabla honesta · sin nombrar marcas · cada herramienta hace bien lo que fue diseñada para hacer
       </p>
     </Section>
   );

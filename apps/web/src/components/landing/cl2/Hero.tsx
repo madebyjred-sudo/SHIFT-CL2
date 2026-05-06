@@ -38,17 +38,17 @@ export const Hero = () => (
               textWrap: "balance" as const,
             }}
           >
-            Tu despacho ya pensó esto antes.
+            El mejor preparado de la sala.
             <br />
-            <em className="italic-serif text-cl2-burgundy">cl2 lo recuerda.</em>
+            <em className="italic-serif text-cl2-burgundy">
+              Cada votación, cada audiencia, cada nota.
+            </em>
           </h1>
         </Reveal>
 
         <Reveal delay={120}>
-          <p className="lede" style={{ maxWidth: 680, marginBottom: 48 }}>
-            Inteligencia legislativa con memoria institucional. Cada acta, cada expediente,
-            cada moción de la Asamblea — indexada y citable. La IA responde con el folio
-            exacto, no con una invención.
+          <p className="lede" style={{ maxWidth: 720, marginBottom: 48 }}>
+            Trabajá un proyecto entero en un solo espacio. Consultá rápido durante la sesión y citá al folio. Recibí aviso cuando algo importante cambia — antes que nadie. Para diputados, asesoras y equipos de fracción de Costa Rica.
           </p>
         </Reveal>
 

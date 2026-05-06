@@ -2,10 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { Section, Reveal } from "./Primitives";
 
 const stats = [
-  { value: 60, suffix: "%", l: "Del conocimiento de un despacho se va con el asesor que renuncia" },
-  { value: 21620, suffix: "", scaleK: true, l: "Expedientes en el SIL, la mayoría sin búsqueda funcional", display: "21.6k" },
-  { value: 4, suffix: "-7d", l: "Tiempo promedio para reconstruir el historial de un proyecto" },
-  { value: 0, suffix: "", l: "Herramientas con citas verificables al acta original", display: "≈ 0" },
+  { value: 60, suffix: "%", l: "Del conocimiento del despacho se va con el asesor que renuncia." },
+  { value: 21620, suffix: "", scaleK: true, l: "Expedientes que ningún humano puede leer entero. cl2 sí.", display: "21.6k" },
+  { value: 7, suffix: "d → 7 min", l: "Reconstruir un proyecto a mano, contra reconstruirlo con cl2." },
+  { value: 0, suffix: "", l: "Herramientas con cita verificable al acta original. Hasta cl2.", display: "≈ 0" },
 ];
 
 const Counter = ({ to, suffix, display }: { to: number; suffix: string; display?: string }) => {
@@ -45,7 +45,7 @@ const Counter = ({ to, suffix, display }: { to: number; suffix: string; display?
 };
 
 export const Problem = () => (
-  <Section id="problema" eyebrow="El problema" kicker="01 / la memoria">
+  <Section id="problema" eyebrow="Lo que perdés sin esto" kicker="01 / la memoria">
     <div className="grid gap-12 md:gap-20 md:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)] items-start">
       <Reveal>
         <h2 className="display display--lg">
@@ -58,13 +58,10 @@ export const Problem = () => (
       <Reveal delay={120}>
         <div className="pt-3 text-[16px] leading-[1.65] text-cl2-ink/[0.78] flex flex-col gap-4">
           <p>
-            El conocimiento institucional vive en cabezas, en carpetas compartidas, en chats que
-            nadie más puede leer. Cuando un asesor se va — y se van seguido — el despacho pierde
-            años de criterio, posiciones tomadas, debates ganados.
+            El conocimiento del despacho vive en cabezas, en carpetas compartidas, en chats que nadie más puede leer. Cuando un asesor se va — y se van seguido — el despacho pierde años de criterio, posiciones tomadas, debates ganados.
           </p>
           <p>
-            La Asamblea legisla sobre lo que ya legisló. Las comisiones repiten preguntas que ya
-            fueron respondidas. La prensa busca en PDFs lo que algún archivo digital ya tenía.
+            La Asamblea legisla sobre lo que ya legisló. Las comisiones repiten preguntas que ya tenían respuesta. La prensa busca a mano lo que algún archivo digital ya guardaba. Tu equipo improvisa lo que tu propia institución sabía hace tres años.
           </p>
         </div>
       </Reveal>

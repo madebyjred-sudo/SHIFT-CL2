@@ -58,7 +58,7 @@ const beforeAfter = [
 ];
 
 export const LiveProof = () => (
-  <Section id="prueba" eyebrow="Cómo se usa · un caso real" kicker="06 / qué cambia en tu día">
+  <Section id="prueba" eyebrow="Probalo vos mismo" kicker="06 / no nos creas">
     <Reveal>
       <div className="flex items-end justify-between gap-8 flex-wrap mb-12">
         <h2 className="display display--lg max-w-[760px]">

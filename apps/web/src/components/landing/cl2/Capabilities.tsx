@@ -27,154 +27,154 @@ type Axis = {
 /* ─── Content ─────────────────────────────── */
 const axes: Axis[] = [
   {
-    key: "archivo",
-    label: "Archivo vivo",
-    blurb: "SIL, plenarias y expedientes conectados en tiempo real.",
+    key: "dia-a-dia",
+    label: "El día a día",
+    blurb: "Trabajá un proyecto entero en un solo lugar. Citá al folio.",
     tone: "hsl(var(--cl2-burgundy))",
     caps: [
       {
         n: "01",
-        agent: "Lexa",
+        agent: "Atlas",
         icon: "archive",
-        title: "Memoria del archivo",
+        title: "Un proyecto, un solo espacio.",
         description:
-          "Miles de expedientes con texto recuperable desde 1998. Pregunta natural, respuesta con folio.",
-        prompt: "Cobertura del Exp. 24.018 desde su entrada al SIL.",
+          "Toda la información del expediente vive en una sola página de trabajo. Texto base, dictámenes, votaciones cruzadas, posiciones de bancada. Lo armás en una mañana. Lo retomás cuatro meses después como si nunca te hubieras ido.",
+        prompt: "Armame el espacio del Exp. 24.018.",
         reply: {
-          lead: "Ingresó el 12-mar-2024 a Hacendarios. Tres dictámenes hasta hoy: mayoría (07-ago), minoría FA (07-ago), revisión técnica (19-sep).",
-          cite: "exp. 24.018 fl. 1.247",
-          tail: "Texto base + las tres versiones disponibles para diff.",
+          lead: "Espacio creado. Texto base, tres dictámenes (mayoría, minoría FA, técnico), votación de 19-sep y posiciones de bancada — listos para revisar.",
+          cite: "exp. 24.018",
+          tail: "Reanudable. Editable. Compartible con tu equipo.",
         },
-        tags: ["SIL en vivo", "Texto completo", "Cita al folio"],
+        tags: ["Un solo espacio", "Memoria del proyecto", "Reanudable"],
       },
       {
         n: "02",
         agent: "Lexa",
-        icon: "play",
-        title: "Plenarias indexadas",
+        icon: "quote",
+        title: "Cita verificable, sin invento.",
         description:
-          "Sesiones del periodo activo transcritas con timecode al segundo. No revisás cuatro horas de video.",
-        prompt: "¿Qué dijo Calderón sobre el art. 14 en la última plenaria?",
+          "Pregunta corta, dato exacto. cl2 cita el folio o el minuto del plenario. Si no está en el archivo, dice 'no encontré' y se detiene.",
+        prompt: "Cobertura del Exp. 24.018 desde su entrada al archivo.",
         reply: {
-          lead: "Sesión 142, 22-abr-2026. Cuestionó el inciso b) por incompatibilidad con el art. 7 constitucional.",
-          cite: "acta 142 §31",
-          tail: "Link al minuto 1:57:26 del video oficial.",
+          lead: "Ingresó el 12-mar-2024 a Hacendarios. Tres dictámenes hasta hoy: mayoría (07-ago), minoría FA (07-ago), revisión técnica (19-sep).",
+          cite: "exp. 24.018 fl. 1.247",
+          tail: "Las tres versiones disponibles para comparar.",
         },
-        tags: ["Transcripción", "Timecode", "Link al minuto"],
+        tags: ["Cita al folio", "Sin invento", "Cobertura entera"],
       },
     ],
   },
   {
-    key: "lectura",
-    label: "Lectura editorial",
-    blurb: "Reglamento navegable y diff entre versiones de dictamen.",
+    key: "durante-sesion",
+    label: "Durante la sesión",
+    blurb: "Mientras la sesión sigue, vos te adelantás.",
     tone: "hsl(var(--cl2-ochre))",
     caps: [
       {
         n: "03",
         agent: "Lexa",
-        icon: "book",
-        title: "Reglamento navegable",
+        icon: "play",
+        title: "Mientras la sesión sigue, vos te adelantás.",
         description:
-          "96 artículos cruzables. Pregunta procedimental → artículo + plazo + ejemplo del SIL.",
-        prompt: "Plazo de dictamen en comisión.",
+          "Sin salir del plenario, una consulta corta te trae el dato exacto para tu próximo turno. Qué dijo el otro diputado en marzo. Qué dice el reglamento sobre lo que están proponiendo. Llegás más fuerte improvisando que el otro habiéndose preparado tres días.",
+        prompt: "¿Qué dijo Calderón sobre el art. 14 en la última plenaria?",
         reply: {
-          lead: "Art. 113: veintidós días hábiles desde el ingreso del expediente, prorrogables por una sola vez.",
-          cite: "Art. 113",
-          tail: "Caso reciente: Exp. 23.901 prorrogado el 04-mar-2025.",
+          lead: "Sesión 142, 22-abr-2026. Cuestionó el inciso b) por incompatibilidad con el art. 7 constitucional.",
+          cite: "acta 142 §31",
+          tail: "Link al minuto 1:57:26. Tres minutos de contexto antes y después.",
         },
-        tags: ["96 artículos", "Plazos", "Precedentes"],
+        tags: ["En plenario", "Consulta corta", "Link al minuto"],
       },
       {
         n: "04",
-        agent: "Atlas",
-        icon: "scale",
-        title: "Cruce de versiones",
+        agent: "Lexa",
+        icon: "compass",
+        title: "Lo que dijo el otro, en segundos.",
         description:
-          "Diff entre dictamen mayoritario, minoritario y texto base. Ves qué artículo cambió y quién lo cambió.",
-        prompt: "Diff entre dictámenes del Exp. 24.018.",
+          "Cualquier diputado, cualquier intervención. cl2 lo encuentra y te trae el contexto antes de que el otro termine de hablar.",
+        prompt: "¿Cuántas veces ha votado Hernández contra reformas tributarias?",
         reply: {
-          lead: "Mayoría conserva el art. 14. Minoría FA elimina el inciso b) y reescribe el c) endureciendo el umbral del 4% al 6%.",
-          cite: "exp. 24.018 fl. 0.892",
-          tail: "Tres artículos con cambios sustantivos. El resto idéntico al texto base.",
+          lead: "Cuatro veces este período. Tres por motivos fiscales (24.018, 24.087, 23.901). Una por procedimiento (24.155).",
+          cite: "actas 134, 137, 141, 144",
+          tail: "Resumen de argumentos por cada votación, a un click.",
         },
-        tags: ["Diff editorial", "Mayoría / minoría", "Texto base"],
+        tags: ["Histórico", "Comparativo", "Por diputado"],
       },
     ],
   },
   {
-    key: "despacho",
-    label: "Trabajo de despacho",
-    blurb: "Briefings de votación y voto nominal cruzable por fracción.",
+    key: "antes-votacion",
+    label: "Antes de la votación",
+    blurb: "El brief y la presentación de mañana, listos esta noche.",
     tone: "hsl(var(--cl2-rose))",
     caps: [
       {
         n: "05",
         agent: "Atlas",
-        icon: "quote",
-        title: "Briefings de votación",
+        icon: "scale",
+        title: "El brief para mañana, listo esta noche.",
         description:
-          "Minoría, mayoría y argumentos clave de un expediente, listos para reunión de bancada de las 11pm.",
-        prompt: "Dame minoría + mayoría del Exp. 24.018 con argumentos clave.",
+          "Pedile el análisis: posición de cada bancada, riesgo reputacional, dos argumentos a favor y dos en contra. cl2 lo escribe en una página de trabajo. Vos lo revisás, lo retocás, lo presentás. Llegás a la reunión a hablar, no a leer.",
+        prompt: "Brief del 24.018: posición de cada bancada, dos argumentos por lado.",
         reply: {
           lead: "Mayoría (PUSC, PLN): viabilidad fiscal, alineación con la regla del 6%. Minoría (FA, RN): regresividad del inciso c), sin evaluación de impacto.",
           cite: "exp. 24.018 fl. 1.106",
-          tail: "Tres argumentos por bando, listos para imprimir.",
+          tail: "Tres argumentos por bando + riesgo reputacional, listos para imprimir.",
         },
-        tags: ["Briefing nocturno", "Argumentos", "Posiciones"],
+        tags: ["Brief nocturno", "Argumentos por bando", "Listo para reunión"],
       },
       {
         n: "06",
         agent: "Atlas",
-        icon: "compass",
-        title: "Voto nominal cruzable",
+        icon: "sparkles",
+        title: "La presentación lista, con tu tono.",
         description:
-          "Cómo votó cada quien en cada artículo. Cruzable por fracción, por tema, por período.",
-        prompt: "Votos cruzados FA-PUSC en reformas de salud, 2022-2026.",
+          "Decile la audiencia, el tono y los lineamientos del despacho. cl2 te entrega la presentación editable, con la voz de tu fracción mantenida en cada slide.",
+        prompt: "Pasá esto a presentación. Audiencia: comisión Hacendarios. Tono: persuasivo.",
         reply: {
-          lead: "Coincidencia del 31% en 47 votaciones nominales sobre salud. Más alto: presupuestos CCSS (68%). Más bajo: regulación farmacéutica (12%).",
-          cite: "47 actas indexadas",
-          tail: "Tabla nominal por diputado y artículo.",
+          lead: "Doce slides listas. Cubrimos las dos posturas, el riesgo fiscal, dos casos comparados. Mantengo la voz de tu fracción y los lineamientos publicados.",
+          cite: "brief Exp. 24.018",
+          tail: "Editable. Lista para descargar o compartir.",
         },
-        tags: ["Voto nominal", "Por fracción", "Histórico"],
+        tags: ["Presentación editable", "Con tu tono", "En cuatro minutos"],
       },
     ],
   },
   {
-    key: "memoria",
+    key: "memoria-despacho",
     label: "Memoria del despacho",
-    blurb: "Lineamientos curados por tu equipo + watchlist sin ruido.",
+    blurb: "Lo que tu despacho aprendió, escrito. Lo que importa, vigilado.",
     tone: "hsl(var(--cl2-burgundy-deep))",
     caps: [
       {
         n: "07",
-        agent: "Operador",
-        icon: "sparkles",
-        title: "Lineamientos editoriales",
+        agent: "Centinela",
+        icon: "radar",
+        title: "Lo que importa pasa cuando no estás mirando.",
         description:
-          "El operador escribe cómo le gusta responder. Esos lineamientos quedan inyectados al equipo para siempre.",
-        prompt: "Publicar lineamiento — formato de briefing pre-votación.",
+          "Decile qué seguir — un expediente, un diputado, un tema. cl2 vigila el archivo y la agenda 24 horas. Cuando algo cambia de verdad, te avisa con el contexto pegado. Te enterás del cambio antes que la prensa.",
+        prompt: "Avisame si cambia el dictamen del 24.087.",
         reply: {
-          lead: "Lineamiento #14 publicado. Todo briefing pre-votación abre con: posición de fracción, dos argumentos a favor, dos en contra, riesgo reputacional.",
-          cite: "lineamiento 14 · activo",
-          tail: "Aplica a Atlas y Lexa. Versión anterior archivada.",
+          lead: "Vigilancia activa. Última alerta: 18-abr-2026, 09:14. Sustitución del dictamen mayoritario; cambió el art. 9 y se eliminó el transitorio II.",
+          cite: "exp. 24.087 fl. 0.418",
+          tail: "Solo lo sustantivo. Sin ruido. Sin alertas que se borran sin leer.",
         },
-        tags: ["Curaduría humana", "Voz del despacho", "Lock-in"],
+        tags: ["Vigilancia 24/7", "Solo lo sustantivo", "Antes que la prensa"],
       },
       {
         n: "08",
-        agent: "Centinela",
-        icon: "radar",
-        title: "Watchlist editorial",
+        agent: "Operador",
+        icon: "book",
+        title: "El conocimiento se queda, aunque tu equipo cambie.",
         description:
-          "Seguís un expediente, una comisión o un legislador. Recibís solo cambios sustantivos, con contexto pegado.",
-        prompt: "Alertame cuando cambie el dictamen del 24.087.",
+          "Lo que tu despacho aprendió queda escrito en cl2. Posiciones tomadas, argumentos usados, precedentes citados. Cuando entra alguien nuevo, no empieza de cero. Cuando se va alguien, no se lleva la institución encima.",
+        prompt: "Publicar lineamiento — todo brief abre con postura, dos pros, dos contras.",
         reply: {
-          lead: "Watch activo. Última alerta: 18-abr-2026, 09:14. Sustitución del dictamen mayoritario; cambió el art. 9 y se eliminó el transitorio II.",
-          cite: "exp. 24.087 fl. 0.418",
-          tail: "Confianza alta. Fuente primaria: SIL.",
+          lead: "Lineamiento #14 publicado. cl2 lo aplica en cada brief desde ya. Aplica a Lexa y Atlas. Versión anterior archivada.",
+          cite: "lineamiento 14 · activo",
+          tail: "Editable cuando quieras. Auditable siempre.",
         },
-        tags: ["Solo sustantivo", "Contexto pegado", "Sin ruido"],
+        tags: ["Voz del despacho", "Permanente", "Memoria recuperada"],
       },
     ],
   },
@@ -458,18 +458,16 @@ export const Capabilities = () => {
   const [openKey, setOpenKey] = useState<string | null>(axes[0].key);
 
   return (
-    <Section id="producto" eyebrow="Ocho capacidades, cuatro ejes" kicker="02 / qué hace">
+    <Section id="producto" eyebrow="Lo que cambia en tu día" kicker="04 / qué hace">
       <Reveal>
         <div className="mb-12 max-w-[820px]">
           <h2 className="display display--lg">
-            Una herramienta para el despacho,
+            La diferencia entre llegar a leer
             <br />
-            <em>no para el público general.</em>
+            <em>y llegar a hablar.</em>
           </h2>
           <p className="lede mt-5">
-            Hecha con asesores legislativos, pensada para reuniones de bancada, dictámenes en
-            revisión y plenarios en vivo. Cada eje agrupa capacidades conectadas al archivo real
-            de la Asamblea.
+            Ocho situaciones reales del trabajo legislativo, cuatro ejes. Pasá el cursor sobre cada una para ver cómo responde cl2 — son consultas reales contra archivo real.
           </p>
         </div>
       </Reveal>
