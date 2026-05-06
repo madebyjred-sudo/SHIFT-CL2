@@ -247,51 +247,13 @@ export const HeroDashboard = () => {
         <div className="w-[60px]" />
       </div>
 
-      {/* Body grid — single column on mobile (sidebars are hidden lg:flex,
-          but the inline grid template would still reserve 220+260px
-          tracks and squeeze the conversation off-screen on a 375px
-          phone). The lg+ breakpoint restores the original 3-col chrome. */}
-      <div className="grid min-h-[460px] grid-cols-1 lg:[grid-template-columns:220px_minmax(0,1fr)_260px]">
-        {/* Sidebar (decorative) */}
-        <aside className="hidden lg:flex border-r border-cl2-ink/[0.06] bg-cl2-ink/[0.015] p-4 flex-col gap-5">
-          <div className="flex items-center gap-2 px-2.5 py-2 bg-white border border-cl2-ink/[0.08] rounded-lg text-[12px] text-cl2-ink/50">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4"/></svg>
-            <span className="flex-1">Buscar en archivo…</span>
-            <span className="font-mono text-[10px] px-1.5 py-0.5 bg-cl2-ink/[0.06] rounded text-cl2-ink/45">⌘K</span>
-          </div>
-
-          <SidebarSection
-            title="Mis consultas"
-            items={[
-              { l: "Demo en curso", s: "ahora", active: true },
-              { l: "Voto Ley de Aguas", s: "ayer" },
-              { l: "Comisión Hacienda mar.", s: "2 días" },
-              { l: "Posiciones del PLN", s: "5 días" },
-            ]}
-          />
-          <SidebarSection
-            title="Watchlist"
-            items={[
-              { l: "Reforma fiscal", s: "3 cambios", dot: "hsl(var(--cl2-accent))" },
-              { l: "Comisión Especial", s: "1 cambio", dot: "hsl(var(--cl2-burgundy))" },
-              { l: "Diputado Mora", s: "sin cambios", dot: "hsl(var(--cl2-ink) / 0.2)" },
-            ]}
-          />
-
-          <div className="mt-auto pt-3.5 border-t border-cl2-ink/[0.08] flex items-center gap-2.5">
-            <div
-              className="w-[26px] h-[26px] rounded-full flex items-center justify-center text-white text-[10px] font-semibold"
-              style={{ background: "linear-gradient(135deg, hsl(var(--cl2-burgundy)), hsl(var(--cl2-rose)))" }}
-            >
-              MR
-            </div>
-            <div className="min-w-0">
-              <div className="text-[12px] text-cl2-ink font-medium">María R.</div>
-              <div className="text-[10.5px] text-cl2-ink/50">Redacción · prensa</div>
-            </div>
-          </div>
-        </aside>
-
+      {/* Body grid — chat (full width) on mobile, chat + fuentes citadas
+          en desktop. Removed the decorative left sidebar (Mis consultas /
+          Watchlist / María R.) — none of that funcionaba en el demo
+          público y restaba credibilidad al chat real. La barra de
+          fuentes a la derecha se queda porque ESAS son citas reales que
+          aparecen en vivo cuando Lexa responde. */}
+      <div className="grid min-h-[460px] grid-cols-1 lg:[grid-template-columns:minmax(0,1fr)_260px]">
         {/* Center — live conversation */}
         <div className="flex flex-col min-w-0">
           <div className="px-6 py-3 border-b border-cl2-ink/[0.06] flex items-center justify-between font-mono text-[11px] text-cl2-ink/55 tracking-wider uppercase">
@@ -636,36 +598,6 @@ async function streamSse(res: Response, onChunk: (chunk: ServerChunk) => void): 
   }
 }
 
-// ─── Sidebar (decorative — original draft) ───────────────────────────
-
-const SidebarSection = ({
-  title,
-  items,
-}: {
-  title: string;
-  items: { l: string; s: string; active?: boolean; dot?: string }[];
-}) => (
-  <div>
-    <div className="font-mono text-[9.5px] uppercase tracking-widest text-cl2-ink/40 font-semibold mb-2">
-      {title}
-    </div>
-    <div className="flex flex-col gap-0.5">
-      {items.map((it) => (
-        <div
-          key={it.l}
-          className={`px-2.5 py-1.5 rounded-md flex items-center gap-2 cursor-pointer ${
-            it.active ? "bg-white border border-cl2-ink/[0.08]" : "border border-transparent"
-          }`}
-        >
-          {it.dot && <span className="dot flex-shrink-0" style={{ background: it.dot }} />}
-          <div className="min-w-0 flex-1">
-            <div className={`text-[12px] truncate ${it.active ? "text-cl2-ink font-medium" : "text-cl2-ink/75"}`}>
-              {it.l}
-            </div>
-            <div className="text-[10px] text-cl2-ink/45 font-mono">{it.s}</div>
-          </div>
-        </div>
-      ))}
-    </div>
-  </div>
-);
+// (Removed SidebarSection — el sidebar decorativo del demo público se sacó
+// porque "Mis consultas / Watchlist / María R." no funcionaba en realidad
+// y restaba credibilidad al chat real que sí funciona.)

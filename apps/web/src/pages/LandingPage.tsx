@@ -30,7 +30,6 @@ import { MemoriaViva } from '@/components/landing/cl2/MemoriaViva';
 import { Almas } from '@/components/landing/cl2/Almas';
 import { Capabilities } from '@/components/landing/cl2/Capabilities';
 import { Comparison } from '@/components/landing/cl2/Comparison';
-import { LiveProof } from '@/components/landing/cl2/LiveProof';
 import { CtaCloser } from '@/components/landing/cl2/CtaCloser';
 import { FAQ } from '@/components/landing/cl2/FAQ';
 import { Manifesto } from '@/components/landing/cl2/Manifesto';
@@ -49,19 +48,23 @@ export function LandingPage() {
               Problem       → loss aversion ("lo que perdés sin esto")
               MemoriaViva   → authority sin alarde técnico (cerebro creciente)
               Almas         → personification (3 oficios, no features)
-              Capabilities  → escenarios concretos (availability heuristic)
+              Capabilities  → escenarios concretos + CTAs accionables
               Comparison    → contrast effect (vs IA general / archivo nativo / método tradicional)
-              LiveProof     → reciprocity + IKEA effect (probalo antes de pedir)
               CtaCloser     → scarcity ("10 fracciones en 2026")
               FAQ           → regret aversion (resolver dudas residuales)
-              Manifesto     → unity principle + Lindy effect (cierre filosófico) */}
+              Manifesto     → unity principle + Lindy effect (cierre filosófico)
+
+              Removed: LiveProof — el caso narrativo "Reconstruir una
+              discusión completa, en lo que dura un café" se sentía
+              demasiado diseñado / artificial al lado del demo real ya
+              presente en el Hero. La demo del Hero + las CTAs en
+              Capabilities cubren mejor el "probalo vos mismo". */}
           <Hero />
           <Problem />
           <MemoriaViva />
           <Almas />
           <Capabilities />
           <Comparison />
-          <LiveProof />
           <CtaCloser />
           <FAQ />
           <Manifesto />

@@ -24,13 +24,17 @@
  *   - Lindy: el último renglón promete crecimiento ("cada mes suma más
  *     memoria") — proyecta cl2 como institución, no como producto nuevo.
  */
-import { useState, useEffect, useRef } from "react";
+import { useState } from "react";
 import { motion } from "motion/react";
 import { Section, Reveal } from "./Primitives";
 
 // ─── Memorias (data) ────────────────────────────────────────────────────
 type Memoria = {
   num: string;
+  /** Etiqueta corta visible debajo del nodo en la constelación. La regla:
+   *  el lector tiene que entender de qué se trata SIN tener que esperar
+   *  a que el panel rote. "Memoria 01" no decía nada; "El archivo" sí. */
+  shortLabel: string;
   title: string;
   countLabel: string;
   blurb: string;
@@ -41,6 +45,7 @@ type Memoria = {
 const memorias: Memoria[] = [
   {
     num: "01",
+    shortLabel: "El archivo",
     title: "El archivo",
     countLabel: "21.620 expedientes",
     blurb:
@@ -49,6 +54,7 @@ const memorias: Memoria[] = [
   },
   {
     num: "02",
+    shortLabel: "El plenario",
     title: "Cada palabra del plenario",
     countLabel: "235 sesiones transcritas",
     blurb:
@@ -57,6 +63,7 @@ const memorias: Memoria[] = [
   },
   {
     num: "03",
+    shortLabel: "El Reglamento",
     title: "El Reglamento",
     countLabel: "96 artículos",
     blurb:
@@ -65,6 +72,7 @@ const memorias: Memoria[] = [
   },
   {
     num: "04",
+    shortLabel: "La agenda",
     title: "La agenda viva",
     countLabel: "Lo que viene esta semana",
     blurb:
@@ -73,6 +81,7 @@ const memorias: Memoria[] = [
   },
   {
     num: "05",
+    shortLabel: "Tu despacho",
     title: "La voz de tu despacho",
     countLabel: "Tus lineamientos",
     blurb:
@@ -212,12 +221,16 @@ const MemoriaNode = ({
             : "bg-cl2-burgundy/85 ring-cl2-burgundy/8 group-hover:scale-110"
         }`}
       />
-      {/* label */}
+      {/* label — usamos el nombre real del concepto, no "Memoria 01".
+          La razón: el usuario tiene que poder leer la constelación sin
+          esperar a que el panel rote por él. */}
       <span
-        className="absolute left-1/2 -translate-x-1/2 mt-3 whitespace-nowrap font-mono text-[10px] uppercase tracking-[0.2em] text-cl2-ink/55"
+        className={`absolute left-1/2 -translate-x-1/2 mt-3 whitespace-nowrap font-mono text-[10.5px] uppercase tracking-[0.18em] transition-colors duration-300 ${
+          active ? "text-cl2-burgundy" : "text-cl2-ink/55 group-hover:text-cl2-burgundy/80"
+        }`}
         style={{ top: "100%" }}
       >
-        Memoria {m.num}
+        {m.shortLabel}
       </span>
     </button>
   );
@@ -225,40 +238,11 @@ const MemoriaNode = ({
 
 // ─── Section ────────────────────────────────────────────────────────────
 export const MemoriaViva = () => {
+  // Default: la primera memoria está activa al cargar. El usuario navega
+  // pasando el cursor o tocando otro nodo. NO auto-cycle: pedir al lector
+  // que espere a que el panel rote es tóxico para conversión — si quiere
+  // ver la memoria #3 la toca y listo.
   const [activeIdx, setActiveIdx] = useState(0);
-  const sectionRef = useRef<HTMLDivElement | null>(null);
-
-  // Auto-cycle when nothing is hovered, only while section is in view.
-  useEffect(() => {
-    let inView = false;
-    let interval: ReturnType<typeof setInterval> | null = null;
-
-    const start = () => {
-      if (interval) return;
-      interval = setInterval(() => {
-        setActiveIdx((i) => (i + 1) % memorias.length);
-      }, 4000);
-    };
-    const stop = () => {
-      if (!interval) return;
-      clearInterval(interval);
-      interval = null;
-    };
-
-    const obs = new IntersectionObserver(
-      ([entry]) => {
-        inView = entry?.isIntersecting ?? false;
-        if (inView) start();
-        else stop();
-      },
-      { threshold: 0.25 },
-    );
-    if (sectionRef.current) obs.observe(sectionRef.current);
-    return () => {
-      obs.disconnect();
-      stop();
-    };
-  }, []);
 
   const active = memorias[activeIdx]!;
   const center = { x: CENTER, y: CENTER };
@@ -271,7 +255,7 @@ export const MemoriaViva = () => {
     >
       <div className="grid gap-12 md:gap-16 md:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)] items-center">
         {/* ── Headline + active memory description ─────────────── */}
-        <div ref={sectionRef}>
+        <div>
           <Reveal>
             <h2 className="display display--lg">
               La memoria de la Asamblea,
@@ -330,6 +314,11 @@ export const MemoriaViva = () => {
         {/* ── Constellation ────────────────────────────────────── */}
         <Reveal delay={150}>
           <div className="relative w-full aspect-square max-w-[560px] mx-auto">
+            {/* Hint: que el lector sepa que la constelación es interactiva
+                (sin esto, los más pasivos ven el primer panel y se van). */}
+            <div className="absolute -top-2 left-1/2 -translate-x-1/2 z-20 font-mono text-[10px] uppercase tracking-[0.18em] text-cl2-ink/40 pointer-events-none">
+              pasá el cursor por cada memoria
+            </div>
             {/* SVG layer for the beams + center pulse */}
             <svg
               viewBox={`0 0 ${VIEWBOX} ${VIEWBOX}`}

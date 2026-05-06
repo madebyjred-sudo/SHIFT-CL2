@@ -24,7 +24,7 @@ export const FAQ = () => {
   const [open, setOpen] = useState<number>(0);
 
   return (
-    <Section id="faq" eyebrow="Preguntas frecuentes" kicker="08 / lo que nos preguntan">
+    <Section id="faq" eyebrow="Preguntas frecuentes" kicker="07 / lo que nos preguntan">
       <div className="grid gap-10 md:gap-16 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] items-start">
         <Reveal>
           <div>

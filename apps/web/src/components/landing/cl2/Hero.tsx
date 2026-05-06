@@ -4,7 +4,7 @@ import { Reveal } from "./Primitives";
 import { DottedSurface } from "@/components/landing/ui/dotted-surface";
 
 export const Hero = () => (
-  <section className="relative overflow-hidden pt-14 pb-0 border-b border-cl2-ink/[0.06]">
+  <section className="relative overflow-hidden pt-24 md:pt-32 pb-0 border-b border-cl2-ink/[0.06]">
     {/* Sutil malla de puntos animada en el fondo */}
     <DottedSurface
       className="z-0"

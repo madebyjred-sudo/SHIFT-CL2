@@ -20,7 +20,7 @@ export const CtaCloser = () => {
   const disponibles = ESPACIOS_TOTALES - ESPACIOS_OCUPADOS;
 
   return (
-    <Section id="acceso" eyebrow="Acceso" kicker="07 / cómo entrar">
+    <Section id="acceso" eyebrow="Acceso" kicker="06 / cómo entrar">
       <div className="max-w-[760px] mx-auto text-center">
         {/* Scarcity indicator */}
         <Reveal>

@@ -14,6 +14,15 @@ type Cap = {
   prompt: string;
   reply: { lead: string; cite?: string; tail?: string };
   tags: string[];
+  /** Action-oriented call-to-action shown as a button at the bottom of
+   *  the hover overlay. The whole point of this redesign is that the
+   *  hover doesn't end on a fake reply — it ends on what the user
+   *  WOULD do next. Two destinations matter:
+   *    #demo     — the live chat at the top (for Lexa / consult cards)
+   *    #waitlist — the access form (for Atlas / Centinela / Operador
+   *                cards that require account-level access)
+   */
+  cta: { label: string; href: "#demo" | "#waitlist" };
 };
 
 type Axis = {
@@ -46,6 +55,7 @@ const axes: Axis[] = [
           tail: "Reanudable. Editable. Compartible con tu equipo.",
         },
         tags: ["Un solo espacio", "Memoria del proyecto", "Reanudable"],
+        cta: { label: "Pedí acceso · armá tu primer espacio", href: "#waitlist" },
       },
       {
         n: "02",
@@ -61,6 +71,7 @@ const axes: Axis[] = [
           tail: "Las tres versiones disponibles para comparar.",
         },
         tags: ["Cita al folio", "Sin invento", "Cobertura entera"],
+        cta: { label: "Probá esta misma pregunta arriba", href: "#demo" },
       },
     ],
   },
@@ -84,6 +95,7 @@ const axes: Axis[] = [
           tail: "Link al minuto 1:57:26. Tres minutos de contexto antes y después.",
         },
         tags: ["En plenario", "Consulta corta", "Link al minuto"],
+        cta: { label: "Probá una consulta así arriba", href: "#demo" },
       },
       {
         n: "04",
@@ -99,6 +111,7 @@ const axes: Axis[] = [
           tail: "Resumen de argumentos por cada votación, a un click.",
         },
         tags: ["Histórico", "Comparativo", "Por diputado"],
+        cta: { label: "Cruzá un voto en la demo", href: "#demo" },
       },
     ],
   },
@@ -122,6 +135,7 @@ const axes: Axis[] = [
           tail: "Tres argumentos por bando + riesgo reputacional, listos para imprimir.",
         },
         tags: ["Brief nocturno", "Argumentos por bando", "Listo para reunión"],
+        cta: { label: "Pedile a Atlas el brief de mañana", href: "#waitlist" },
       },
       {
         n: "06",
@@ -137,6 +151,7 @@ const axes: Axis[] = [
           tail: "Editable. Lista para descargar o compartir.",
         },
         tags: ["Presentación editable", "Con tu tono", "En cuatro minutos"],
+        cta: { label: "La próxima reunión, llevás presentación lista", href: "#waitlist" },
       },
     ],
   },
@@ -160,6 +175,7 @@ const axes: Axis[] = [
           tail: "Solo lo sustantivo. Sin ruido. Sin alertas que se borran sin leer.",
         },
         tags: ["Vigilancia 24/7", "Solo lo sustantivo", "Antes que la prensa"],
+        cta: { label: "Empezá a vigilar tu primer expediente", href: "#waitlist" },
       },
       {
         n: "08",
@@ -175,6 +191,7 @@ const axes: Axis[] = [
           tail: "Editable cuando quieras. Auditable siempre.",
         },
         tags: ["Voz del despacho", "Permanente", "Memoria recuperada"],
+        cta: { label: "Tu despacho deja de empezar de cero", href: "#waitlist" },
       },
     ],
   },
@@ -297,15 +314,31 @@ const ReplyOverlay = ({ cap, tone, show }: { cap: Cap; tone: string; show: boole
       </div>
     </div>
 
-    {/* Footer */}
-    <div className="px-5 py-2 border-t border-dashed border-cl2-ink/10 flex items-center justify-between">
-      <span className="font-mono text-[9.5px] text-cl2-ink/40 uppercase tracking-wider">
-        conversación simulada
+    {/* Footer — CTA accionable. Reemplaza el footer estático
+        ("conversación simulada · 100% con cita verificable") por una
+        pista de "qué hacer ahora si esto te late". El href apunta o
+        a la demo de arriba (Lexa/consult cards) o al formulario de
+        acceso (Atlas/Centinela/Operador), según el oficio. */}
+    <a
+      href={cap.cta.href}
+      onClick={(e) => e.stopPropagation()}
+      className="group/cta px-5 py-3 border-t border-cl2-ink/[0.08] flex items-center justify-between gap-3 hover:bg-[hsl(var(--cl2-paper))] transition-colors"
+      style={{ background: "white" }}
+    >
+      <span
+        className="text-[12.5px] font-medium leading-snug"
+        style={{ color: tone }}
+      >
+        {cap.cta.label}
       </span>
-      <span className="font-mono text-[9.5px] text-cl2-ink/40">
-        100% con cita verificable
+      <span
+        className="flex-shrink-0 font-mono text-[14px] transition-transform group-hover/cta:translate-x-0.5"
+        style={{ color: tone }}
+        aria-hidden
+      >
+        →
       </span>
-    </div>
+    </a>
   </div>
 );
 

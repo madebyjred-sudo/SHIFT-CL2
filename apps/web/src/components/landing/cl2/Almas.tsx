@@ -17,16 +17,19 @@ const almas: Alma[] = [
   {
     glyph: "⚖",
     name: "Lexa",
-    role: "La que responde",
+    // "La que responde" sonaba a chatbot genérico. La promesa real es
+    // estar EN el momento que vos hablás — antes del podio, antes de
+    // la entrevista, mientras la sesión sigue. Asesora silenciosa.
+    role: "Tu asesora al oído",
     toneVar: "--cl2-burgundy",
     rule: "Si el archivo no respalda, se detiene.",
-    signal: "Pregunta corta, cita al folio",
+    signal: "El dato exacto antes del próximo turno",
     angle: 225,
   },
   {
     glyph: "📑",
     name: "Atlas",
-    role: "El que arma",
+    role: "El que arma el trabajo",
     toneVar: "--cl2-ochre",
     rule: "Construye briefs, matrices, presentaciones.",
     signal: "Encargá un trabajo, llega listo",
@@ -35,7 +38,7 @@ const almas: Alma[] = [
   {
     glyph: "📡",
     name: "Centinela",
-    role: "El que vigila",
+    role: "El que vigila por vos",
     toneVar: "--cl2-rose",
     rule: "Mira el archivo y la agenda 24 horas.",
     signal: "Te avisa antes que nadie",
@@ -207,7 +210,7 @@ export const Almas = () => {
             que hacen tres trabajos distintos.
           </h2>
           <p className="lede mt-5">
-            Cada uno con un oficio claro. Lexa responde con cita. Atlas arma el trabajo. Centinela vigila lo que vos no podés mirar todo el día. Trabajan juntos sobre la misma memoria.
+            Cada uno con un oficio claro. Lexa te susurra el dato exacto cuando lo necesitás. Atlas arma el trabajo que tu jefa pide para mañana. Centinela vigila lo que vos no podés mirar todo el día. Trabajan juntos sobre la misma memoria.
           </p>
         </div>
       </Reveal>
