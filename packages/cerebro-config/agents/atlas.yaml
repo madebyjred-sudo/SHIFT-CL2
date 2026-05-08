@@ -212,6 +212,26 @@ tools:
       esperá la confirmación; no dispares la generación de motu
       proprio (cuesta créditos).
 
+  - name: generate_docx
+    type: native
+    description: |
+      Genera un documento Word editable (.docx) del workspace activo
+      con branding CL2 (header burgundy, fuente Cambria/Calibri, A4).
+      Atlas dispara esta tool cuando el usuario pide un documento Word,
+      un memo, un brief editable, un informe descargable, o menciona
+      explícitamente ".docx", "Word", "documento editable".
+
+      Diferencia con generate_presentation: el .docx es para entrega
+      profesional a un cliente corporativo — editable, imprimible, A4.
+      La presentación (.pptx) es para exponer en reunión.
+
+      La tool sube el archivo a GCS y devuelve una URL de descarga
+      firmada (válida 7 días). El UI muestra el resultado como tarjeta
+      con botón de descarga. También inserta un nodo docx_asset en el
+      canvas para referencia futura.
+
+      NO uses sin pedido explícito. Cada llamada regenera el archivo.
+
 response_contract:
   must_include_index: true
   output_formats: [workspace_nodes, markdown]

@@ -189,6 +189,10 @@ function hasGeneratePresentationTool(agentTools: Array<Record<string, unknown>>)
   return agentTools.some((t) => t.name === 'generate_presentation');
 }
 
+function hasGenerateDocxTool(agentTools: Array<Record<string, unknown>>): boolean {
+  return agentTools.some((t) => t.name === 'generate_docx');
+}
+
 // generate_presentation — Atlas tool that turns the active workspace into
 // a Gamma deck. Same pipeline as POST /api/workspace/:id/export with
 // format='pptx'. The tool dispatcher emits a `pptx_ready` chunk to the
@@ -207,6 +211,38 @@ const GENERATE_PRESENTATION_TOOL = {
         force: {
           type: 'boolean',
           description: 'Si true, ignora la cache y regenera el deck. Default false.',
+        },
+      },
+      required: [],
+    },
+  },
+};
+
+// generate_docx — Atlas tool that turns the active workspace into a branded
+// Word .docx. Dispatches to the POST /api/workspace/:id/export-docx pipeline
+// which calls renderDocxAsset internally. Emits a `docx_ready` chunk so the
+// chat UI can render a download card.
+const GENERATE_DOCX_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'generate_docx',
+    description:
+      'Genera un documento Word editable (.docx) con branding CL2 del workspace activo. Disparalo SOLO cuando el usuario pide un Word, un memo editable, un brief descargable, un informe para cliente o menciona ".docx". El resultado es un archivo A4 con estilos CL2 descargable; también se inserta como nodo en el canvas. NO lo dispares mientras armás hojas — generalo al final cuando el usuario dice que el análisis está listo.',
+    parameters: {
+      type: 'object',
+      properties: {
+        tono: {
+          type: 'string',
+          description: 'Tono del documento. Ej: "ejecutivo", "técnico-legal", "divulgativo". Default: "ejecutivo".',
+        },
+        audiencia: {
+          type: 'string',
+          description: 'Audiencia objetivo. Ej: "directivos corporativos", "bancada legislativa", "prensa". Influye en el metadata footer.',
+        },
+        sendToCanvas: {
+          type: 'boolean',
+          description: 'Si true (default), inserta un nodo docx_asset en el canvas con el link de descarga.',
+          default: true,
         },
       },
       required: [],
@@ -536,6 +572,11 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // the model attempt and fail.
   if (hasGeneratePresentationTool(agent.tools) && args.scope_workspace_id) {
     tools.push(GENERATE_PRESENTATION_TOOL);
+  }
+  // generate_docx — same workspace-scoping contract as generate_presentation.
+  // Only Atlas declares this tool; only available when a workspace is in scope.
+  if (hasGenerateDocxTool(agent.tools) && args.scope_workspace_id) {
+    tools.push(GENERATE_DOCX_TOOL);
   }
 
   if (tools.length === 0) {
@@ -1166,6 +1207,181 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
           type: 'pptx_status',
           payload: { status: 'error', code, detail: message },
         });
+      }
+      continue;
+    }
+
+    if (tc.function.name === 'generate_docx') {
+      if (!args.scope_workspace_id) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify({
+            error: 'no_workspace_scope',
+            hint: 'El documento requiere abrir un workspace primero.',
+          }),
+        });
+        continue;
+      }
+
+      if (!args.user_id) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify({
+            error: 'auth_required',
+            hint: 'No tengo identidad del usuario para generar el documento.',
+          }),
+        });
+        continue;
+      }
+
+      let parsedArgs: { tono?: string; audiencia?: string; sendToCanvas?: boolean } = {};
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments || '{}');
+      } catch {
+        // Defaults are fine
+      }
+
+      // Status chunk so the UI can show "generando Word…"
+      args.onChunk({
+        type: 'docx_status' as never,
+        payload: { status: 'starting', workspace_id: args.scope_workspace_id },
+      } as never);
+
+      try {
+        const { renderDocxAsset } = await import('./docxAssetExport.js');
+        const { createClient } = await import('@supabase/supabase-js');
+
+        // Load workspace + nodes (same pattern as the HTTP route)
+        const _supa = createClient(
+          process.env.NEXT_PUBLIC_SUPABASE_URL!,
+          process.env.SUPABASE_SERVICE_ROLE_KEY!,
+          { auth: { persistSession: false } },
+        );
+
+        const { data: ws } = await _supa
+          .from('workspaces')
+          .select('id, title, description')
+          .eq('id', args.scope_workspace_id)
+          .eq('user_id', args.user_id)
+          .single();
+
+        const { data: nodes } = await _supa
+          .from('workspace_nodes')
+          .select('id, title, subtitle, content, x, y')
+          .eq('workspace_id', args.scope_workspace_id);
+
+        const ordered = ((nodes ?? []) as Array<{
+          id: string; title: string; subtitle: string | null;
+          content: Record<string, unknown> | null; x: number; y: number;
+        }>).slice().sort((a, b) => {
+          const yA = Math.floor(a.y / 200);
+          const yB = Math.floor(b.y / 200);
+          if (yA !== yB) return yA - yB;
+          return a.x - b.x;
+        });
+
+        const slides = [
+          {
+            idx: 0,
+            kind: 'cover' as const,
+            headline: ws?.title ?? 'Documento CL2',
+            body: ws?.description ?? undefined,
+          },
+          ...ordered.map((n, i) => {
+            const md = (n.content?.md as string) ?? '';
+            const isQuote = md.trim().startsWith('> ');
+            return {
+              idx: i + 1,
+              kind: (isQuote ? 'quote' : (i === 0 ? 'section' : 'content')) as
+                'quote' | 'section' | 'content',
+              eyebrow: n.subtitle ?? undefined,
+              headline: n.title as string,
+              body: (isQuote ? md.trim().replace(/^> /gm, '') : md.trim()) || undefined,
+            };
+          }),
+        ];
+
+        const result = await renderDocxAsset({
+          content: { title: ws?.title ?? 'Documento CL2', slides },
+          options: {
+            tono: parsedArgs.tono,
+            audiencia: parsedArgs.audiencia,
+          },
+          userId: args.user_id,
+          workspaceId: args.scope_workspace_id,
+        });
+
+        // Insert canvas node
+        const sendToCanvas = parsedArgs.sendToCanvas !== false;
+        let nodeId: string | null = null;
+        if (sendToCanvas) {
+          const { data: node } = await _supa
+            .from('workspace_nodes')
+            .insert({
+              workspace_id: args.scope_workspace_id,
+              user_id: args.user_id,
+              type: 'docx_asset',
+              title: `${ws?.title ?? 'Documento'} · Word`,
+              subtitle: result.filename,
+              x: 40,
+              y: 40,
+              width: 360,
+              height: 200,
+              content: {
+                kind: 'docx_asset',
+                asset_metadata: {
+                  export_url: result.export_url,
+                  filename: result.filename,
+                  size_bytes: result.size_bytes,
+                  generated_at: result.generated_at,
+                  gcs_path: result.gcs_path,
+                },
+                asset_slides: slides,
+              },
+            })
+            .select('id')
+            .single();
+          nodeId = node?.id ?? null;
+        }
+
+        args.onChunk({
+          type: 'docx_ready' as never,
+          payload: {
+            filename: result.filename,
+            url: result.export_url,
+            size_bytes: result.size_bytes,
+            node_id: nodeId,
+            generated_at: result.generated_at,
+          },
+        } as never);
+
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content:
+            `Documento Word generado.\n` +
+            `Filename: ${result.filename}\n` +
+            `Descarga: ${result.export_url}\n` +
+            `Tamaño: ${Math.round(result.size_bytes / 1024)} KB\n\n` +
+            `INSTRUCCIONES:\n` +
+            `1. Confirmale al usuario que el documento está listo (1-2 frases).\n` +
+            `2. NO pegues la URL en tu respuesta — el frontend ya muestra el botón de descarga.\n` +
+            `3. Mencioná que es editable en Word y está en A4 para impresión.`,
+        });
+      } catch (err) {
+        const message = (err as Error).message ?? 'unknown';
+        const code = (err as Error & { code?: string }).code ?? 'docx_failed';
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify({ error: code, detail: message }),
+        });
+        args.onChunk({
+          type: 'docx_status' as never,
+          payload: { status: 'error', code, detail: message },
+        } as never);
       }
       continue;
     }

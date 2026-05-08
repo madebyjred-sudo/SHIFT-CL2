@@ -2854,6 +2854,226 @@ workspaceRouter.get('/:id/attach-context', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════
+// DOCX ASSET EXPORT
+// ═══════════════════════════════════════════════════════════════════════
+//
+// POST /api/workspace/:id/export-docx
+// body: {
+//   options?: { tono?: string; audiencia?: string; marca?: string }
+//   sendToCanvas?: boolean   // default true — inserts a docx_asset node
+// }
+//
+// Pipeline:
+//   1. Load workspace hojas → build an AssetContent (kind='document') from them.
+//   2. Call renderDocxAsset → buffer + GCS signed URL.
+//   3. If sendToCanvas, insert a workspace_node with type='docx_asset'.
+//   4. Return { node_id, asset_metadata, slides }.
+//
+// The AssetContent fixture (atlasContentGenerator stub) derives each hoja
+// as a slide so the AssetDetailPanel can show sections without re-fetching.
+workspaceRouter.post('/:id/export-docx', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const { id } = req.params;
+  if (!await ownedWorkspace(userId, id, res)) return;
+
+  const sendToCanvas: boolean = req.body?.sendToCanvas !== false; // default true
+  const options: { tono?: string; audiencia?: string; marca?: string } =
+    req.body?.options ?? {};
+
+  try {
+    // ── Load workspace + hojas ──────────────────────────────────────
+    type WsRow = { id: string; title: string; description: string | null };
+    const { data: ws, error: wsErr } = await supa()
+      .from('workspaces')
+      .select('id, title, description')
+      .eq('id', id)
+      .eq('user_id', userId)
+      .single();
+    if (wsErr || !ws) { res.status(404).json({ ok: false, error: 'workspace_not_found' }); return; }
+
+    const { data: nodes, error: nErr } = await supa()
+      .from('workspace_nodes')
+      .select('id, title, subtitle, content, x, y')
+      .eq('workspace_id', id);
+    if (nErr) throw new Error(`load_nodes_failed: ${nErr.message}`);
+
+    // Reading order: top-to-bottom (y bands 200px), left-to-right
+    const ordered = ((nodes ?? []) as Array<{
+      id: string; title: string; subtitle: string | null;
+      content: Record<string, unknown> | null; x: number; y: number;
+    }>).slice().sort((a, b) => {
+      const yA = Math.floor(a.y / 200);
+      const yB = Math.floor(b.y / 200);
+      if (yA !== yB) return yA - yB;
+      return a.x - b.x;
+    });
+
+    // ── Build AssetContent from hojas ──────────────────────────────
+    // Cover slide = workspace title. Each hoja becomes a 'content' or
+    // 'section' slide based on its position (first hoja → section,
+    // rest → content). Quotes (body starting with ">") → quote slides.
+    const { AssetContent: _unused, ..._ } = { AssetContent: null }; void _unused; void _;
+
+    type AssetSlideLocal = {
+      idx: number;
+      kind: 'cover' | 'section' | 'content' | 'quote' | 'cta' | 'stats' | 'list' | 'alert' | 'comparison';
+      eyebrow?: string;
+      headline: string;
+      body?: string;
+      items?: Array<{ label: string; value: string; sub?: string }>;
+      columns?: Array<{ head: string; title: string; bullets: string[] }>;
+      alert?: { kind: 'recommendation' | 'warning' | 'note'; title: string; text: string };
+      meta?: { footerLeft?: string; footerRight?: string };
+    };
+
+    const slides: AssetSlideLocal[] = [];
+
+    // Slide 0: cover
+    slides.push({
+      idx: 0,
+      kind: 'cover',
+      headline: (ws as WsRow).title,
+      body: (ws as WsRow).description ?? undefined,
+    });
+
+    // Subsequent slides from hojas
+    ordered.forEach((n, i) => {
+      const md = (n.content?.md as string) ?? '';
+      const isFirst = i === 0;
+      // Detect quote-like body (starts with "> ")
+      const isQuote = md.trim().startsWith('> ');
+      const bodyText = isQuote ? md.trim().replace(/^> /gm, '') : md.trim();
+
+      slides.push({
+        idx: i + 1,
+        kind: isQuote ? 'quote' : (isFirst ? 'section' : 'content'),
+        eyebrow: n.subtitle ?? undefined,
+        headline: n.title as string,
+        body: bodyText || undefined,
+      });
+    });
+
+    const assetContent = {
+      title: (ws as WsRow).title,
+      subtitle: (ws as WsRow).description ?? undefined,
+      slides,
+    };
+
+    // ── Render docx ────────────────────────────────────────────────
+    const { renderDocxAsset } = await import('../services/docxAssetExport.js');
+    const result = await renderDocxAsset({
+      content: assetContent,
+      options,
+      userId,
+      workspaceId: id,
+    });
+
+    // ── Insert canvas node if requested ───────────────────────────
+    let nodeId: string | null = null;
+
+    if (sendToCanvas) {
+      // Asset metadata shape surfaced to AssetDetailPanel
+      const assetMetadata = {
+        export_url: result.export_url,
+        filename: result.filename,
+        size_bytes: result.size_bytes,
+        generated_at: result.generated_at,
+        gcs_path: result.gcs_path,
+        tono: options.tono ?? null,
+        audiencia: options.audiencia ?? null,
+        marca: options.marca ?? null,
+      };
+
+      // Pseudo-slides: each slide of the document becomes a "section"
+      // so the frontend AssetDetailPanel can render a list of sections.
+      const assetSlides = slides.map((s) => ({
+        idx: s.idx,
+        kind: s.kind,
+        headline: s.headline,
+        body: s.body ? s.body.slice(0, 500) : undefined,
+        eyebrow: s.eyebrow,
+      }));
+
+      // Canvas position: next available slot (top-right of existing nodes)
+      const maxX = Math.max(0, ...(ordered.map((n) => n.x + 400)));
+      const canvasX = maxX > 0 ? maxX + 40 : 40;
+      const canvasY = 40;
+
+      const { data: insertedNode, error: insertErr } = await supa()
+        .from('workspace_nodes')
+        .insert({
+          workspace_id: id,
+          user_id: userId,
+          type: 'docx_asset',
+          title: `${(ws as WsRow).title} · Documento`,
+          subtitle: result.filename,
+          x: canvasX,
+          y: canvasY,
+          width: 360,
+          height: 200,
+          content: {
+            kind: 'docx_asset',
+            asset_metadata: assetMetadata,
+            asset_slides: assetSlides,
+          },
+        })
+        .select('id')
+        .single();
+
+      if (insertErr) {
+        // Non-fatal: the docx was generated — just skip canvas insertion.
+        req.log?.warn('workspace/export-docx canvas insert failed', {
+          workspace: id,
+          error: insertErr.message,
+        });
+      } else {
+        nodeId = insertedNode?.id ?? null;
+      }
+
+      // Touch workspace updated_at
+      await supa()
+        .from('workspaces')
+        .update({ updated_at: result.generated_at })
+        .eq('id', id)
+        .eq('user_id', userId);
+    }
+
+    req.log?.info('workspace/export-docx ok', {
+      workspace: id,
+      slides: slides.length,
+      bytes: result.size_bytes,
+      nodeId,
+    });
+
+    res.json({
+      ok: true,
+      node_id: nodeId,
+      asset_metadata: {
+        export_url: result.export_url,
+        filename: result.filename,
+        size_bytes: result.size_bytes,
+        generated_at: result.generated_at,
+        gcs_path: result.gcs_path,
+        tono: options.tono ?? null,
+        audiencia: options.audiencia ?? null,
+        marca: options.marca ?? null,
+      },
+      slides: slides.map((s) => ({
+        idx: s.idx,
+        kind: s.kind,
+        headline: s.headline,
+        eyebrow: s.eyebrow ?? null,
+        body_preview: s.body ? s.body.slice(0, 200) : null,
+      })),
+    });
+  } catch (err) {
+    req.log?.warn('workspace/export-docx failed', { workspace: id, error: (err as Error).message });
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
 // ─── Citations ────────────────────────────────────────────────────────
 
 // POST /api/workspace/citations — save chunk to user's inbox
