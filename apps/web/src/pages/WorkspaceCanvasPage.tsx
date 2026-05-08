@@ -26,10 +26,17 @@ import {
 import { TopDock } from '@/components/top-dock';
 import { HojaNode } from '@/components/hoja/HojaNode';
 import { AssetNode } from '@/components/hoja/AssetNode';
+import { GeneratedAssetNode } from '@/components/hoja/GeneratedAssetNode';
+import {
+  AssetDetailPanel, buildSlideScopePrompt,
+} from '@/components/hoja/AssetDetailPanel';
 import { LexaContextPanel } from '@/components/hoja/LexaContextPanel'; // kept for rollback
 import { HojaFormatMenu } from '@/components/hoja/HojaFormatMenu';
 import { AnimatedAiInput } from '@/components/animated-ai-input';
 import { Sidebar } from '@/components/sidebar';
+import { ShareAsButton, getShareAsKindMeta, type ShareAsKindMeta } from '@/components/workspace/ShareAsButton';
+import { ShareAsOptionsModal } from '@/components/workspace/ShareAsOptionsModal';
+import { ShareAsProgressToast } from '@/components/workspace/ShareAsProgressToast';
 import { History } from 'lucide-react';
 import { useChat } from '@/lib/chat-context';
 import { LexaQuickHojaModal } from '@/components/hoja/LexaQuickHojaModal';
@@ -40,7 +47,9 @@ import { navigate } from '@/lib/router';
 import { cn } from '@/lib/utils';
 import {
   listNodes, createNode, updateNode, deleteNode, getNode, importAsset,
+  exportAsset,
   type WorkspaceNode,
+  type GeneratedAssetData, type GeneratedAssetKind, type ShareAssetOptions,
 } from '@/services/workspaceApi';
 import { updateWorkspace, exportWorkspace, type PptxExportResult, type PptxOptions } from '@/services/workspaceApi';
 import { PptxResultModal } from '@/components/workspace/PptxResultModal';
@@ -51,12 +60,28 @@ import { supabase } from '@/lib/supabase';
 // hoja → rich-text TipTap node (the default workspace primitive)
 // image / audio / document → imported asset nodes (single AssetNode handles
 //                            all three via type-aware render branch)
+// carousel / pptx_asset / docx_asset / podcast_asset → SYSTEM-generated
+//                            assets (carrusel, pptx, docx, podcast). Distinct
+//                            renderer because they carry asset_metadata +
+//                            asset_slides instead of a TipTap document.
 const NODE_TYPES = {
   hoja: HojaNode,
   image: AssetNode,
   audio: AssetNode,
   document: AssetNode,
+  carousel:      GeneratedAssetNode,
+  pptx_asset:    GeneratedAssetNode,
+  docx_asset:    GeneratedAssetNode,
+  podcast_asset: GeneratedAssetNode,
 } as const;
+
+const GENERATED_ASSET_KINDS = new Set<string>([
+  'carousel', 'pptx_asset', 'docx_asset', 'podcast_asset',
+]);
+
+function isGeneratedAssetKind(t?: string): t is GeneratedAssetKind {
+  return !!t && GENERATED_ASSET_KINDS.has(t.toLowerCase());
+}
 
 // ─── Grid layout helper ───────────────────────────────────────────────
 const GRID_COLS = 3;
@@ -79,15 +104,30 @@ function gridPosition(index: number): { x: number; y: number } {
 function toRFNode(n: WorkspaceNode, workspaceId: string, callbacks: {
   onDelete: (id: string) => void;
   onSelect: (id: string) => void;
+  onRegenerateAll?: (id: string) => void;
 }): Node {
-  // Asset types route to AssetNode; everything else (hoja, note, cite,
-  // expediente_ref) renders as HojaNode. Defensive lowercasing in case
-  // older rows have inconsistent casing.
+  // Asset types route to AssetNode; generated-asset types route to
+  // GeneratedAssetNode; everything else (hoja, note, cite, expediente_ref)
+  // renders as HojaNode. Defensive lowercasing in case older rows have
+  // inconsistent casing.
   const t = (n.type ?? 'hoja').toLowerCase();
-  const rfType: 'hoja' | 'image' | 'audio' | 'document' =
-    t === 'image' || t === 'audio' || t === 'document'
-      ? (t as 'image' | 'audio' | 'document')
-      : 'hoja';
+  let rfType:
+    | 'hoja' | 'image' | 'audio' | 'document'
+    | 'carousel' | 'pptx_asset' | 'docx_asset' | 'podcast_asset' = 'hoja';
+  if (t === 'image' || t === 'audio' || t === 'document') {
+    rfType = t;
+  } else if (isGeneratedAssetKind(t)) {
+    rfType = t as GeneratedAssetKind;
+  }
+  // Generated-asset nodes carry their payload on the WorkspaceNode row
+  // under a `data` field (mock fixture seeds it inline; backend will return
+  // it as part of the node row). Hoist it into ReactFlow node.data so
+  // GeneratedAssetNode can pick it up.
+  const generatedData =
+    isGeneratedAssetKind(t)
+      ? ((n as WorkspaceNode & { data?: GeneratedAssetData }).data
+        ?? ((n as { content?: { asset_metadata?: unknown } }).content as unknown as GeneratedAssetData | undefined))
+      : undefined;
   return {
     id: n.id,
     type: rfType,
@@ -98,6 +138,8 @@ function toRFNode(n: WorkspaceNode, workspaceId: string, callbacks: {
       workspaceId,
       onDelete: callbacks.onDelete,
       onSelect: callbacks.onSelect,
+      onRegenerateAll: callbacks.onRegenerateAll,
+      ...(generatedData ?? {}),
     },
     selected: false,
     draggable: true,
@@ -181,6 +223,28 @@ function CanvasInner({
     }
   }, [workspaceId, title]);
 
+  // ── Compartir como (share-as) state ─────────────────────────────
+  // The toolbar button → small dropdown of 4 kinds → options modal →
+  // exportAsset → progress toast → new GeneratedAssetNode lands on
+  // canvas with a fade-in. Selected asset auto-opens AssetDetailPanel.
+  const [shareAsKind, setShareAsKind] = useState<ShareAsKindMeta | null>(null);
+  const [shareAsModalOpen, setShareAsModalOpen] = useState(false);
+  const [shareAsToast, setShareAsToast] = useState<{
+    open: boolean; kind: GeneratedAssetKind | null; done: boolean; error: string | null;
+  }>({ open: false, kind: null, done: false, error: null });
+
+  // ── Generated-asset detail panel — opens when a generated asset
+  //    node is selected. Re-uses selectedNodeId; we just branch the UI.
+  const [assetPanelData, setAssetPanelData] = useState<GeneratedAssetData | null>(null);
+  // Track which slide the user is editing inside the AssetDetailPanel.
+  // The chat scope picks this up so messages typed in the workspace
+  // chat carry the slide context (in addition to the node context).
+  const [assetSelectedSlideIdx, setAssetSelectedSlideIdx] = useState<number>(0);
+
+  // Track current node count for share-as positioning without bloating
+  // the dependency array of every handler.
+  const nodesCountRef = useRef(0);
+
   // Chat-panel width (resizable splitter). Min = 340 (the previous
   // fixed xl size); Max = 340 × 1.618 ≈ 550. Persists per-user via
   // localStorage so the user's preferred layout survives reloads.
@@ -214,10 +278,135 @@ function CanvasInner({
 
   const handleSelect = useCallback(async (nodeId: string) => {
     setSelectedNodeId(nodeId);
+    // Pull the in-memory ReactFlow node first so we can decide whether to
+    // open the AssetDetailPanel (for generated assets) without waiting on
+    // the network. If the node carries asset_metadata, hydrate the panel
+    // immediately; otherwise close it.
+    const inMemory = (() => {
+      // Read from setter functional form by capturing a snapshot — we
+      // can't rely on `nodes` here because of stale closures. Use the
+      // imperative store via setNodes.
+      let snapshot: Node | undefined;
+      setNodes((ns) => {
+        snapshot = ns.find((n) => n.id === nodeId);
+        return ns;
+      });
+      return snapshot;
+    })();
+    const data = (inMemory?.data ?? {}) as { asset_metadata?: unknown; asset_slides?: unknown; asset_slide_history?: unknown };
+    if (data.asset_metadata && Array.isArray(data.asset_slides)) {
+      setAssetPanelData(data as unknown as GeneratedAssetData);
+      setAssetSelectedSlideIdx(0);
+    } else {
+      setAssetPanelData(null);
+    }
     // Fetch full content (lazy — not included in list response)
     const full = await getNode(workspaceId, nodeId).catch(() => null);
     if (full) setSelectedNodeFull(full);
-  }, [workspaceId]);
+  }, [workspaceId, setNodes]);
+
+  // ── Share-as handlers ────────────────────────────────────────────
+  // Picking a kind from the dropdown opens the options modal. Submitting
+  // the modal kicks the generation; the progress toast narrates the
+  // wait. On success, materialize the new node on the canvas (unless
+  // sendToCanvas=false) and auto-select it so the detail panel opens.
+  const handleSharePick = useCallback((m: ShareAsKindMeta) => {
+    setShareAsKind(m);
+    setShareAsModalOpen(true);
+  }, []);
+
+  // Re-generate-all triggered from the GeneratedAssetNode kebab menu —
+  // we open the detail panel (which surfaces the confirm-regenerate UI
+  // on the Compartir tab), so the user goes through the same confirm
+  // flow regardless of entry point.
+  const handleRegenerateAssetById = useCallback((nodeId: string) => {
+    void handleSelect(nodeId);
+  }, [handleSelect]);
+
+  // ── toRFNode wrapper — bundles every callback in one place ───────
+  // The plain `toRFNode` helper at module scope takes only the bare
+  // node + workspaceId. Most call sites in this component need the
+  // same standard set of callbacks (delete + select + regenerate-all).
+  // Centralising here means future callbacks (e.g. duplicate, podcast)
+  // only require ONE update.
+  const buildRFNode = useCallback((n: WorkspaceNode): Node => {
+    return toRFNode(n, workspaceId, {
+      onDelete: handleDelete,
+      onSelect: handleSelect,
+      onRegenerateAll: handleRegenerateAssetById,
+    });
+  }, [workspaceId, handleDelete, handleSelect, handleRegenerateAssetById]);
+
+  const handleShareSubmit = useCallback(
+    async (kind: GeneratedAssetKind, options: ShareAssetOptions, sendToCanvas: boolean) => {
+      setShareAsModalOpen(false);
+      setShareAsToast({ open: true, kind, done: false, error: null });
+      try {
+        const result = await exportAsset(workspaceId, kind, options, { sendToCanvas });
+        if (sendToCanvas) {
+          const pos = gridPosition(nodesCountRef.current);
+          const persisted: WorkspaceNode = {
+            ...result.node,
+            x: pos.x,
+            y: pos.y,
+          };
+          (persisted as WorkspaceNode & { data?: GeneratedAssetData }).data = result.asset;
+          const rfNode = buildRFNode(persisted);
+          // Lightweight fade-in / zoom-in via tailwindcss-animate utilities.
+          rfNode.className = 'animate-in fade-in zoom-in-95 duration-500';
+          setNodes((ns) => [...ns, rfNode]);
+          setSelectedNodeId(persisted.id);
+          setAssetPanelData(result.asset);
+          setAssetSelectedSlideIdx(0);
+          setTimeout(() => fitView({ padding: 0.18, duration: 500 }), 80);
+        }
+        setShareAsToast({ open: true, kind, done: true, error: null });
+      } catch (err) {
+        const msg = (err as Error).message ?? 'fallo desconocido';
+        setShareAsToast({ open: true, kind, done: false, error: msg });
+      }
+    },
+    [workspaceId, buildRFNode, setNodes, fitView],
+  );
+
+  // Keep nodesCountRef in sync — gives share-as positioning accurate
+  // count without depending on a render-time `nodes` capture.
+  useEffect(() => {
+    nodesCountRef.current = nodes.length;
+  }, [nodes.length]);
+
+  // ── Asset detail handlers ──────────────────────────────────────
+  // The panel mutates an in-memory copy of the asset; we mirror those
+  // mutations into the canvas node's data so the GeneratedAssetNode
+  // re-renders the previews from the up-to-date payload (e.g. after
+  // editing a slide headline, the postage-stamp on the canvas reflects
+  // the change without a refetch).
+  const applyAssetUpdate = useCallback((next: GeneratedAssetData) => {
+    if (!selectedNodeId) return;
+    setAssetPanelData(next);
+    setNodes((ns) => ns.map((n) => n.id === selectedNodeId
+      ? {
+          ...n,
+          data: {
+            ...n.data,
+            asset_metadata: next.asset_metadata,
+            asset_slides: next.asset_slides,
+            asset_slide_history: next.asset_slide_history,
+          },
+        }
+      : n));
+  }, [selectedNodeId, setNodes]);
+
+  const handleAssetDelete = useCallback(() => {
+    if (!selectedNodeId) return;
+    void handleDelete(selectedNodeId);
+    setAssetPanelData(null);
+  }, [selectedNodeId, handleDelete]);
+
+  const handleAssetPanelClose = useCallback(() => {
+    setAssetPanelData(null);
+    setSelectedNodeId(null);
+  }, []);
 
   // ── Workspace-scoped chat sessions ──────────────────────────────
   // Each workspace gets its OWN chat threads, separate from the main
@@ -634,6 +823,20 @@ function CanvasInner({
             workspace_id: workspaceId,
             workspace_title: title,
             selected_node_id: selectedNodeId,
+            // Slide-scope context — only present when the AssetDetailPanel
+            // is open with a slide selected. The backend agent will splice
+            // `system_prompt_fragment` into scope_system_prompt; the
+            // frontend doesn't need to do anything else here.
+            ...(assetPanelData && selectedNodeId
+              ? {
+                  selected_slide: {
+                    node_id: selectedNodeId,
+                    slide_idx: assetSelectedSlideIdx,
+                    kind: assetPanelData.asset_metadata.kind,
+                    system_prompt_fragment: buildSlideScopePrompt(assetPanelData, assetSelectedSlideIdx),
+                  },
+                }
+              : {}),
           }}
           hojaTitles={nodes.map((n) => ({
             id: n.id,
@@ -641,6 +844,12 @@ function CanvasInner({
             subtitle: (n.data?.subtitle as string) ?? null,
           }))}
           onClearSelection={() => setSelectedNodeId(null)}
+          onShareSuggestionPick={(kind) => {
+            // Atlas suggested a share format from inside the chat.
+            // Look up the full meta and re-use the same share-as flow
+            // the toolbar button drives.
+            handleSharePick(getShareAsKindMeta(kind));
+          }}
           onWorkspaceAction={async (action) => {
             if (action.intent === 'build' && action.nodes) {
               await handleNodesGenerated(action.nodes);
@@ -798,6 +1007,16 @@ function CanvasInner({
                 </span>
               </button>
 
+              {/* "Compartir como" — 4-format export flow. Opens a
+                  dropdown of {carrusel · pptx · docx · podcast}; the
+                  pick lands in the options modal, which then drives
+                  exportAsset() + the progress toast + a fresh
+                  GeneratedAssetNode on the canvas. */}
+              <ShareAsButton
+                onPick={handleSharePick}
+                generating={shareAsToast.open && !shareAsToast.done && !shareAsToast.error}
+              />
+
               {/* Nueva hoja (manual) — voice path moved into the
                   right-click "Pedile a Lexa" + the chat panel mic. */}
               <button
@@ -822,6 +1041,24 @@ function CanvasInner({
             </Panel>
           )}
         </ReactFlow>
+
+        {/* ── Generated-asset detail panel ──────────────────────────── */}
+        {/* Inside the canvas wrapper so it overlays the canvas only —
+            the chat panel on the left stays untouched. The panel itself
+            uses position absolute right/top/bottom; pointer-events live
+            on the panel content (NOT this wrapper), so canvas dragging
+            stays interactive in the 40% strip on the left. */}
+        {assetPanelData && selectedNodeId && (
+          <AssetDetailPanel
+            open
+            workspaceId={workspaceId}
+            nodeId={selectedNodeId}
+            asset={assetPanelData}
+            onClose={handleAssetPanelClose}
+            onAssetChanged={applyAssetUpdate}
+            onDelete={handleAssetDelete}
+          />
+        )}
       </div>
 
       {/* ── Hidden file input — driven by right-click "Subir archivo" ─ */}
@@ -910,6 +1147,25 @@ function CanvasInner({
         source_id={podcastNode?.id ?? ''}
         source_title={podcastNode?.title}
       />
+
+      {/* ── Compartir como — options modal (pre-generation form) ─── */}
+      <ShareAsOptionsModal
+        open={shareAsModalOpen}
+        meta={shareAsKind}
+        workspaceTitle={title}
+        onClose={() => setShareAsModalOpen(false)}
+        onSubmit={handleShareSubmit}
+      />
+
+      {/* ── Compartir como — progress / done / error toast ───────── */}
+      <ShareAsProgressToast
+        open={shareAsToast.open}
+        kind={shareAsToast.kind}
+        done={shareAsToast.done}
+        error={shareAsToast.error}
+        onDismiss={() => setShareAsToast({ open: false, kind: null, done: false, error: null })}
+      />
+
     </div>
   );
 }

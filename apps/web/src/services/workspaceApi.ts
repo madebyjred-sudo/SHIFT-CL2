@@ -37,7 +37,24 @@ export interface Workspace {
 }
 
 export type NodeColor = 'default' | 'burgundy' | 'ink' | 'sage' | 'amber';
-export type NodeType = 'hoja' | 'note' | 'cite' | 'expediente_ref' | 'image' | 'document' | 'audio';
+export type NodeType =
+  | 'hoja'
+  | 'note'
+  | 'cite'
+  | 'expediente_ref'
+  | 'image'
+  | 'document'
+  | 'audio'
+  // ─── Generated assets (Atlas exports → first-class canvas citizens) ───
+  // These four types are produced by the "Compartir como" toolbar / Atlas
+  // chat suggestions. They render with GeneratedAssetNode (NOT AssetNode,
+  // which is for IMPORTED files). The discriminator lives on
+  // `data.asset_metadata.kind` — the node-type strings here just route the
+  // ReactFlow nodeType registry to the right component.
+  | 'carousel'
+  | 'pptx_asset'
+  | 'docx_asset'
+  | 'podcast_asset';
 
 /** Asset content shape for type ∈ {image, document, audio}. */
 export interface AssetContent {
@@ -47,6 +64,127 @@ export interface AssetContent {
   size: number;
   mime: string;
   thumbnail_url?: string;
+}
+
+// ─── Generated-asset contracts ────────────────────────────────────────
+// Shapes acordadas con el backend agent. El node en ReactFlow lleva esto
+// dentro de `data` (no en `content`) para no chocar con el `content.md`
+// que usan las hojas.
+//
+// IMPORTANT: estos tipos son consumidos por GeneratedAssetNode +
+// AssetDetailPanel + el flujo de "Compartir como ▾". Si el contrato del
+// backend cambia, este es el punto único a refactorizar.
+
+export type GeneratedAssetKind =
+  | 'carousel'
+  | 'pptx_asset'
+  | 'docx_asset'
+  | 'podcast_asset';
+
+/** Slide variants — cada slide del carrusel/PPTX puede ser cualquiera de
+ *  estos shapes. La discriminación visual la hace el renderer. */
+export type AssetSlideKind =
+  | 'cover'
+  | 'section'
+  | 'content'
+  | 'comparison'
+  | 'quote'
+  | 'cta'
+  | 'stats'
+  | 'list'
+  | 'alert';
+
+export interface AssetSlide {
+  idx: number;
+  kind: AssetSlideKind;
+  eyebrow?: string;
+  headline: string;
+  body?: string;
+  items?: Array<{ label: string; value: string; sub?: string }>;
+  columns?: Array<{ head: string; title: string; bullets: string[] }>;
+  alert?: {
+    kind: 'recommendation' | 'warning' | 'note';
+    title: string;
+    text: string;
+  };
+  meta?: { footerLeft?: string; footerRight?: string };
+}
+
+export interface AssetMetadata {
+  kind: GeneratedAssetKind;
+  /** Signed URL (GCS/Supabase Storage). The asset's distributable artifact. */
+  export_url: string;
+  slides_count: number;
+  /** ISO timestamp. */
+  generated_at: string;
+  /** Frozen options the asset was generated with — surfaces in detail panel. */
+  options: Record<string, unknown>;
+  source: 'atlas' | 'manual';
+  /** Optional human title overriding the generic "Carrusel · 8 slides" header. */
+  title?: string;
+  /** Podcast / audio assets only. Seconds. */
+  duration_sec?: number;
+}
+
+/** A single slide-edit entry in the per-slide history. */
+export interface AssetSlideHistoryEntry {
+  slide_idx: number;
+  before: Pick<AssetSlide, 'headline' | 'body' | 'items' | 'columns'>;
+  after: Pick<AssetSlide, 'headline' | 'body' | 'items' | 'columns'>;
+  instruction: string;
+  edited_at: string;
+}
+
+/** What the frontend reads off `node.data` for generated assets. */
+export interface GeneratedAssetData {
+  asset_metadata: AssetMetadata;
+  asset_slides: AssetSlide[];
+  asset_slide_history: AssetSlideHistoryEntry[];
+}
+
+/** Shape options shared with the "Compartir como" modal. Kind-specific
+ *  fields are loose-typed — backend treats this as a free-form bag. */
+export interface ShareAssetOptions {
+  /** Tono editorial — neutro/persuasivo/explicativo/etc. */
+  tono?: string;
+  /** Audiencia objetivo (LinkedIn / prensa / sector financiero / etc). */
+  audiencia?: string;
+  /** Hook de apertura — solo carrusel/social. */
+  hook?: string;
+  /** Cantidad de slides — carrusel/pptx. */
+  numSlides?: number;
+  /** CTA final — carrusel. */
+  cta?: string;
+  /** Lineamientos de marca / voz. */
+  marca?: string;
+  /** Permitir emojis (default false). */
+  emojis?: boolean;
+  /** Propósito — solo pptx (qué argumenta). */
+  proposito?: string;
+  /** Voz del podcast — sólo podcast. */
+  voice?: string;
+}
+
+export interface ExportAssetResult {
+  ok: true;
+  node: WorkspaceNode & { data?: GeneratedAssetData };
+  asset: GeneratedAssetData;
+}
+
+export interface AssetSlideEditResult {
+  ok: true;
+  slide: AssetSlide;
+  history_entry: AssetSlideHistoryEntry;
+}
+
+export interface AssetRegenerateResult {
+  ok: true;
+  asset: GeneratedAssetData;
+}
+
+export interface AssetHistoryResult {
+  ok: true;
+  history: AssetSlideHistoryEntry[];
 }
 
 export interface WorkspaceNode {
@@ -428,4 +566,398 @@ export async function saveCitation(opts: {
   node_id?: string;
 }): Promise<void> {
   await apiFetch('/citations', { method: 'POST', body: JSON.stringify(opts) });
+}
+
+// ─── Generated assets — share-as / slide-edit / regenerate ────────────
+//
+// Feature flag controls whether we hit the real backend or the in-memory
+// mock fixture. The backend agent is on a parallel track and the contract
+// (Gamma-API based with structured AssetSlide[]) is in flight; we ship the
+// frontend fully against the mock so the demo lobby can exercise every
+// surface, then flip the flag once the API lands.
+//
+// Override at runtime via:
+//   - localStorage.setItem('cl2-generated-assets-mock', '0')  → real API
+//   - localStorage.setItem('cl2-generated-assets-mock', '1')  → mock
+// Default (when flag absent): respects VITE_GENERATED_ASSETS_MOCK env, else mock.
+
+const GENERATED_ASSETS_MOCK_KEY = 'cl2-generated-assets-mock';
+
+function isGeneratedAssetsMock(): boolean {
+  if (typeof window !== 'undefined') {
+    const v = window.localStorage.getItem(GENERATED_ASSETS_MOCK_KEY);
+    if (v === '0') return false;
+    if (v === '1') return true;
+  }
+  // Vite-style env access; default ON until backend converges.
+  const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
+  if (env?.VITE_GENERATED_ASSETS_MOCK === '0') return false;
+  return true;
+}
+
+/** Generate a new asset and (optionally) drop it on the canvas. */
+export async function exportAsset(
+  workspaceId: string,
+  kind: GeneratedAssetKind,
+  options: ShareAssetOptions,
+  opts: { sendToCanvas?: boolean } = {},
+): Promise<ExportAssetResult> {
+  if (isGeneratedAssetsMock()) {
+    return mockExportAsset(workspaceId, kind, options, opts);
+  }
+  return apiFetch<ExportAssetResult>(`/${workspaceId}/export-asset`, {
+    method: 'POST',
+    body: JSON.stringify({
+      kind,
+      options,
+      sendToCanvas: opts.sendToCanvas ?? true,
+    }),
+  });
+}
+
+/** Edit a single slide of an existing asset. Replaces the slide in place
+ *  and appends to the per-slide history. */
+export async function editAssetSlide(
+  workspaceId: string,
+  nodeId: string,
+  slideIdx: number,
+  instruction: string,
+): Promise<AssetSlideEditResult> {
+  if (isGeneratedAssetsMock()) {
+    return mockEditAssetSlide(workspaceId, nodeId, slideIdx, instruction);
+  }
+  return apiFetch<AssetSlideEditResult>(
+    `/${workspaceId}/assets/${nodeId}/slides/${slideIdx}/edit`,
+    { method: 'POST', body: JSON.stringify({ instruction }) },
+  );
+}
+
+/** Regenerate the entire asset. Per-slide history is conserved. */
+export async function regenerateAsset(
+  workspaceId: string,
+  nodeId: string,
+  options: ShareAssetOptions,
+): Promise<AssetRegenerateResult> {
+  if (isGeneratedAssetsMock()) {
+    return mockRegenerateAsset(workspaceId, nodeId, options);
+  }
+  return apiFetch<AssetRegenerateResult>(
+    `/${workspaceId}/assets/${nodeId}/regenerate-all`,
+    { method: 'POST', body: JSON.stringify({ options }) },
+  );
+}
+
+/** Fetch the per-slide edit history for an asset. */
+export async function getAssetHistory(
+  workspaceId: string,
+  nodeId: string,
+): Promise<AssetHistoryResult> {
+  if (isGeneratedAssetsMock()) {
+    return mockGetAssetHistory(workspaceId, nodeId);
+  }
+  return apiFetch<AssetHistoryResult>(`/${workspaceId}/assets/${nodeId}/history`);
+}
+
+// ─── Mock fixture ─────────────────────────────────────────────────────
+// In-memory store keyed by nodeId. We seed lazily on first read and
+// mutate in place so multiple panel re-mounts share state. Persisting to
+// localStorage is overkill for a demo session — a refresh wipes the mock,
+// which is actually desirable because the backend agent's real schema
+// will eventually own the persistent storage.
+
+type MockStore = Record<string, GeneratedAssetData>;
+const _mockStore: MockStore = {};
+
+function makeMockSlides(kind: GeneratedAssetKind, opts: ShareAssetOptions): AssetSlide[] {
+  // Demo content tuned to the CL2 universe — reforma fiscal expediente,
+  // because that is what Ronald shows clients on Mondays. Each variant
+  // hits a different slide.kind so the renderer's branching is exercised.
+  const n = opts.numSlides ?? (kind === 'podcast_asset' ? 1 : 8);
+  const baseTitle = 'Reforma fiscal 2026 — análisis CL2';
+  if (kind === 'podcast_asset') {
+    return [{
+      idx: 0,
+      kind: 'cover',
+      eyebrow: 'Audio editorial',
+      headline: baseTitle,
+      body: 'Lectura narrada del board, con voz de Lexa.',
+      meta: { footerLeft: 'CL2 · Audio', footerRight: '14 min' },
+    }];
+  }
+  if (kind === 'docx_asset') {
+    return [{
+      idx: 0,
+      kind: 'cover',
+      eyebrow: 'Documento ejecutivo',
+      headline: baseTitle,
+      body: 'Brief de 6 páginas con resumen, contexto, riesgos y recomendaciones.',
+      meta: { footerLeft: 'CL2 · DOCX', footerRight: '6 páginas' },
+    }];
+  }
+  // carousel / pptx_asset — N slides editoriales
+  const out: AssetSlide[] = [];
+  out.push({
+    idx: 0, kind: 'cover',
+    eyebrow: 'Reforma fiscal 2026',
+    headline: 'Lo que la prensa no leyó del expediente 23.583',
+    body: 'Un análisis CL2 del proyecto en discusión. Sin emojis, sin clickbait.',
+    meta: { footerLeft: 'CL2 · ' + (kind === 'pptx_asset' ? 'Presentación' : 'Carrusel'), footerRight: '01' },
+  });
+  out.push({
+    idx: 1, kind: 'section',
+    eyebrow: 'Contexto',
+    headline: 'Por qué 2026 es distinto',
+    body: 'Tres factores nuevos: convergencia con OCDE, déficit estructural y narrativa preelectoral.',
+  });
+  out.push({
+    idx: 2, kind: 'stats',
+    eyebrow: 'Datos',
+    headline: 'El tablero, en números',
+    items: [
+      { label: 'Recaudación proyectada', value: '+₡640 mil M', sub: 'estimación Hacienda 2026' },
+      { label: 'Diputados a favor', value: '28', sub: 'sin contar el bloque B' },
+      { label: 'Plazo de comisión', value: '90 días', sub: 'reglamento art. 98' },
+    ],
+  });
+  out.push({
+    idx: 3, kind: 'comparison',
+    eyebrow: 'Posiciones',
+    headline: 'Oficialismo vs. oposición fiscal',
+    columns: [
+      {
+        head: 'Oficialismo',
+        title: 'Reforma como ancla',
+        bullets: [
+          'Alinea con OCDE',
+          'Sostiene calificación país',
+          'Genera margen para inversión social',
+        ],
+      },
+      {
+        head: 'Oposición fiscal',
+        title: 'Costo político',
+        bullets: [
+          'Carga sobre clase media',
+          'Mensaje regresivo en año electoral',
+          'Falta de gradualidad',
+        ],
+      },
+    ],
+  });
+  out.push({
+    idx: 4, kind: 'quote',
+    eyebrow: 'Lo que dijeron',
+    headline: '"Sin esta reforma, el gobierno cierra 2026 con un déficit del 5.8%"',
+    body: 'Ministerio de Hacienda · Comparecencia 14 abr.',
+  });
+  out.push({
+    idx: 5, kind: 'list',
+    eyebrow: 'Riesgos',
+    headline: 'Cinco frentes que CL2 monitorea',
+    items: [
+      { label: '01', value: 'Reservas del bloque B en sala' },
+      { label: '02', value: 'Movilización del sector público' },
+      { label: '03', value: 'Intervención de Sala IV' },
+      { label: '04', value: 'Cobertura de El Financiero / La Nación' },
+      { label: '05', value: 'Reacción de gremios empresariales' },
+    ],
+  });
+  out.push({
+    idx: 6, kind: 'alert',
+    eyebrow: 'Recomendación CL2',
+    headline: 'Mover ahora, no en agosto',
+    alert: {
+      kind: 'recommendation',
+      title: 'Lobby anticipado con bloque B',
+      text:
+        'Las dos enmiendas críticas se firman antes de la última semana de junio. Después, la ventana se cierra por agenda electoral.',
+    },
+  });
+  out.push({
+    idx: 7, kind: 'cta',
+    eyebrow: 'Conversemos',
+    headline: '¿Cómo afecta esto a su sector?',
+    body: opts.cta ?? 'cl2.cr · contacto@cl2.cr',
+    meta: { footerLeft: 'CL2 · Asuntos públicos', footerRight: String(n).padStart(2, '0') },
+  });
+  return out.slice(0, n);
+}
+
+function mockExportAsset(
+  workspaceId: string,
+  kind: GeneratedAssetKind,
+  options: ShareAssetOptions,
+  opts: { sendToCanvas?: boolean },
+): Promise<ExportAssetResult> {
+  return new Promise((resolve) => {
+    // Simulate generation latency — feels like Gamma without being annoying.
+    const delay = kind === 'podcast_asset' ? 4500 : 2800;
+    setTimeout(() => {
+      const slides = makeMockSlides(kind, options);
+      const id = `mock-${kind}-${Date.now().toString(36)}`;
+      const metadata: AssetMetadata = {
+        kind,
+        export_url:
+          kind === 'docx_asset'
+            ? 'https://example.com/mock/cl2-reforma-fiscal.docx'
+            : kind === 'pptx_asset'
+              ? 'https://example.com/mock/cl2-reforma-fiscal.pptx'
+              : kind === 'podcast_asset'
+                ? 'https://example.com/mock/cl2-reforma-fiscal.mp3'
+                : 'https://example.com/mock/cl2-reforma-fiscal-carrusel.pdf',
+        slides_count: slides.length,
+        generated_at: new Date().toISOString(),
+        options: options as Record<string, unknown>,
+        source: 'manual',
+        title: 'Reforma fiscal 2026 · CL2',
+        duration_sec: kind === 'podcast_asset' ? 14 * 60 : undefined,
+      };
+      const data: GeneratedAssetData = {
+        asset_metadata: metadata,
+        asset_slides: slides,
+        asset_slide_history: [],
+      };
+      _mockStore[id] = data;
+      const node: WorkspaceNode & { data?: GeneratedAssetData } = {
+        id,
+        workspace_id: workspaceId,
+        type: kind as NodeType,
+        x: 80, y: 80, width: 480, height: 380, z_index: 0,
+        title: metadata.title ?? labelForKind(kind),
+        subtitle: '',
+        color: 'default',
+        created_at: metadata.generated_at,
+        updated_at: metadata.generated_at,
+      };
+      // Stash the asset data on the node payload — the canvas hydrates it
+      // into `node.data` exactly as toRFNode does for the real path.
+      (node as { data?: GeneratedAssetData }).data = data;
+      resolve({ ok: true, node, asset: data });
+    }, delay);
+  });
+}
+
+function labelForKind(kind: GeneratedAssetKind): string {
+  switch (kind) {
+    case 'carousel':       return 'Carrusel social';
+    case 'pptx_asset':     return 'Presentación';
+    case 'docx_asset':     return 'Documento';
+    case 'podcast_asset':  return 'Podcast del board';
+  }
+}
+
+function mockEditAssetSlide(
+  _workspaceId: string,
+  nodeId: string,
+  slideIdx: number,
+  instruction: string,
+): Promise<AssetSlideEditResult> {
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      const data = _mockStore[nodeId];
+      if (!data) {
+        reject(new Error('mock: asset not found'));
+        return;
+      }
+      const slide = data.asset_slides.find((s) => s.idx === slideIdx);
+      if (!slide) {
+        reject(new Error('mock: slide not found'));
+        return;
+      }
+      const before: AssetSlideHistoryEntry['before'] = {
+        headline: slide.headline,
+        body: slide.body,
+        items: slide.items,
+        columns: slide.columns,
+      };
+      // Naive transform: append a marker so the user sees something
+      // happened, plus tweak headline so the "before/after" diff has signal.
+      slide.headline = applyMockInstruction(slide.headline, instruction);
+      if (slide.body) slide.body = applyMockInstruction(slide.body, instruction);
+      const after: AssetSlideHistoryEntry['after'] = {
+        headline: slide.headline,
+        body: slide.body,
+        items: slide.items,
+        columns: slide.columns,
+      };
+      const entry: AssetSlideHistoryEntry = {
+        slide_idx: slideIdx,
+        before,
+        after,
+        instruction,
+        edited_at: new Date().toISOString(),
+      };
+      data.asset_slide_history.push(entry);
+      resolve({ ok: true, slide: { ...slide }, history_entry: entry });
+    }, 900);
+  });
+}
+
+function applyMockInstruction(text: string, instruction: string): string {
+  // Intentionally simple — the mock doesn't pretend to be an LLM.
+  // Surfaces the instruction so QA can verify the round-trip visually.
+  const trimmed = instruction.trim();
+  if (!trimmed) return text;
+  if (/más cort|acort|conciso|breve/i.test(trimmed)) {
+    return text.split(/[.,]/)[0].trim().slice(0, 70);
+  }
+  if (/más largo|expand|elabor|detall/i.test(trimmed)) {
+    return text + ' (con más contexto pedido por el editor: ' + trimmed.slice(0, 60) + '…)';
+  }
+  return text + ' — ' + trimmed.slice(0, 80);
+}
+
+function mockRegenerateAsset(
+  workspaceId: string,
+  nodeId: string,
+  options: ShareAssetOptions,
+): Promise<AssetRegenerateResult> {
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      const prev = _mockStore[nodeId];
+      const kind: GeneratedAssetKind = prev?.asset_metadata.kind ?? 'carousel';
+      const slides = makeMockSlides(kind, options);
+      const newData: GeneratedAssetData = {
+        asset_metadata: {
+          ...(prev?.asset_metadata ?? {
+            kind,
+            export_url: '',
+            slides_count: slides.length,
+            generated_at: new Date().toISOString(),
+            options: options as Record<string, unknown>,
+            source: 'manual',
+          }),
+          slides_count: slides.length,
+          generated_at: new Date().toISOString(),
+          options: options as Record<string, unknown>,
+        },
+        asset_slides: slides,
+        // Conserve prior history per spec
+        asset_slide_history: prev?.asset_slide_history ?? [],
+      };
+      _mockStore[nodeId] = newData;
+      // Touch workspaceId param so eslint no-unused stays quiet for the
+      // mock branch; in real backend the workspace scopes the auth.
+      void workspaceId;
+      resolve({ ok: true, asset: newData });
+    }, 2000);
+  });
+}
+
+function mockGetAssetHistory(
+  _workspaceId: string,
+  nodeId: string,
+): Promise<AssetHistoryResult> {
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      const data = _mockStore[nodeId];
+      resolve({ ok: true, history: data?.asset_slide_history ?? [] });
+    }, 200);
+  });
+}
+
+/** Public helper so callers (e.g. the canvas) can hydrate a freshly-
+ *  generated mock asset back into the in-memory store after a reload. */
+export function _seedMockAsset(nodeId: string, data: GeneratedAssetData): void {
+  _mockStore[nodeId] = data;
 }

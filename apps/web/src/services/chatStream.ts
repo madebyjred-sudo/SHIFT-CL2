@@ -27,7 +27,20 @@ export type ChatChunk =
   | { type: 'done'; payload?: unknown }
   | { type: 'workspace_action'; payload: WorkspaceActionPayload }
   | { type: 'pptx_status'; payload: { status: 'starting' | 'polling' | 'error'; code?: string; detail?: string } }
-  | { type: 'pptx_ready'; payload: PptxReadyPayload };
+  | { type: 'pptx_ready'; payload: PptxReadyPayload }
+  // Atlas-side share suggestion chips (Lovable-style). When the user
+  // talks about social/LinkedIn/decks/etc., the agent can attach 1-3
+  // suggestions to its reply. Frontend renders them inline; click =
+  // opens the ShareAs options modal pre-selected to that kind.
+  | { type: 'suggestion'; payload: ChatSuggestionPayload };
+
+export interface ChatSuggestionPayload {
+  suggestions: Array<{
+    kind: 'carousel' | 'pptx_asset' | 'docx_asset' | 'podcast_asset';
+    label: string;
+    reason?: string;
+  }>;
+}
 
 export interface PptxReadyPayload {
   filename: string;
