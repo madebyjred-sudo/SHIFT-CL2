@@ -220,6 +220,8 @@ El BFF `apps/api` es la pieza que NO existía en Shifty. Shifty asume que el fro
 
 ### ADR-G4 — Cerebro como capa de tools (no como reemplazo de la UI de chat)
 
+> **Status:** SUPERSEDED por ADR-G4-bis (2026-05-07). Mantenido en el documento como evidencia histórica de la decisión revertida.
+
 **Decisión:** Cerebro vive en el BFF como `openRouterClient` con 2-pass tool loop. La UI consume SSE estándar, no conoce de Cerebro.
 
 **Contexto:** Cerebro provee ejecución de grafos y herramientas multi-paso. Podría exponer su propia UI (admin dashboard, canvas).
@@ -230,6 +232,37 @@ El BFF `apps/api` es la pieza que NO existía en Shifty. Shifty asume que el fro
 - Cliente directo desde el frontend a Cerebro/OpenRouter: filtra credenciales al cliente, imposibilita rate limit y persistencia.
 
 **Consecuencias:** El frontend NO necesita SDK de Cerebro. La elección de Anthropic vs OpenAI vs futuro proveedor es opaca al cliente. Cambiar Cerebro por LangGraph en Fase C requiere tocar solo `apps/api/src/services/openRouterClient.ts` y la persona YAML.
+
+### ADR-G4-bis — Cerebro como Gateway externo OAI-compatible (corrige ADR-G4)
+
+**Status:** propuesta. Decisión 2026-05-07. Pendiente de firma de Jred al ejecutar la migración. Fecha de cierre objetivo: 2026-05-15.
+
+**Decisión:** Cerebro corre como Gateway externo. CL2 BFF habla con Cerebro vía un adapter OpenAI-compatible (`/v1/chat/completions`) y vía endpoints específicos de orquestación (`/v1/agents/{id}/invoke`, `/swarm/chat`, `/swarm/debate`). El BFF de CL2 no contiene system prompts de agents ni router de modelos — esos viven en Cerebro.
+
+**Contexto:** ADR-G4 declaró que "Cerebro vive en el BFF como `openRouterClient`". Esa decisión se tomó el 2026-04-25 (commit `556c230`) sin la respuesta a `docs/CEREBRO_BLOCKER.md` que había planteado tres opciones A/B/C el día anterior. En la práctica el BFF terminó llamando OpenRouter directo en 10 callsites, los agents legislativos vivieron como prompts hardcoded en TypeScript, y el flywheel del Brand OS quedó half-realized: solo Peaje (ingest) y Punto Medio (RAG return) pasaban por Cerebro real; el motor de inferencia bypaseaba.
+
+La auditoría del 2026-05-07 (`~/Downloads/audit-output/REPORTE-FINAL.md`) verificó que Cerebro Railway tiene 37 rutas operativas, multi-tenant, multi-app, con apps registradas para `cl2/eco/sentinel/studio`. La rama `feat/oai-compat` (commit `07717a5`, 2026-05-06) ya implementa `/v1/chat/completions` OpenAI-compatible detrás de un feature flag (`ENABLE_OAI_ADAPTER`). El bypass de CL2 puede cerrarse con dos cambios de env var (no con un refactor mayor).
+
+**Alternativas descartadas:**
+
+- **Mantener ADR-G4 tal cual** (Cerebro como capa local en el BFF): rompe el flywheel del Brand OS. Los agents no se versionan en Cerebro, no se pueden compartir cross-app, y la promesa "1 brain" del pitch del 2026-04-21 queda en papel. Cada despacho legislativo que Oscar venda heredaría el prompt en el BFF, multiplicando el problema.
+- **Reescribir `cerebroClient.ts` con SSE compatible y migrar callsite-por-callsite**: lo que sugería el primer handoff de la auditoría. Es más trabajo del necesario porque ya existe `feat/oai-compat`, que es drop-in con el cliente OpenAI SDK. La migración por env var es más segura (cambio reversible) y más rápida.
+- **Acoplar Cerebro al frontend de CL2**: rompe el shell Shifty, fuerza retrabajo de UI. Mantener el pattern "frontend → BFF Express → Cerebro" sigue siendo la base.
+
+**Consecuencias:**
+
+- El BFF de CL2 (`apps/api/src`) deja de tener system prompts de Lexa, Atlas, Centinela legislativo. Esos prompts viven como YAMLs en `madebyjred-sudo/SHIFT-CEREBRO/agents/skills/` con `visibility.apps: [cl2]` — versionados en git de Cerebro, scoped a CL2, invocables vía `/v1/agents/{agent_id}/invoke`. Diseño detallado en `~/Downloads/audit-output/proposals/agents-legislativos-scoping.md`.
+- `apps/api/src/services/openRouterClient.ts` (~1188 líneas) y `apps/api/src/services/cerebroClient.ts` (~62 líneas, ya muerto) se eliminan al final de la migración.
+- La elección de modelo (Sonnet/Kimi/Haiku/MiniMax) la toma Cerebro internamente vía `MODEL_MAP` y `get_llm()`. CL2 BFF no la conoce.
+- Cambiar el motor de Cerebro de OpenRouter a otro provider en Fase C requiere tocar **solo Cerebro** — CL2 BFF no se entera. (Lo mismo que ADR-G4 prometía, pero ahora real.)
+- PII scrub, agent versioning, cross-app cache, telemetría unificada, quotas — todo gana porque Cerebro es donde se aplican.
+
+**Deuda formal reconocida:**
+
+- Entre 2026-04-25 (commit `556c230`) y la fecha de cierre de esta deuda, CL2 corrió bypaseando Cerebro. Datos producidos en ese período están en Peaje (escritura SÍ pasaba), pero los `agent_version` y `model` registrados en `peaje_insights` reflejan lo que el BFF reportó, no lo que Cerebro orquestó. Si en el futuro se entrena un dataset SFT a partir de esos rows, **filtrar por fecha o etiquetar como "pre-G4-bis"** para no contaminar el entrenamiento con prompts fantasma.
+- La doctrina pública (handoffs, pitch deck, memorias internas) afirmaba "Cerebro como brain compartido" — operativamente era falso para CL2 desde 2026-04-25. Posterior a esta ADR, doctrina e implementación quedan alineadas.
+
+**Plan de migración:** ver `~/Downloads/audit-output/HANDOFF-CL2-AGENT.md` (el agente CL2 ejecuta la fase rápida + larga) y la planilla de migración de Cerebro (que el agente Cerebro produce al implementar `visibility` scoping y agents legislativos).
 
 ### ADR-G5 — Turbo monorepo vs. polyrepo
 
