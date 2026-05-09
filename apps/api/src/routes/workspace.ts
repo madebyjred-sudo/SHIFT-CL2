@@ -2855,6 +2855,438 @@ workspaceRouter.get('/:id/attach-context', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════
+// BRANDED ASSET EXPORT (carrusel / pptx / document)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Replaces the Gamma flow with: atlasContentGenerator → htmlAssetRenderer
+// → workspace_nodes insertion. The frontend gets the same shape it did
+// from the Gamma path (export_url + slides preview) plus per-slide editing.
+//
+// Endpoints:
+//   POST /:id/export-asset                          — generate
+//   POST /:id/assets/:nodeId/slides/:slideIdx/edit  — chat-edit one slide
+//   POST /:id/assets/:nodeId/regenerate-all         — re-run from workspace
+//   GET  /:id/assets/:nodeId/history                — slide edit history
+
+interface ExportAssetBody {
+  kind?: 'carousel' | 'pptx' | 'document';
+  sendToCanvas?: boolean;
+  options?: {
+    tono?: string;
+    audiencia?: string;
+    hook?: string;
+    numSlides?: number;
+    cta?: string;
+    marca?: string;
+    emojis?: boolean;
+  };
+}
+
+function nodeTypeFor(kind: 'carousel' | 'pptx' | 'document'): 'carousel' | 'pptx_asset' | 'docx_asset' {
+  return kind === 'carousel' ? 'carousel' : kind === 'pptx' ? 'pptx_asset' : 'docx_asset';
+}
+
+workspaceRouter.post('/:id/export-asset', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const { id } = req.params;
+  if (!await ownedWorkspace(userId, id, res)) return;
+
+  const body = (req.body ?? {}) as ExportAssetBody;
+  const kind = body.kind;
+  if (!kind || !['carousel', 'pptx', 'document'].includes(kind)) {
+    res.status(400).json({ ok: false, error: 'invalid_kind', hint: 'carousel|pptx|document' });
+    return;
+  }
+  const sendToCanvas = body.sendToCanvas !== false; // default true
+  const options = body.options ?? {};
+
+  try {
+    const { generateAssetContent } = await import('../services/atlasContentGenerator.js');
+    const { renderAssetToPdf } = await import('../services/htmlAssetRenderer.js');
+
+    // 1) Generate structured content via OpenRouter (anti-hallucination
+    //    pre-fetches expedientes mentioned in the workspace).
+    const content = await generateAssetContent({
+      workspaceId: id,
+      userId,
+      kind,
+      options,
+    });
+
+    // 2) Workspace title for filename + render context.
+    const { data: ws } = await supa()
+      .from('workspaces')
+      .select('id, title, description')
+      .eq('id', id)
+      .eq('user_id', userId)
+      .single();
+    const wsTitle = (ws?.title as string | undefined) ?? 'Workspace';
+
+    // 3) Pre-allocate the canvas node so we have a stable nodeId for the
+    //    GCS object path. If sendToCanvas=false we still allocate but
+    //    don't persist — keeps GCS prefixing predictable.
+    let nodeId = `tmp-${Date.now()}`;
+    let inserted: { id: string } | null = null;
+    if (sendToCanvas) {
+      const type = nodeTypeFor(kind);
+      const titleSuffix = kind === 'carousel' ? 'Carrusel' : kind === 'pptx' ? 'Presentación' : 'Documento';
+
+      // Find next-free canvas slot (top-right of existing nodes), same
+      // pattern as the docx route uses below.
+      const { data: existing } = await supa()
+        .from('workspace_nodes')
+        .select('x, width')
+        .eq('workspace_id', id);
+      const maxX = (existing ?? []).reduce(
+        (m, n) => Math.max(m, ((n.x as number) ?? 0) + ((n.width as number) ?? 360)),
+        0,
+      );
+
+      const r = await supa()
+        .from('workspace_nodes')
+        .insert({
+          workspace_id: id,
+          type,
+          title: `${wsTitle} · ${titleSuffix}`,
+          subtitle: 'Generando…',
+          x: maxX > 0 ? maxX + 40 : 40,
+          y: 40,
+          width: 360,
+          height: 200,
+          content: { kind: type },
+          asset_metadata: { kind: type, generating: true, source: 'manual' },
+          asset_slides: content.slides,
+          asset_slide_history: [],
+        })
+        .select('id')
+        .single();
+      if (r.error || !r.data) {
+        // Fall back: column missing in pre-migration env. Surface a clear error.
+        req.log?.warn('workspace/export-asset insert failed', { error: r.error?.message });
+        res.status(500).json({ ok: false, error: 'asset_node_insert_failed', detail: r.error?.message });
+        return;
+      }
+      inserted = r.data as { id: string };
+      nodeId = inserted.id;
+    }
+
+    // 4) Render PDF via Playwright + brand template, upload to GCS.
+    const render = await renderAssetToPdf({
+      content,
+      kind,
+      userId,
+      workspaceId: id,
+      nodeId,
+      workspaceTitle: wsTitle,
+      options: {
+        edition: undefined,
+        footerLeft: undefined,
+        footerRight: undefined,
+      },
+    });
+
+    const assetMetadata = {
+      kind: nodeTypeFor(kind),
+      export_url: render.exportUrl,
+      gcs_path: render.gcsPath,
+      filename: render.filename,
+      slides_count: render.slidesCount,
+      generated_at: render.generatedAt,
+      options,
+      source: 'manual' as const,
+    };
+
+    if (inserted) {
+      const { error: updErr } = await supa()
+        .from('workspace_nodes')
+        .update({
+          subtitle: render.filename,
+          asset_metadata: assetMetadata,
+          // asset_slides was already set above, leave as-is.
+        })
+        .eq('id', inserted.id);
+      if (updErr) {
+        req.log?.warn('workspace/export-asset update failed', { error: updErr.message });
+      }
+      // Touch workspace.updated_at so the canvas list re-renders fresh.
+      await supa()
+        .from('workspaces')
+        .update({ updated_at: render.generatedAt })
+        .eq('id', id)
+        .eq('user_id', userId);
+    }
+
+    req.log?.info('workspace/export-asset ok', {
+      workspace: id, kind, nodeId, slides: render.slidesCount,
+    });
+
+    res.json({
+      ok: true,
+      node_id: inserted?.id ?? null,
+      asset_metadata: assetMetadata,
+      slides: content.slides.map((s) => ({
+        idx: s.idx,
+        kind: s.kind,
+        headline: s.headline,
+        eyebrow: s.eyebrow ?? null,
+        body_preview: s.body ? s.body.slice(0, 240) : null,
+      })),
+    });
+  } catch (err) {
+    req.log?.warn('workspace/export-asset failed', { workspace: id, error: (err as Error).message });
+    res.status(500).json({ ok: false, error: 'export_asset_failed', detail: (err as Error).message });
+  }
+});
+
+// POST /:id/assets/:nodeId/slides/:slideIdx/edit
+// Body: { instruction: string }
+// Edits one slide via OpenRouter, persists before/after to asset_slide_history,
+// then re-renders the full PDF (the cost is ~5s — acceptable for the demo
+// flow, and avoids partial-PDF stitching complexity).
+workspaceRouter.post('/:id/assets/:nodeId/slides/:slideIdx/edit', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const { id, nodeId, slideIdx } = req.params;
+  if (!await ownedWorkspace(userId, id, res)) return;
+
+  const slideIndex = Number.parseInt(slideIdx, 10);
+  if (!Number.isFinite(slideIndex) || slideIndex < 1) {
+    res.status(400).json({ ok: false, error: 'invalid_slide_idx' });
+    return;
+  }
+  const instruction = String((req.body?.instruction ?? '')).trim();
+  if (!instruction) {
+    res.status(400).json({ ok: false, error: 'instruction_required' });
+    return;
+  }
+
+  try {
+    const { data: node, error: nodeErr } = await supa()
+      .from('workspace_nodes')
+      .select('id, type, title, asset_metadata, asset_slides, asset_slide_history')
+      .eq('id', nodeId)
+      .eq('workspace_id', id)
+      .single();
+    if (nodeErr || !node) {
+      res.status(404).json({ ok: false, error: 'asset_node_not_found' });
+      return;
+    }
+    const supportedTypes = ['carousel', 'pptx_asset', 'docx_asset'];
+    if (!supportedTypes.includes(node.type as string)) {
+      res.status(400).json({ ok: false, error: 'not_an_asset_node' });
+      return;
+    }
+
+    const slides = (node.asset_slides as Array<Record<string, unknown>>) ?? [];
+    const idxInArray = slides.findIndex((s) => Number(s.idx) === slideIndex);
+    if (idxInArray < 0) {
+      res.status(404).json({ ok: false, error: 'slide_not_found', hint: `slide_idx=${slideIndex}` });
+      return;
+    }
+    const beforeSlide = slides[idxInArray];
+
+    const { editSingleSlide } = await import('../services/atlasContentGenerator.js');
+    const assetKind: 'carousel' | 'pptx' | 'document' =
+      node.type === 'carousel' ? 'carousel' : node.type === 'pptx_asset' ? 'pptx' : 'document';
+
+    const editedSlide = await editSingleSlide({
+      slide: beforeSlide as unknown as import('../services/atlasContentGenerator.js').AssetSlide,
+      instruction,
+      assetKind,
+      workspaceTitle: String(node.title ?? 'Workspace'),
+    });
+
+    const updatedSlides = slides.map((s, i) => (i === idxInArray ? (editedSlide as unknown as Record<string, unknown>) : s));
+    const history = (node.asset_slide_history as Array<Record<string, unknown>>) ?? [];
+    history.push({
+      slide_idx: slideIndex,
+      before: beforeSlide,
+      after: editedSlide,
+      instruction,
+      edited_at: new Date().toISOString(),
+      edited_by_user_id: userId,
+    });
+
+    // Re-render the whole PDF with the new slides. We deliberately rebuild
+    // a minimal AssetContent from existing metadata + the (now-updated)
+    // slide array — we don't re-call the LLM, the slide is already final.
+    const meta = (node.asset_metadata as Record<string, unknown>) ?? {};
+    const { renderAssetToPdf } = await import('../services/htmlAssetRenderer.js');
+    const { data: ws } = await supa()
+      .from('workspaces')
+      .select('title, description')
+      .eq('id', id)
+      .single();
+    const render = await renderAssetToPdf({
+      content: {
+        title: String(ws?.title ?? 'Workspace'),
+        subtitle: typeof ws?.description === 'string' ? ws.description : undefined,
+        slides: updatedSlides as unknown as import('../services/atlasContentGenerator.js').AssetSlide[],
+      },
+      kind: assetKind,
+      userId,
+      workspaceId: id,
+      nodeId,
+      workspaceTitle: String(node.title ?? 'Workspace'),
+    });
+
+    const newMeta = {
+      ...meta,
+      export_url: render.exportUrl,
+      gcs_path: render.gcsPath,
+      filename: render.filename,
+      slides_count: render.slidesCount,
+      generated_at: render.generatedAt,
+    };
+
+    const { error: updErr } = await supa()
+      .from('workspace_nodes')
+      .update({
+        asset_metadata: newMeta,
+        asset_slides: updatedSlides,
+        asset_slide_history: history,
+      })
+      .eq('id', nodeId);
+    if (updErr) throw new Error(updErr.message);
+
+    res.json({
+      ok: true,
+      node_id: nodeId,
+      slide_idx: slideIndex,
+      slide: editedSlide,
+      asset_metadata: newMeta,
+    });
+  } catch (err) {
+    req.log?.warn('workspace/assets/slide-edit failed', { workspace: id, nodeId, error: (err as Error).message });
+    res.status(500).json({ ok: false, error: 'slide_edit_failed', detail: (err as Error).message });
+  }
+});
+
+// POST /:id/assets/:nodeId/regenerate-all
+// Body: { options? }
+// Re-runs the full LLM pipeline against the *current* workspace markdown,
+// preserving the history (we append a "regenerate-all" marker but DON'T
+// wipe history). Used when the user explicitly wants to start over.
+workspaceRouter.post('/:id/assets/:nodeId/regenerate-all', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const { id, nodeId } = req.params;
+  if (!await ownedWorkspace(userId, id, res)) return;
+
+  const options = (req.body?.options ?? {}) as ExportAssetBody['options'];
+
+  try {
+    const { data: node, error: nodeErr } = await supa()
+      .from('workspace_nodes')
+      .select('id, type, title, asset_metadata, asset_slide_history')
+      .eq('id', nodeId)
+      .eq('workspace_id', id)
+      .single();
+    if (nodeErr || !node) {
+      res.status(404).json({ ok: false, error: 'asset_node_not_found' });
+      return;
+    }
+    const assetKind: 'carousel' | 'pptx' | 'document' =
+      node.type === 'carousel' ? 'carousel' : node.type === 'pptx_asset' ? 'pptx' : 'document';
+
+    const { generateAssetContent } = await import('../services/atlasContentGenerator.js');
+    const { renderAssetToPdf } = await import('../services/htmlAssetRenderer.js');
+
+    const content = await generateAssetContent({
+      workspaceId: id,
+      userId,
+      kind: assetKind,
+      options,
+    });
+
+    const render = await renderAssetToPdf({
+      content,
+      kind: assetKind,
+      userId,
+      workspaceId: id,
+      nodeId,
+      workspaceTitle: String(node.title ?? 'Workspace'),
+    });
+
+    const history = (node.asset_slide_history as Array<Record<string, unknown>>) ?? [];
+    history.push({
+      slide_idx: -1,
+      before: null,
+      after: null,
+      instruction: '__regenerate_all__',
+      edited_at: render.generatedAt,
+      edited_by_user_id: userId,
+    });
+
+    const newMeta = {
+      kind: node.type,
+      export_url: render.exportUrl,
+      gcs_path: render.gcsPath,
+      filename: render.filename,
+      slides_count: render.slidesCount,
+      generated_at: render.generatedAt,
+      options: options ?? {},
+      source: 'manual' as const,
+    };
+
+    const { error: updErr } = await supa()
+      .from('workspace_nodes')
+      .update({
+        asset_metadata: newMeta,
+        asset_slides: content.slides,
+        asset_slide_history: history,
+      })
+      .eq('id', nodeId);
+    if (updErr) throw new Error(updErr.message);
+
+    res.json({
+      ok: true,
+      node_id: nodeId,
+      asset_metadata: newMeta,
+      slides: content.slides.map((s) => ({
+        idx: s.idx,
+        kind: s.kind,
+        headline: s.headline,
+        eyebrow: s.eyebrow ?? null,
+        body_preview: s.body ? s.body.slice(0, 240) : null,
+      })),
+    });
+  } catch (err) {
+    req.log?.warn('workspace/assets/regenerate-all failed', { workspace: id, nodeId, error: (err as Error).message });
+    res.status(500).json({ ok: false, error: 'regenerate_all_failed', detail: (err as Error).message });
+  }
+});
+
+// GET /:id/assets/:nodeId/history
+workspaceRouter.get('/:id/assets/:nodeId/history', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const { id, nodeId } = req.params;
+  if (!await ownedWorkspace(userId, id, res)) return;
+
+  try {
+    const { data: node, error } = await supa()
+      .from('workspace_nodes')
+      .select('id, type, asset_slide_history')
+      .eq('id', nodeId)
+      .eq('workspace_id', id)
+      .single();
+    if (error || !node) {
+      res.status(404).json({ ok: false, error: 'asset_node_not_found' });
+      return;
+    }
+    res.json({
+      ok: true,
+      node_id: nodeId,
+      history: (node.asset_slide_history as unknown[]) ?? [],
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
 // DOCX ASSET EXPORT
 // ═══════════════════════════════════════════════════════════════════════
 //
