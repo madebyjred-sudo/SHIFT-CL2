@@ -129,13 +129,23 @@ async function uploadAssetPdf(opts: {
       file.save(opts.pdf, {
         contentType: 'application/pdf',
         resumable: false,
-        metadata: { cacheControl: 'public, max-age=3600' },
+        metadata: { cacheControl: 'private, max-age=3600' },
       }),
     { ms: UPLOAD_TIMEOUT_MS, label: 'gcs:upload_asset' },
   );
-  // Public bucket → use the public URL form (no signing needed). The
-  // bucket policy from migration 0023 grants SELECT to anon.
-  const exportUrl = `https://storage.googleapis.com/${ASSETS_BUCKET}/${encodeURI(objectPath)}`;
+  // Signed URL pattern (mismo que podcastStorage.ts). Mantenemos el bucket
+  // privado y firmamos URLs con TTL — más seguro y permite reusar buckets
+  // existentes (cl2-assets dedicado o shift-cl2-podcasts compartido) sin
+  // tener que abrir public-read en el bucket.
+  const SIGNED_URL_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 días
+  const [exportUrl] = await withTimeout(
+    () => file.getSignedUrl({
+      action: 'read',
+      expires: Date.now() + SIGNED_URL_TTL_MS,
+      version: 'v4',
+    }),
+    { ms: UPLOAD_TIMEOUT_MS, label: 'gcs:sign_asset_url' },
+  );
   return { exportUrl, gcsPath: `gs://${ASSETS_BUCKET}/${objectPath}` };
 }
 
