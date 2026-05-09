@@ -1,6 +1,7 @@
 import { motion } from 'motion/react';
 import { Scale, FileText, Radar } from 'lucide-react';
 import { useSupabaseStore } from '@/store/useSupabaseStore';
+import { Cl2Mark } from './Cl2Mark';
 
 export function SupabaseAuthView() {
   const { signInGoogle, isAuthLoading, error } = useSupabaseStore();
@@ -28,21 +29,10 @@ export function SupabaseAuthView() {
               initial={{ scale: 0.8, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               transition={{ delay: 0.1, type: 'spring', damping: 14 }}
-              className="mx-auto h-16 w-16 rounded-2xl relative overflow-hidden"
-              style={{ boxShadow: '0 0 40px rgba(244, 63, 94, 0.3)' }}
+              className="mx-auto"
+              style={{ filter: 'drop-shadow(0 0 40px rgba(249, 53, 73, 0.35))' }}
             >
-              <div className="absolute inset-0 bg-gradient-to-br from-cl2-accent to-cl2-accent-soft" />
-              <div
-                className="absolute inset-0 opacity-30"
-                style={{
-                  backgroundImage:
-                    'radial-gradient(circle, rgba(255,255,255,0.4) 1px, transparent 1px)',
-                  backgroundSize: '5px 5px',
-                }}
-              />
-              <div className="relative h-full w-full flex items-center justify-center text-white font-extrabold text-xl font-heading">
-                CL2
-              </div>
+              <Cl2Mark size={64} className="rounded-2xl" />
             </motion.div>
 
             <div className="space-y-1">
@@ -53,7 +43,7 @@ export function SupabaseAuthView() {
                 <br />
                 <span>Legislativa</span>
               </h1>
-              <p className="text-white/60 text-sm">Asamblea Legislativa de Costa Rica</p>
+              <p className="text-white/60 text-sm">Consultoría estratégica · CL2</p>
             </div>
           </div>
 
