@@ -19,7 +19,7 @@
 # Stage 1 — install deps for the entire workspace.
 # Cached separately so source-only changes skip the install layer.
 # ──────────────────────────────────────────────────────────────────────
-FROM node:20-alpine AS deps
+FROM node:20-slim AS deps
 WORKDIR /app
 
 # Copy ONLY the package manifests so npm can resolve the workspace graph.
@@ -36,7 +36,7 @@ RUN npm ci --workspaces --include-workspace-root --no-audit --no-fund
 # (per-workspace node_modules dirs aren't created by npm ci with hoisting).
 # So we only copy the root node_modules, not per-workspace ones.
 # ──────────────────────────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+FROM node:20-slim AS builder
 WORKDIR /app
 
 COPY --from=deps /app/node_modules ./node_modules
@@ -56,7 +56,7 @@ RUN npm run build --workspace=apps/api
 # ──────────────────────────────────────────────────────────────────────
 # Stage 3 — slim runtime image. Only what we need to run.
 # ──────────────────────────────────────────────────────────────────────
-FROM node:20-alpine AS runner
+FROM node:20-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 # Cloud Run will override API_PORT via its $PORT injection; we pass
@@ -66,9 +66,16 @@ ENV API_PORT=8080
 
 # tini gives us proper signal forwarding so SIGTERM cleans up
 # in-flight SSE streams instead of getting eaten by the node parent.
-RUN apk add --no-cache tini
+# Debian-slim usa apt; añadimos también ca-certificates (necesario para
+# cualquier llamada HTTPS desde el contenedor — Supabase, OpenRouter,
+# Gamma, Cerebro, GCS — y NO viene preinstalado en debian:slim).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tini ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
-# Copy installed node_modules + built artifacts.
+# Copy installed node_modules + built artifacts BEFORE installing the
+# Playwright browser so the next step can use the playwright CLI from
+# the workspace deps (apps/api added it as a runtime dep).
 COPY --from=deps    /app/node_modules ./node_modules
 COPY --from=builder /app/apps/api/dist ./apps/api/dist
 COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
@@ -77,10 +84,19 @@ COPY --from=builder /app/packages/shared-types ./packages/shared-types
 COPY --from=builder /app/packages/cerebro-config ./packages/cerebro-config
 COPY package.json package-lock.json ./
 
-# Drop privileges. node:alpine ships the `node` user (uid 1000).
+# ── Playwright Chromium ─────────────────────────────────────────────
+# El pipeline de assets (atlasContentGenerator + htmlAssetRenderer)
+# levanta una instancia headless para renderizar HTML→PDF (carrusel
+# 1080×1080, pptx 16:9, document A4). `--with-deps` instala las libs
+# del sistema (libnss3, libatk-bridge, libcups2, fonts-liberation, etc.)
+# que Chromium pide en Linux. Sin esto, el renderer tira
+# `playwright_not_installed` en runtime.
+RUN npx --yes playwright install --with-deps chromium
+
+# Drop privileges. node:slim ships the `node` user (uid 1000).
 USER node
 
 EXPOSE 8080
 
-ENTRYPOINT ["/sbin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "apps/api/dist/index.js"]
