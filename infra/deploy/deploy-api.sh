@@ -82,7 +82,9 @@ gcloud run deploy "$SERVICE_NAME" \
   --set-env-vars "GCP_LOCATION=$REGION" \
   --set-env-vars "YOUTUBE_API_KEY=$YOUTUBE_API_KEY" \
   --set-env-vars "INTERNAL_TRIGGER_SECRET=$INTERNAL_TRIGGER_SECRET" \
-  --set-env-vars "GAMMA_API_KEY=$GAMMA_API_KEY"
+  --set-env-vars "GAMMA_API_KEY=$GAMMA_API_KEY" \
+  --set-env-vars "CL2_ASSETS_BUCKET=shift-cl2-podcasts" \
+  --set-env-vars "ASSET_GCS_BUCKET=shift-cl2-podcasts"
 
 # ─── 3. Print the service URL so the next step can grab it ────────────
 SERVICE_URL=$(gcloud run services describe "$SERVICE_NAME" \

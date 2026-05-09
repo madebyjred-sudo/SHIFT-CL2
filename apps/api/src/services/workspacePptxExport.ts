@@ -1,4 +1,13 @@
 /**
+ * @deprecated 2026-05 — superseded by `atlasContentGenerator` +
+ * `htmlAssetRenderer` (kind='pptx'). The new pipeline produces a fully
+ * branded HTML→PDF deck (1920x1080) instead of delegating layout/visuals
+ * to Gamma, which was generating off-brand presentations (stock photos,
+ * random fonts that didn't respect CL2). Kept temporarily for backward
+ * compat with the legacy /export endpoint and the chat tool
+ * `generate_presentation`, both of which still flow through Gamma.
+ * Migrate callers to the new `/export-asset` route + `generate_asset` tool.
+ *
  * workspacePptxExport — shared pptx generation flow.
  *
  * Extracted from routes/workspace.ts so it can be called from two places:

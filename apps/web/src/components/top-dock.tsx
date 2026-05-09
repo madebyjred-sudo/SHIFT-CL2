@@ -4,6 +4,7 @@ import { UserNavMenu } from './UserNavMenu';
 import { useRoute, navigate } from '@/lib/router';
 import { cn } from '@/lib/utils';
 import { useOnboarding } from './onboarding/OnboardingProvider';
+import { Cl2Mark } from './Cl2Mark';
 
 interface TopDockProps {
   onOpenHistory?: () => void;
@@ -35,31 +36,15 @@ export function TopDock({ onOpenHistory, onToggleHistory, isHistoryOpen }: TopDo
   return (
     <header className="sticky top-0 z-[90] px-4 sm:px-5 md:px-6 pt-1.5 sm:pt-2">
       <div className="w-full border border-t-0 border-[#0e1745]/[0.06] dark:border-white/[0.04] rounded-b-2xl shadow-[0_4px_20px_rgba(14,23,69,0.04)] dark:shadow-[0_4px_20px_rgba(0,0,0,0.12)] px-3 py-2 md:px-4 md:py-2.5 flex items-center justify-between gap-2 md:gap-4">
-        {/* Brand */}
+        {/* Brand — isotipo oficial CL2 (asterisco rojo) + lockup editorial */}
         <div className="flex items-center gap-2.5 min-w-0" data-tour="brand">
-          <div
-            className="relative h-9 w-9 rounded-xl overflow-hidden shrink-0"
-            aria-label="CL2 Logo"
-          >
-            <div className="absolute inset-0 bg-gradient-to-br from-cl2-accent to-cl2-accent-soft" />
-            <div
-              className="absolute inset-0 opacity-30"
-              style={{
-                backgroundImage:
-                  'radial-gradient(circle, rgba(255,255,255,0.4) 1px, transparent 1px)',
-                backgroundSize: '5px 5px',
-              }}
-            />
-            <div className="relative h-full w-full flex items-center justify-center text-white font-heading font-extrabold text-xs tracking-tight">
-              CL2
-            </div>
-          </div>
+          <Cl2Mark size={36} className="shrink-0 rounded-xl" />
           <div className="hidden sm:flex flex-col leading-tight">
-            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[#0e1745]/35 dark:text-white/35">
-              Inteligencia Legislativa
+            <span className="font-display text-[18px] font-semibold tracking-[-0.01em] text-[#0e1745] dark:text-white leading-none">
+              cl2
             </span>
-            <span className="text-[11px] font-medium text-[#0e1745]/70 dark:text-white/70">
-              Asamblea de Costa Rica
+            <span className="text-[10px] font-medium uppercase tracking-[0.16em] text-[#0e1745]/45 dark:text-white/45 mt-1">
+              Consultoría estratégica
             </span>
           </div>
         </div>

@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="es-CR">
+<head>
+<meta charset="UTF-8">
+<title>cl2 — carrusel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Figtree:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<!--ASSET_DATA_INJECTION_POINT-->
+<style>
+  :root {
+    --paper: #faf5ec;
+    --paper-warm: #f4ecdc;
+    --ink: #0e1745;
+    --ink-soft: #2a3460;
+    --burgundy: #7a2237;
+    --burgundy-deep: #5a1a2a;
+    --accent: #f93549;
+    --accent-soft: #ff6f6d;
+    --line: rgba(14, 23, 69, 0.10);
+    --line-soft: rgba(14, 23, 69, 0.05);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    background: #1a1a1a;
+    font-family: 'Figtree', system-ui, sans-serif;
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  .carousel { display: block; }
+  .slide {
+    width: 1080px; height: 1080px;
+    position: relative; overflow: hidden;
+    background: var(--paper);
+    page-break-after: always; break-after: page;
+    display: flex; flex-direction: column;
+    padding: 70px 80px;
+  }
+  .slide:last-child { page-break-after: auto; break-after: auto; }
+  .slide::before {
+    content: ''; position: absolute; inset: 0;
+    background-image: radial-gradient(circle, rgba(14,23,69,0.05) 1px, transparent 1px);
+    background-size: 24px 24px;
+    pointer-events: none; opacity: 0.6;
+  }
+  .slide-header {
+    display: flex; align-items: center; justify-content: space-between;
+    position: relative; z-index: 2;
+  }
+  .brand-lockup { display: flex; align-items: center; gap: 14px; }
+  .brand-mark {
+    width: 44px; height: 44px; border-radius: 12px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-soft));
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 4px 14px rgba(249, 53, 73, 0.25);
+  }
+  .brand-mark svg { width: 28px; height: 28px; }
+  .brand-text { display: flex; flex-direction: column; line-height: 1; }
+  .brand-text .wm {
+    font-family: 'Newsreader', serif; font-size: 22px; font-style: italic;
+    font-weight: 500; letter-spacing: -0.01em; color: var(--ink);
+  }
+  .brand-text .tag {
+    font-family: 'IBM Plex Mono', monospace; font-size: 9.5px;
+    font-weight: 500; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--ink); opacity: 0.45; margin-top: 5px;
+  }
+  .slide-counter {
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+    font-weight: 500; letter-spacing: 0.16em; color: var(--ink); opacity: 0.5;
+  }
+  .slide-counter b { color: var(--burgundy); font-weight: 600; }
+  .slide-body {
+    flex: 1; display: flex; flex-direction: column;
+    justify-content: center; position: relative; z-index: 2;
+    padding: 60px 0 40px;
+  }
+  .eyebrow {
+    font-family: 'IBM Plex Mono', monospace; font-size: 12px;
+    font-weight: 500; letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--burgundy); margin-bottom: 26px;
+  }
+  h1.display {
+    font-family: 'Newsreader', serif; font-weight: 400;
+    color: var(--ink); line-height: 1.05; letter-spacing: -0.022em;
+    text-wrap: balance; font-size: 88px;
+  }
+  h1.display em { font-style: italic; color: var(--burgundy); font-weight: 400; }
+  h2.head {
+    font-family: 'Newsreader', serif; font-weight: 500;
+    font-size: 56px; line-height: 1.08; letter-spacing: -0.018em;
+    color: var(--ink); text-wrap: balance;
+  }
+  h2.head em { font-style: italic; color: var(--burgundy); font-weight: 500; }
+  p.lede {
+    font-family: 'Newsreader', serif; font-size: 26px;
+    line-height: 1.45; font-weight: 300; color: var(--ink-soft);
+    margin-top: 28px; text-wrap: pretty; max-width: 820px;
+  }
+  p.lede em { font-style: italic; color: var(--burgundy); }
+  p.body {
+    font-family: 'Figtree', sans-serif; font-size: 19px;
+    line-height: 1.6; color: var(--ink-soft);
+    margin-top: 18px; max-width: 820px;
+  }
+  p.body em { font-style: italic; color: var(--burgundy); }
+  .slide-footer {
+    display: flex; align-items: center; justify-content: space-between;
+    position: relative; z-index: 2;
+    padding-top: 22px; border-top: 1px solid var(--line);
+  }
+  .footer-meta {
+    font-family: 'IBM Plex Mono', monospace; font-size: 10.5px;
+    font-weight: 500; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--ink); opacity: 0.45;
+  }
+  .footer-meta b { color: var(--burgundy); opacity: 1; }
+  .row-list {
+    display: flex; flex-direction: column; gap: 22px;
+    margin-top: 40px; max-width: 880px;
+  }
+  .row {
+    display: grid; grid-template-columns: 90px 1fr; gap: 26px;
+    align-items: baseline; padding-bottom: 22px; border-bottom: 1px solid var(--line);
+  }
+  .row:last-child { border-bottom: none; }
+  .row-num {
+    font-family: 'IBM Plex Mono', monospace; font-size: 13px;
+    font-weight: 600; color: var(--burgundy); letter-spacing: 0.05em;
+  }
+  .row-title {
+    font-family: 'Newsreader', serif; font-size: 30px; font-weight: 500;
+    line-height: 1.18; color: var(--ink); letter-spacing: -0.012em;
+  }
+  .row-title em { font-style: italic; color: var(--burgundy); }
+  .row-sub {
+    font-family: 'Figtree', sans-serif; font-size: 16px; font-weight: 400;
+    color: var(--ink-soft); line-height: 1.55; margin-top: 6px;
+  }
+  .stats {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 30px;
+    margin-top: 50px; max-width: 880px;
+  }
+  .stat {
+    border: 1px solid var(--line); border-radius: 16px;
+    padding: 32px 30px; background: rgba(255, 255, 255, 0.4);
+  }
+  .stat .num {
+    font-family: 'Newsreader', serif; font-size: 64px; font-weight: 400;
+    line-height: 1; color: var(--burgundy); letter-spacing: -0.03em;
+  }
+  .stat .num em { font-style: italic; }
+  .stat .label {
+    font-family: 'Figtree', sans-serif; font-size: 15px; font-weight: 500;
+    color: var(--ink-soft); margin-top: 10px; line-height: 1.4;
+  }
+  .split {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+    margin-top: 44px; max-width: 880px;
+    border-top: 2px solid var(--ink); border-bottom: 2px solid var(--ink);
+  }
+  .col { padding: 32px 28px; }
+  .col + .col { border-left: 1px solid var(--line); }
+  .col-head {
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+    font-weight: 600; text-transform: uppercase; letter-spacing: 0.18em;
+    color: var(--ink); opacity: 0.55; margin-bottom: 18px;
+  }
+  .col h3 {
+    font-family: 'Newsreader', serif; font-size: 26px; line-height: 1.18;
+    font-weight: 500; color: var(--ink); margin-bottom: 14px;
+  }
+  .col h3 em { font-style: italic; color: var(--burgundy); }
+  .col-list { list-style: none; padding: 0; margin: 0; }
+  .col-list li {
+    font-family: 'Figtree', sans-serif; font-size: 16px; color: var(--ink-soft);
+    line-height: 1.55; padding: 6px 0; border-bottom: 1px dashed var(--line-soft);
+  }
+  .col-list li:last-child { border-bottom: none; }
+  .alert {
+    margin-top: 50px; border-left: 4px solid var(--accent);
+    padding: 26px 32px; background: rgba(249, 53, 73, 0.05);
+    border-radius: 0 12px 12px 0; max-width: 820px;
+  }
+  .alert.warning { border-left-color: #d97706; background: rgba(217, 119, 6, 0.05); }
+  .alert.note { border-left-color: var(--ink); background: rgba(14, 23, 69, 0.04); }
+  .alert-eye {
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+    font-weight: 600; letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--accent);
+  }
+  .alert.warning .alert-eye { color: #d97706; }
+  .alert.note .alert-eye { color: var(--ink); }
+  .alert h3 {
+    font-family: 'Newsreader', serif; font-size: 32px; font-weight: 500;
+    line-height: 1.15; color: var(--ink); margin-top: 8px; margin-bottom: 12px;
+  }
+  .alert p {
+    font-family: 'Figtree', sans-serif; font-size: 17px; line-height: 1.55;
+    color: var(--ink-soft);
+  }
+  .alert p em { font-style: italic; color: var(--burgundy); }
+  .quote {
+    margin-top: 40px; max-width: 880px;
+    padding-left: 28px; border-left: 3px solid var(--burgundy);
+  }
+  .quote-text {
+    font-family: 'Newsreader', serif; font-size: 32px; font-style: italic;
+    line-height: 1.3; color: var(--ink); letter-spacing: -0.012em;
+  }
+  .quote-attr {
+    font-family: 'IBM Plex Mono', monospace; font-size: 12px;
+    text-transform: uppercase; letter-spacing: 0.16em;
+    color: var(--burgundy); margin-top: 18px;
+  }
+  .slide.cover {
+    background: radial-gradient(ellipse 90% 70% at 50% 100%, rgba(122, 34, 55, 0.09), transparent 60%), var(--paper);
+  }
+  .slide.cover h1.display { font-size: 92px; margin-top: 0; }
+  .slide.section {
+    background: var(--paper-warm);
+  }
+  .slide.section h1.display { font-size: 78px; }
+  .slide.cta {
+    background: radial-gradient(ellipse 70% 60% at 30% 30%, rgba(249, 53, 73, 0.10), transparent 60%), var(--burgundy-deep);
+    color: var(--paper);
+  }
+  .slide.cta::before { opacity: 0.15; }
+  .slide.cta .brand-text .wm,
+  .slide.cta .brand-text .tag,
+  .slide.cta .slide-counter,
+  .slide.cta .footer-meta { color: var(--paper); opacity: 0.75; }
+  .slide.cta .slide-counter b { color: var(--accent-soft); opacity: 1; }
+  .slide.cta .eyebrow { color: var(--accent-soft); }
+  .slide.cta h1.display { color: var(--paper); font-size: 80px; }
+  .slide.cta h1.display em { color: var(--accent-soft); }
+  .slide.cta p.lede { color: rgba(250, 245, 236, 0.8); }
+  .slide.cta p.lede em { color: var(--accent-soft); }
+  .slide.cta .footer-meta b { color: var(--accent-soft); opacity: 1; }
+  .slide.cta .slide-footer { border-top-color: rgba(250, 245, 236, 0.18); }
+  .cta-tag {
+    display: inline-block; margin-top: 36px; padding: 16px 28px;
+    border-radius: 999px; background: linear-gradient(135deg, var(--accent), var(--accent-soft));
+    color: white; font-family: 'Figtree', sans-serif; font-size: 17px;
+    font-weight: 600; box-shadow: 0 8px 28px rgba(249, 53, 73, 0.28);
+  }
+  .cover-deco {
+    position: absolute; top: 90px; right: 60px;
+    font-family: 'Newsreader', serif; font-style: italic;
+    font-size: 220px; color: var(--burgundy);
+    opacity: 0.07; line-height: 0.8; z-index: 1; pointer-events: none;
+  }
+  @media print {
+    @page { size: 1080px 1080px; margin: 0; }
+    html, body { background: var(--paper); }
+    .slide { box-shadow: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="carousel" id="carousel"></div>
+<script>
+(function () {
+  const data = window.__ASSET_DATA__ || { content: { title: 'CL2', slides: [] }, options: {} };
+  const { content, options } = data;
+  const total = content.slides.length;
+
+  function pad(n) { return String(n).padStart(2, '0'); }
+  // Render *italic* spans as <em> for burgundy emphasis (only allowed inline marker).
+  function emText(s) {
+    if (!s) return '';
+    const escaped = String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return escaped.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  }
+  const BRAND_SVG = '<svg viewBox="0 0 83.42 83.42" xmlns="http://www.w3.org/2000/svg"><g fill="#fff"><path d="M34.97,34.64c-5.6-3.09-11.6-6.29-16.4-8.6l-2,3.47c4.41,3.01,10.18,6.6,15.65,9.9l2.75-4.77Z"/><path d="M51.45,44.16l-2.75,4.76c5.53,3.05,11.42,6.19,16.15,8.47l2-3.47c-4.34-2.96-10-6.49-15.41-9.76Z"/><path d="M38.88,51.37c.12,6.3.36,12.99.76,18.22h4.15c.39-5.23.63-11.92.76-18.22h-5.66Z"/><path d="M44.55,32.34c-.12-6.39-.36-13.19-.76-18.51h-4.15c-.4,5.31-.64,12.12-.76,18.51h5.67Z"/><path d="M64.85,26.03c-7.3,3.52-17.45,9.09-24.57,13.2-7.12,4.11-17.02,10.11-23.72,14.68l2,3.47c7.3-3.52,17.45-9.09,24.57-13.2,7.12-4.11,17.02-10.11,23.72-14.68l-2-3.47Z"/></g></svg>';
+
+  function header(idx, total) {
+    return (
+      '<header class="slide-header">' +
+        '<div class="brand-lockup">' +
+          '<span class="brand-mark">' + BRAND_SVG + '</span>' +
+          '<div class="brand-text"><span class="wm">cl2</span><span class="tag">Consultoría estratégica</span></div>' +
+        '</div>' +
+        '<span class="slide-counter"><b>' + pad(idx) + '</b> / ' + pad(total) + '</span>' +
+      '</header>'
+    );
+  }
+  function footer(slide, idx) {
+    const left = (slide.meta && slide.meta.footerLeft) || options.footerLeft || 'Análisis · cl2.cr';
+    const right = (slide.meta && slide.meta.footerRight) || options.footerRight ||
+      (idx === 1 ? (options.edition || 'Edición CL2') : 'cl2.cr');
+    return (
+      '<footer class="slide-footer">' +
+        '<span class="footer-meta">' + emText(left) + '</span>' +
+        '<span class="footer-meta">' + emText(right) + '</span>' +
+      '</footer>'
+    );
+  }
+
+  function bodyContent(slide) {
+    const eyebrow = slide.eyebrow ? '<div class="eyebrow">' + emText(slide.eyebrow) + '</div>' : '';
+    const isLargeHead = slide.kind === 'cover' || slide.kind === 'cta';
+    const headTag = isLargeHead
+      ? '<h1 class="display">' + emText(slide.headline) + '</h1>'
+      : '<h2 class="head">' + emText(slide.headline) + '</h2>';
+    const lede = slide.body && (slide.kind === 'cover' || slide.kind === 'cta')
+      ? '<p class="lede">' + emText(slide.body) + '</p>'
+      : slide.body
+        ? '<p class="body">' + emText(slide.body) + '</p>'
+        : '';
+    let extra = '';
+    if (slide.kind === 'stats' && slide.items && slide.items.length) {
+      extra = '<div class="stats">' + slide.items.slice(0, 4).map(function (it) {
+        return '<div class="stat"><div class="num">' + emText(it.value) + '</div><div class="label">' + emText(it.sub || it.label) + '</div></div>';
+      }).join('') + '</div>';
+    } else if (slide.kind === 'list' && slide.items && slide.items.length) {
+      extra = '<div class="row-list">' + slide.items.slice(0, 5).map(function (it) {
+        return '<div class="row"><span class="row-num">' + emText(it.label) + '</span><div>' +
+          '<div class="row-title">' + emText(it.value) + '</div>' +
+          (it.sub ? '<div class="row-sub">' + emText(it.sub) + '</div>' : '') +
+          '</div></div>';
+      }).join('') + '</div>';
+    } else if (slide.kind === 'comparison' && slide.columns && slide.columns.length) {
+      extra = '<div class="split">' + slide.columns.slice(0, 2).map(function (c) {
+        const bullets = (c.bullets || []).map(function (b) { return '<li>' + emText(b) + '</li>'; }).join('');
+        return '<div class="col"><div class="col-head">' + emText(c.head) + '</div>' +
+          '<h3>' + emText(c.title) + '</h3>' +
+          '<ul class="col-list">' + bullets + '</ul></div>';
+      }).join('') + '</div>';
+    } else if (slide.kind === 'alert' && slide.alert) {
+      const cls = 'alert ' + (slide.alert.kind === 'warning' ? 'warning' : slide.alert.kind === 'note' ? 'note' : '');
+      const eye = slide.alert.kind === 'warning' ? 'Advertencia CL2' :
+                  slide.alert.kind === 'note' ? 'Nota editorial' : 'Recomendación CL2';
+      extra = '<div class="' + cls + '">' +
+        '<div class="alert-eye">' + emText(eye) + '</div>' +
+        '<h3>' + emText(slide.alert.title) + '</h3>' +
+        '<p>' + emText(slide.alert.text) + '</p></div>';
+    } else if (slide.kind === 'quote' && slide.body) {
+      extra = '<div class="quote"><div class="quote-text">' + emText(slide.body) + '</div>' +
+        (slide.eyebrow ? '<div class="quote-attr">— ' + emText(slide.eyebrow) + '</div>' : '') + '</div>';
+    } else if (slide.kind === 'cta' && options.ctaTag) {
+      extra = '<div class="cta-tag">' + emText(options.ctaTag) + '</div>';
+    }
+    return '<div class="slide-body">' + (slide.kind === 'quote' ? '' : eyebrow) + headTag + lede + extra + '</div>';
+  }
+
+  function classFor(slide) {
+    if (slide.kind === 'cover') return 'slide cover';
+    if (slide.kind === 'cta') return 'slide cta';
+    if (slide.kind === 'section') return 'slide section';
+    return 'slide';
+  }
+
+  const root = document.getElementById('carousel');
+  const cover = (content.slides[0] && content.slides[0].kind === 'cover');
+  content.slides.forEach(function (slide, i) {
+    const wrap = document.createElement('section');
+    wrap.className = classFor(slide);
+    let inner = '';
+    if (slide.kind === 'cover') {
+      inner += '<div class="cover-deco">¶</div>';
+    }
+    inner += header(slide.idx || (i + 1), total);
+    inner += bodyContent(slide);
+    inner += footer(slide, slide.idx || (i + 1));
+    wrap.innerHTML = inner;
+    root.appendChild(wrap);
+  });
+  window.__ASSET_RENDERED__ = true;
+})();
+</script>
+</body>
+</html>

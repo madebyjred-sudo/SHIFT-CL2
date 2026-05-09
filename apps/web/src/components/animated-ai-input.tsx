@@ -141,6 +141,14 @@ export interface AnimatedAiInputProps {
     new_content?: string;
     target_match_confidence?: number;
   }) => void;
+  /**
+   * Called when the user clicks a share-as suggestion button rendered
+   * below an assistant message. Parent should open ShareAsOptionsModal
+   * with the chosen kind pre-selected (defaults are fine).
+   * Optional — when undefined, suggestion buttons still render but are
+   * inert (visual hint without action). Workspace scope only.
+   */
+  onShareSuggestionPick?: (kind: 'carousel' | 'pptx_asset' | 'docx_asset' | 'podcast_asset') => void;
 }
 
 // ─── Manual intent options ───────────────────────────────────────────────────
@@ -161,6 +169,7 @@ export function AnimatedAiInput({
   hojaTitles,
   onClearSelection,
   onWorkspaceAction,
+  onShareSuggestionPick,
 }: AnimatedAiInputProps) {
   const {
     currentMessages: messages,
@@ -535,6 +544,28 @@ export function AnimatedAiInput({
                 { pptxResult: p, pptxLoading: false },
                 activeSessionId,
               );
+            } else if (chunk.type === 'suggestion') {
+              // Atlas attached share-as suggestion buttons to this reply.
+              // Cap at 3, defensively coerce kinds, ignore empties. The
+              // renderer below shows them as Lovable-style chips.
+              const p = chunk.payload as {
+                suggestions?: Array<{ kind?: string; label?: string; reason?: string }>;
+              };
+              const valid = (p?.suggestions ?? [])
+                .map((s) => {
+                  const k = (s.kind ?? '').toLowerCase();
+                  if (
+                    k !== 'carousel' && k !== 'pptx_asset' &&
+                    k !== 'docx_asset' && k !== 'podcast_asset'
+                  ) return null;
+                  if (!s.label) return null;
+                  return { kind: k as 'carousel' | 'pptx_asset' | 'docx_asset' | 'podcast_asset', label: s.label, reason: s.reason };
+                })
+                .filter((v): v is NonNullable<typeof v> => v !== null)
+                .slice(0, 3);
+              if (valid.length > 0) {
+                updateMessage(assistantId, { suggestions: valid }, activeSessionId);
+              }
             } else if (chunk.type === 'error') {
               const payload = chunk.payload as
                 | { code?: string; message?: string }
@@ -860,6 +891,40 @@ export function AnimatedAiInput({
                             </div>
                             {msg.citations && msg.citations.length > 0 && (
                               <CitationCards citations={msg.citations} />
+                            )}
+                            {/* ── Atlas share suggestions (Lovable-style) ─
+                                Rendered when the agent attached a `suggestion`
+                                chunk to this turn. The buttons just prompt
+                                the user — clicking opens the ShareAs options
+                                modal so the user explicitly confirms before
+                                we generate (no blind generation). */}
+                            {msg.suggestions && msg.suggestions.length > 0 && isWorkspaceScope && (
+                              <div className="mt-3 flex flex-col gap-2 max-w-md">
+                                <p className="text-[10.5px] font-mono uppercase tracking-[0.16em] text-[#0e1745]/55 dark:text-white/45">
+                                  Atlas sugiere
+                                </p>
+                                <div className="flex flex-wrap gap-1.5">
+                                  {msg.suggestions.map((s, i) => {
+                                    const mark =
+                                      s.kind === 'carousel'      ? '◉' :
+                                      s.kind === 'pptx_asset'    ? '▣' :
+                                      s.kind === 'docx_asset'    ? '∎' :
+                                                                  '♪';
+                                    return (
+                                      <button
+                                        key={`${s.kind}-${i}`}
+                                        onClick={() => onShareSuggestionPick?.(s.kind)}
+                                        title={s.reason}
+                                        disabled={!onShareSuggestionPick}
+                                        className="group inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cl2-burgundy/[0.07] hover:bg-cl2-burgundy/15 border border-cl2-burgundy/20 text-cl2-burgundy text-[12px] font-medium transition-colors disabled:opacity-50 disabled:cursor-default"
+                                      >
+                                        <span className="font-display italic text-[13px] leading-none">{mark}</span>
+                                        <span className="font-display italic">{s.label}</span>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </div>
                             )}
                             {msg.pptxLoading && !msg.pptxResult && (
                               <div className="mt-2 inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-cl2-burgundy/10 text-cl2-burgundy text-[11px] font-medium">

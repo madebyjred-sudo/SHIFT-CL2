@@ -150,6 +150,19 @@ export type Message = {
   /** True while a pptx tool call is in flight. UI shows an inline progress
    *  pill ("Generando con Gamma…"); replaced by pptxResult when done. */
   pptxLoading?: boolean;
+  /** Atlas-side share suggestions — optional buttons rendered below the
+   *  message body (Lovable-style). The chat stream surfaces these via a
+   *  `suggestion` chunk; if the backend doesn't emit them the field stays
+   *  undefined and nothing renders. Click → opens the ShareAs flow with
+   *  the matching kind pre-selected. */
+  suggestions?: Array<{
+    /** ShareAs kind to trigger when the user clicks. */
+    kind: 'carousel' | 'pptx_asset' | 'docx_asset' | 'podcast_asset';
+    /** Visible button label, e.g. "Generar carrusel". */
+    label: string;
+    /** Optional reason — surfaces below the label as a 1-line subtitle. */
+    reason?: string;
+  }>;
 };
 
 /**
@@ -171,6 +184,23 @@ export type ChatScope =
       workspace_id: string;
       workspace_title: string;
       selected_node_id: string | null;
+      /**
+       * Slide-scoped context surfaced when the user has the
+       * AssetDetailPanel open with a slide selected. The backend
+       * splices `system_prompt_fragment` into scope_system_prompt
+       * (between the existing hoja context and the persona) so the
+       * model treats the active slide as the focal subject of the
+       * turn. `slide_idx` lets the server route slide-edit intents
+       * to the slide endpoint without re-parsing the prompt.
+       *
+       * Optional. When absent, the chat behaves exactly like before.
+       */
+      selected_slide?: {
+        node_id: string;
+        slide_idx: number;
+        kind: 'carousel' | 'pptx_asset' | 'docx_asset' | 'podcast_asset';
+        system_prompt_fragment: string;
+      };
     };
 
 export type ChatSession = {

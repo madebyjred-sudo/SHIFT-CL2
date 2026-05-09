@@ -189,6 +189,18 @@ function hasGeneratePresentationTool(agentTools: Array<Record<string, unknown>>)
   return agentTools.some((t) => t.name === 'generate_presentation');
 }
 
+function hasGenerateAssetTool(agentTools: Array<Record<string, unknown>>): boolean {
+  return agentTools.some((t) => t.name === 'generate_asset');
+}
+
+function hasEditAssetSlideTool(agentTools: Array<Record<string, unknown>>): boolean {
+  return agentTools.some((t) => t.name === 'edit_asset_slide');
+}
+
+function hasGenerateDocxTool(agentTools: Array<Record<string, unknown>>): boolean {
+  return agentTools.some((t) => t.name === 'generate_docx');
+}
+
 // generate_presentation — Atlas tool that turns the active workspace into
 // a Gamma deck. Same pipeline as POST /api/workspace/:id/export with
 // format='pptx'. The tool dispatcher emits a `pptx_ready` chunk to the
@@ -210,6 +222,100 @@ const GENERATE_PRESENTATION_TOOL = {
         },
       },
       required: [],
+    },
+  },
+};
+
+// generate_docx — Atlas tool that turns the active workspace into a branded
+// Word .docx. Dispatches to the POST /api/workspace/:id/export-docx pipeline
+// which calls renderDocxAsset internally. Emits a `docx_ready` chunk so the
+// chat UI can render a download card.
+const GENERATE_DOCX_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'generate_docx',
+    description:
+      'Genera un documento Word editable (.docx) con branding CL2 del workspace activo. Disparalo SOLO cuando el usuario pide un Word, un memo editable, un brief descargable, un informe para cliente o menciona ".docx". El resultado es un archivo A4 con estilos CL2 descargable; también se inserta como nodo en el canvas. NO lo dispares mientras armás hojas — generalo al final cuando el usuario dice que el análisis está listo.',
+    parameters: {
+      type: 'object',
+      properties: {
+        tono: {
+          type: 'string',
+          description: 'Tono del documento. Ej: "ejecutivo", "técnico-legal", "divulgativo". Default: "ejecutivo".',
+        },
+        audiencia: {
+          type: 'string',
+          description: 'Audiencia objetivo. Ej: "directivos corporativos", "bancada legislativa", "prensa". Influye en el metadata footer.',
+        },
+        sendToCanvas: {
+          type: 'boolean',
+          description: 'Si true (default), inserta un nodo docx_asset en el canvas con el link de descarga.',
+          default: true,
+        },
+      },
+      required: [],
+    },
+  },
+};
+
+// generate_asset — Atlas tool that turns the active workspace into a
+// branded asset (carousel / pptx / document) using the new
+// atlasContentGenerator + htmlAssetRenderer pipeline. Replaces the Gamma
+// flow for these formats. Emits an `asset_ready` chunk that the chat UI
+// renders as an inline preview card.
+const GENERATE_ASSET_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'generate_asset',
+    description:
+      'Convierte el workspace activo en un asset publicable con la identidad visual de CL2 (carrusel cuadrado para LinkedIn / IG, presentación 16:9, o documento ejecutivo A4 multipágina). Disparalo SOLO cuando el usuario pide explícitamente uno de estos formatos ("hacé un carrusel", "convertí esto en presentación", "armame un documento"). El asset queda como nodo del canvas y editable slide por slide via edit_asset_slide.',
+    parameters: {
+      type: 'object',
+      properties: {
+        kind: {
+          type: 'string',
+          enum: ['carousel', 'pptx', 'document'],
+          description: 'Tipo de asset. carousel = 1080x1080 cuadrado para social. pptx = 1920x1080 deck corporativo. document = A4 portrait multipágina.',
+        },
+        tono: { type: 'string', description: 'Ej: "editorial", "alerta urgente", "explicativo".' },
+        audiencia: { type: 'string', description: 'Ej: "clientes corporativos", "prensa", "bancada legislativa".' },
+        hook: { type: 'string', description: 'Estilo de hook para slide 1 (carousel/pptx). Opcional.' },
+        numSlides: { type: 'integer', description: 'Override de cantidad de slides. Carousel default 8 (4..12), pptx default 14 (8..20), document default 6 (4..16).' },
+        cta: { type: 'string', description: 'Texto del CTA final.' },
+        marca: { type: 'string', description: 'Lineamientos de voz de marca adicionales.' },
+        emojis: { type: 'boolean', description: 'true para permitir emojis. Default false (CL2 no los usa).', default: false },
+      },
+      required: ['kind'],
+    },
+  },
+};
+
+// edit_asset_slide — chat-driven per-slide editor. The model identifies
+// which slide and what change; the dispatcher calls the existing
+// /assets/:nodeId/slides/:slideIdx/edit endpoint and re-renders the PDF.
+const EDIT_ASSET_SLIDE_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'edit_asset_slide',
+    description:
+      'Edita un slide específico de un asset previamente generado en el workspace. Usalo cuando el usuario pide un cambio puntual ("hacé el slide 3 más fuerte", "cambiá el titular del cover", "agregá un punto al slide 5"). Re-renderea el PDF entero (~5s) y guarda before/after en el historial.',
+    parameters: {
+      type: 'object',
+      properties: {
+        asset_node_id: {
+          type: 'string',
+          description: 'UUID del nodo del asset (devuelto por generate_asset). Si el usuario solo dice "el carrusel", asumí el asset más reciente del canvas.',
+        },
+        slide_index: {
+          type: 'integer',
+          description: 'Índice 1-based de la slide a editar.',
+        },
+        instruction: {
+          type: 'string',
+          description: 'Instrucción en lenguaje natural sobre qué cambiar ("hacé el headline más punchy", "agregá un cuarto bullet sobre X", "cambiá el tono a más urgente").',
+        },
+      },
+      required: ['asset_node_id', 'slide_index', 'instruction'],
     },
   },
 };
@@ -536,6 +642,19 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // the model attempt and fail.
   if (hasGeneratePresentationTool(agent.tools) && args.scope_workspace_id) {
     tools.push(GENERATE_PRESENTATION_TOOL);
+  }
+  // generate_docx — same workspace-scoping contract as generate_presentation.
+  // Only Atlas declares this tool; only available when a workspace is in scope.
+  if (hasGenerateDocxTool(agent.tools) && args.scope_workspace_id) {
+    tools.push(GENERATE_DOCX_TOOL);
+  }
+  // generate_asset / edit_asset_slide — branded HTML→PDF pipeline.
+  // Same workspace-scope gate as the legacy tools above.
+  if (hasGenerateAssetTool(agent.tools) && args.scope_workspace_id) {
+    tools.push(GENERATE_ASSET_TOOL);
+  }
+  if (hasEditAssetSlideTool(agent.tools) && args.scope_workspace_id) {
+    tools.push(EDIT_ASSET_SLIDE_TOOL);
   }
 
   if (tools.length === 0) {
@@ -1165,6 +1284,478 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
         args.onChunk({
           type: 'pptx_status',
           payload: { status: 'error', code, detail: message },
+        });
+      }
+      continue;
+    }
+
+    if (tc.function.name === 'generate_docx') {
+      if (!args.scope_workspace_id) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify({
+            error: 'no_workspace_scope',
+            hint: 'El documento requiere abrir un workspace primero.',
+          }),
+        });
+        continue;
+      }
+
+      if (!args.user_id) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify({
+            error: 'auth_required',
+            hint: 'No tengo identidad del usuario para generar el documento.',
+          }),
+        });
+        continue;
+      }
+
+      let parsedArgs: { tono?: string; audiencia?: string; sendToCanvas?: boolean } = {};
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments || '{}');
+      } catch {
+        // Defaults are fine
+      }
+
+      // Status chunk so the UI can show "generando Word…"
+      args.onChunk({
+        type: 'docx_status' as never,
+        payload: { status: 'starting', workspace_id: args.scope_workspace_id },
+      } as never);
+
+      try {
+        const { renderDocxAsset } = await import('./docxAssetExport.js');
+        const { createClient } = await import('@supabase/supabase-js');
+
+        // Load workspace + nodes (same pattern as the HTTP route)
+        const _supa = createClient(
+          process.env.NEXT_PUBLIC_SUPABASE_URL!,
+          process.env.SUPABASE_SERVICE_ROLE_KEY!,
+          { auth: { persistSession: false } },
+        );
+
+        const { data: ws } = await _supa
+          .from('workspaces')
+          .select('id, title, description')
+          .eq('id', args.scope_workspace_id)
+          .eq('user_id', args.user_id)
+          .single();
+
+        const { data: nodes } = await _supa
+          .from('workspace_nodes')
+          .select('id, title, subtitle, content, x, y')
+          .eq('workspace_id', args.scope_workspace_id);
+
+        const ordered = ((nodes ?? []) as Array<{
+          id: string; title: string; subtitle: string | null;
+          content: Record<string, unknown> | null; x: number; y: number;
+        }>).slice().sort((a, b) => {
+          const yA = Math.floor(a.y / 200);
+          const yB = Math.floor(b.y / 200);
+          if (yA !== yB) return yA - yB;
+          return a.x - b.x;
+        });
+
+        const slides = [
+          {
+            idx: 0,
+            kind: 'cover' as const,
+            headline: ws?.title ?? 'Documento CL2',
+            body: ws?.description ?? undefined,
+          },
+          ...ordered.map((n, i) => {
+            const md = (n.content?.md as string) ?? '';
+            const isQuote = md.trim().startsWith('> ');
+            return {
+              idx: i + 1,
+              kind: (isQuote ? 'quote' : (i === 0 ? 'section' : 'content')) as
+                'quote' | 'section' | 'content',
+              eyebrow: n.subtitle ?? undefined,
+              headline: n.title as string,
+              body: (isQuote ? md.trim().replace(/^> /gm, '') : md.trim()) || undefined,
+            };
+          }),
+        ];
+
+        const result = await renderDocxAsset({
+          content: { title: ws?.title ?? 'Documento CL2', slides },
+          options: {
+            tono: parsedArgs.tono,
+            audiencia: parsedArgs.audiencia,
+          },
+          userId: args.user_id,
+          workspaceId: args.scope_workspace_id,
+        });
+
+        // Insert canvas node
+        const sendToCanvas = parsedArgs.sendToCanvas !== false;
+        let nodeId: string | null = null;
+        if (sendToCanvas) {
+          const { data: node } = await _supa
+            .from('workspace_nodes')
+            .insert({
+              workspace_id: args.scope_workspace_id,
+              user_id: args.user_id,
+              type: 'docx_asset',
+              title: `${ws?.title ?? 'Documento'} · Word`,
+              subtitle: result.filename,
+              x: 40,
+              y: 40,
+              width: 360,
+              height: 200,
+              content: {
+                kind: 'docx_asset',
+                asset_metadata: {
+                  export_url: result.export_url,
+                  filename: result.filename,
+                  size_bytes: result.size_bytes,
+                  generated_at: result.generated_at,
+                  gcs_path: result.gcs_path,
+                },
+                asset_slides: slides,
+              },
+            })
+            .select('id')
+            .single();
+          nodeId = node?.id ?? null;
+        }
+
+        args.onChunk({
+          type: 'docx_ready' as never,
+          payload: {
+            filename: result.filename,
+            url: result.export_url,
+            size_bytes: result.size_bytes,
+            node_id: nodeId,
+            generated_at: result.generated_at,
+          },
+        } as never);
+
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content:
+            `Documento Word generado.\n` +
+            `Filename: ${result.filename}\n` +
+            `Descarga: ${result.export_url}\n` +
+            `Tamaño: ${Math.round(result.size_bytes / 1024)} KB\n\n` +
+            `INSTRUCCIONES:\n` +
+            `1. Confirmale al usuario que el documento está listo (1-2 frases).\n` +
+            `2. NO pegues la URL en tu respuesta — el frontend ya muestra el botón de descarga.\n` +
+            `3. Mencioná que es editable en Word y está en A4 para impresión.`,
+        });
+      } catch (err) {
+        const message = (err as Error).message ?? 'unknown';
+        const code = (err as Error & { code?: string }).code ?? 'docx_failed';
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify({ error: code, detail: message }),
+        });
+        args.onChunk({
+          type: 'docx_status' as never,
+          payload: { status: 'error', code, detail: message },
+        } as never);
+      }
+      continue;
+    }
+
+    if (tc.function.name === 'generate_asset') {
+      // Atlas tool: branded HTML→PDF asset (carousel/pptx/document).
+      // Mirrors the contract of generate_presentation but routes through
+      // atlasContentGenerator + htmlAssetRenderer instead of Gamma.
+      if (!args.scope_workspace_id) {
+        messages.push({
+          role: 'tool', tool_call_id: tc.id,
+          content: JSON.stringify({ error: 'no_workspace_scope', hint: 'El asset requiere abrir un workspace primero.' }),
+        });
+        continue;
+      }
+      if (!args.user_id) {
+        messages.push({
+          role: 'tool', tool_call_id: tc.id,
+          content: JSON.stringify({ error: 'auth_required', hint: 'No tengo identidad del usuario.' }),
+        });
+        continue;
+      }
+      let parsedArgs: {
+        kind?: 'carousel' | 'pptx' | 'document';
+        tono?: string; audiencia?: string; hook?: string;
+        numSlides?: number; cta?: string; marca?: string; emojis?: boolean;
+      } = {};
+      try { parsedArgs = JSON.parse(tc.function.arguments || '{}'); } catch {/* defaults */}
+      const kind = parsedArgs.kind;
+      if (!kind || !['carousel','pptx','document'].includes(kind)) {
+        messages.push({
+          role: 'tool', tool_call_id: tc.id,
+          content: JSON.stringify({ error: 'invalid_kind', hint: 'kind must be carousel|pptx|document' }),
+        });
+        continue;
+      }
+
+      args.onChunk({
+        type: 'pptx_status',
+        payload: { status: 'starting', workspace_id: args.scope_workspace_id, kind },
+      });
+
+      try {
+        const { generateAssetContent } = await import('./atlasContentGenerator.js');
+        const { renderAssetToPdf } = await import('./htmlAssetRenderer.js');
+        const { createClient } = await import('@supabase/supabase-js');
+        const _supa = createClient(
+          process.env.NEXT_PUBLIC_SUPABASE_URL!,
+          process.env.SUPABASE_SERVICE_ROLE_KEY!,
+          { auth: { persistSession: false } },
+        );
+
+        const { data: ws } = await _supa
+          .from('workspaces')
+          .select('id, title, description')
+          .eq('id', args.scope_workspace_id)
+          .eq('user_id', args.user_id)
+          .single();
+        const wsTitle = (ws?.title as string | undefined) ?? 'Workspace';
+
+        const content = await generateAssetContent({
+          workspaceId: args.scope_workspace_id,
+          userId: args.user_id,
+          kind,
+          options: {
+            tono: parsedArgs.tono,
+            audiencia: parsedArgs.audiencia,
+            hook: parsedArgs.hook,
+            numSlides: parsedArgs.numSlides,
+            cta: parsedArgs.cta,
+            marca: parsedArgs.marca,
+            emojis: parsedArgs.emojis,
+          },
+        });
+
+        // Pre-allocate node so the GCS object path is stable.
+        const nodeType = kind === 'carousel' ? 'carousel' : kind === 'pptx' ? 'pptx_asset' : 'docx_asset';
+        const titleSuffix = kind === 'carousel' ? 'Carrusel' : kind === 'pptx' ? 'Presentación' : 'Documento';
+        const { data: existing } = await _supa
+          .from('workspace_nodes')
+          .select('x, width')
+          .eq('workspace_id', args.scope_workspace_id);
+        const maxX = (existing ?? []).reduce(
+          (m, n) => Math.max(m, ((n.x as number) ?? 0) + ((n.width as number) ?? 360)),
+          0,
+        );
+        const { data: node } = await _supa
+          .from('workspace_nodes')
+          .insert({
+            workspace_id: args.scope_workspace_id,
+            type: nodeType,
+            title: `${wsTitle} · ${titleSuffix}`,
+            subtitle: 'Generando…',
+            x: maxX > 0 ? maxX + 40 : 40,
+            y: 40,
+            width: 360,
+            height: 200,
+            content: { kind: nodeType },
+            asset_metadata: { kind: nodeType, generating: true, source: 'atlas' },
+            asset_slides: content.slides,
+            asset_slide_history: [],
+          })
+          .select('id')
+          .single();
+        const nodeId = node?.id as string | undefined;
+        if (!nodeId) throw new Error('asset_node_insert_failed');
+
+        const render = await renderAssetToPdf({
+          content,
+          kind,
+          userId: args.user_id,
+          workspaceId: args.scope_workspace_id,
+          nodeId,
+          workspaceTitle: wsTitle,
+        });
+
+        const newMeta = {
+          kind: nodeType,
+          export_url: render.exportUrl,
+          gcs_path: render.gcsPath,
+          filename: render.filename,
+          slides_count: render.slidesCount,
+          generated_at: render.generatedAt,
+          options: {
+            tono: parsedArgs.tono ?? null,
+            audiencia: parsedArgs.audiencia ?? null,
+            hook: parsedArgs.hook ?? null,
+            numSlides: parsedArgs.numSlides ?? null,
+            cta: parsedArgs.cta ?? null,
+            marca: parsedArgs.marca ?? null,
+            emojis: parsedArgs.emojis ?? false,
+          },
+          source: 'atlas' as const,
+        };
+        await _supa
+          .from('workspace_nodes')
+          .update({ subtitle: render.filename, asset_metadata: newMeta })
+          .eq('id', nodeId);
+        await _supa
+          .from('workspaces')
+          .update({ updated_at: render.generatedAt })
+          .eq('id', args.scope_workspace_id);
+
+        // Reuse pptx_ready chunk shape so the frontend's existing renderer
+        // shows the asset card without needing a new event type yet.
+        args.onChunk({
+          type: 'pptx_ready',
+          payload: {
+            filename: render.filename,
+            url: render.exportUrl,
+            gammaUrl: render.exportUrl, // legacy field; assets don't have a gamma editable URL
+            generationId: nodeId,
+            cached: false,
+            generatedAt: render.generatedAt,
+          },
+        });
+
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content:
+            `Asset generado (kind=${kind}, slides=${render.slidesCount}).\n` +
+            `Node id: ${nodeId}\n` +
+            `Descarga: ${render.exportUrl}\n\n` +
+            `INSTRUCCIONES:\n` +
+            `1. Confirmá al usuario que el ${kind} está listo (1-2 frases).\n` +
+            `2. NO pegues la URL — el frontend ya la muestra como botón.\n` +
+            `3. Si querés, sugerí un slide específico para ajustar (por kind/idx).`,
+        });
+      } catch (err) {
+        const message = (err as Error).message ?? 'unknown';
+        const code = (err as Error & { code?: string }).code ?? 'asset_failed';
+        messages.push({
+          role: 'tool', tool_call_id: tc.id,
+          content: JSON.stringify({ error: code, detail: message }),
+        });
+        args.onChunk({
+          type: 'pptx_status',
+          payload: { status: 'error', code, detail: message },
+        });
+      }
+      continue;
+    }
+
+    if (tc.function.name === 'edit_asset_slide') {
+      if (!args.scope_workspace_id || !args.user_id) {
+        messages.push({
+          role: 'tool', tool_call_id: tc.id,
+          content: JSON.stringify({ error: 'no_workspace_scope' }),
+        });
+        continue;
+      }
+      let parsedArgs: { asset_node_id?: string; slide_index?: number; instruction?: string } = {};
+      try { parsedArgs = JSON.parse(tc.function.arguments || '{}'); } catch {/* default */}
+      const { asset_node_id, slide_index, instruction } = parsedArgs;
+      if (!asset_node_id || typeof slide_index !== 'number' || !instruction) {
+        messages.push({
+          role: 'tool', tool_call_id: tc.id,
+          content: JSON.stringify({ error: 'invalid_args', hint: 'need asset_node_id, slide_index, instruction' }),
+        });
+        continue;
+      }
+
+      try {
+        const { editSingleSlide } = await import('./atlasContentGenerator.js');
+        const { renderAssetToPdf } = await import('./htmlAssetRenderer.js');
+        const { createClient } = await import('@supabase/supabase-js');
+        const _supa = createClient(
+          process.env.NEXT_PUBLIC_SUPABASE_URL!,
+          process.env.SUPABASE_SERVICE_ROLE_KEY!,
+          { auth: { persistSession: false } },
+        );
+
+        const { data: nodeRow } = await _supa
+          .from('workspace_nodes')
+          .select('id, type, title, asset_metadata, asset_slides, asset_slide_history')
+          .eq('id', asset_node_id)
+          .eq('workspace_id', args.scope_workspace_id)
+          .single();
+        if (!nodeRow) throw new Error('asset_node_not_found');
+
+        const slides = (nodeRow.asset_slides as Array<Record<string, unknown>>) ?? [];
+        const idxInArray = slides.findIndex((s) => Number(s.idx) === slide_index);
+        if (idxInArray < 0) throw new Error('slide_not_found');
+        const before = slides[idxInArray];
+
+        const assetKind: 'carousel' | 'pptx' | 'document' =
+          nodeRow.type === 'carousel' ? 'carousel' :
+          nodeRow.type === 'pptx_asset' ? 'pptx' : 'document';
+
+        const edited = await editSingleSlide({
+          slide: before as unknown as import('./atlasContentGenerator.js').AssetSlide,
+          instruction,
+          assetKind,
+          workspaceTitle: String(nodeRow.title ?? 'Workspace'),
+        });
+        const updatedSlides = slides.map((s, i) => (i === idxInArray ? (edited as unknown as Record<string, unknown>) : s));
+        const history = (nodeRow.asset_slide_history as Array<Record<string, unknown>>) ?? [];
+        history.push({
+          slide_idx: slide_index, before, after: edited, instruction,
+          edited_at: new Date().toISOString(), edited_by_user_id: args.user_id,
+        });
+
+        const { data: ws } = await _supa
+          .from('workspaces').select('title, description')
+          .eq('id', args.scope_workspace_id).single();
+        const render = await renderAssetToPdf({
+          content: {
+            title: String(ws?.title ?? 'Workspace'),
+            subtitle: typeof ws?.description === 'string' ? ws.description : undefined,
+            slides: updatedSlides as unknown as import('./atlasContentGenerator.js').AssetSlide[],
+          },
+          kind: assetKind,
+          userId: args.user_id,
+          workspaceId: args.scope_workspace_id,
+          nodeId: asset_node_id,
+          workspaceTitle: String(nodeRow.title ?? 'Workspace'),
+        });
+
+        const meta = (nodeRow.asset_metadata as Record<string, unknown>) ?? {};
+        const newMeta = {
+          ...meta,
+          export_url: render.exportUrl,
+          gcs_path: render.gcsPath,
+          filename: render.filename,
+          slides_count: render.slidesCount,
+          generated_at: render.generatedAt,
+        };
+        await _supa
+          .from('workspace_nodes')
+          .update({ asset_metadata: newMeta, asset_slides: updatedSlides, asset_slide_history: history })
+          .eq('id', asset_node_id);
+
+        args.onChunk({
+          type: 'pptx_ready',
+          payload: {
+            filename: render.filename,
+            url: render.exportUrl,
+            gammaUrl: render.exportUrl,
+            generationId: asset_node_id,
+            cached: false,
+            generatedAt: render.generatedAt,
+          },
+        });
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content:
+            `Slide ${slide_index} editado y PDF re-renderizado.\n` +
+            `INSTRUCCIONES: confirmale al usuario el cambio en 1 frase. NO pegues URL.`,
+        });
+      } catch (err) {
+        const message = (err as Error).message ?? 'unknown';
+        messages.push({
+          role: 'tool', tool_call_id: tc.id,
+          content: JSON.stringify({ error: 'edit_asset_slide_failed', detail: message }),
         });
       }
       continue;
