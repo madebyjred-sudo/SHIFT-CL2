@@ -15,12 +15,10 @@
  * trims) and output is bounded by `max_tokens` here. ~150 words/min →
  * ~200 tokens/min spoken; we add headroom.
  */
-import { withTimeout, withRetry } from './resilience.js';
+import { withRetry } from './resilience.js';
 import { getAgent } from './agentLoader.js';
 import { logger } from './logger.js';
-
-const OR_BASE = 'https://openrouter.ai/api/v1';
-const SCRIPT_TIMEOUT_MS = 60_000;
+import { cerebroInvoke } from './cerebroLlmClient.js';
 
 export interface PodcastSegment {
   /**
@@ -78,48 +76,30 @@ export async function generatePodcastScript(args: ScriptArgs): Promise<PodcastSc
   const systemPrompt = buildScriptSystemPrompt(args.style, args.duration_target_s, charsBudget);
   const userPrompt = buildScriptUserPrompt(args.source_label, args.source_text, args.duration_target_s, args.user_prompt);
 
-  const res = await withRetry(
+  // Track 0c — via Cerebro `/v1/llm/invoke`. apiKey ya no se usa
+  // (Cerebro maneja OpenRouter del otro lado). El worker no tiene email
+  // del user a mano, así que no habilitamos memory para podcasts — la
+  // generación de podcasts es system-driven (toma el source pre-elegido
+  // por el user via UI) y la preferencia personal viene en `user_prompt`,
+  // no en memory.
+  void apiKey;
+  const llmResp = await withRetry(
     () =>
-      withTimeout(
-        (signal) =>
-          fetch(`${OR_BASE}/chat/completions`, {
-            signal,
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${apiKey}`,
-              'Content-Type': 'application/json',
-              'HTTP-Referer': 'https://agentescl2.com',
-              'X-Title': 'CL2 Podcast Script',
-            },
-            body: JSON.stringify({
-              model: lexa.default_model,
-              messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: userPrompt },
-              ],
-              response_format: { type: 'json_object' },
-              max_tokens: 2_500,
-              temperature: 0.6,
-            }),
-          }),
-        { ms: SCRIPT_TIMEOUT_MS, label: 'podcast:script' },
-      ),
+      cerebroInvoke({
+        model: lexa.default_model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        max_tokens: 2_500,
+        temperature: 0.6,
+        app_id: 'cl2',
+        trace_label: `podcast:script:${args.style}`,
+      }),
     { attempts: 2, baseDelayMs: 800, label: 'podcast:script' },
   );
 
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    logger.warn('podcast_script_http_failed', {
-      status: res.status,
-      detail: detail.slice(0, 200),
-    });
-    throw new Error(`script gen ${res.status}`);
-  }
-
-  const json = (await res.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  const content = json.choices?.[0]?.message?.content?.trim();
+  const content = (llmResp.text || '').trim();
   if (!content) throw new Error('script gen: empty response');
 
   // Parse + validate. Some models (Claude on OpenRouter, occasional Gemini)
@@ -331,38 +311,22 @@ export async function enhancePodcastPrompt(rawPrompt: string): Promise<string> {
     'NO inventes datos. NO agregues actores ni números no mencionados. NO uses comillas. Devolvé sólo la oración mejorada, sin prefijos como "Aquí está:" ni explicaciones.',
   ].join(' ');
 
-  const res = await withTimeout(
-    (signal) =>
-      fetch(`${OR_BASE}/chat/completions`, {
-        signal,
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://agentescl2.com',
-          'X-Title': 'CL2 Podcast Prompt Enhance',
-        },
-        body: JSON.stringify({
-          model: ENHANCE_MODEL,
-          messages: [
-            { role: 'system', content: sys },
-            { role: 'user', content: trimmed },
-          ],
-          max_tokens: 120,
-          temperature: 0.4,
-        }),
-      }),
-    { ms: ENHANCE_TIMEOUT_MS, label: 'podcast:enhance' },
-  );
+  // Track 0c — via Cerebro. apiKey kept for env presence check above.
+  void apiKey;
+  void ENHANCE_TIMEOUT_MS; // timeout vive ahora dentro de cerebroInvoke (60s default)
+  const llmResp = await cerebroInvoke({
+    model: ENHANCE_MODEL,
+    messages: [
+      { role: 'system', content: sys },
+      { role: 'user', content: trimmed },
+    ],
+    max_tokens: 120,
+    temperature: 0.4,
+    app_id: 'cl2',
+    trace_label: 'podcast:enhance',
+  });
 
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    logger.warn('podcast_enhance_http_failed', { status: res.status, detail: detail.slice(0, 200) });
-    throw new Error(`enhance ${res.status}`);
-  }
-
-  const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-  const out = (json.choices?.[0]?.message?.content ?? '').trim();
+  const out = (llmResp.text || '').trim();
   if (!out) throw new Error('enhance: empty response');
   // Strip surrounding quotes if Lexa wrapped them anyway, collapse
   // whitespace, hard cap.

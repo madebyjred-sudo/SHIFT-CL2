@@ -38,9 +38,13 @@ export function useRoute(): string {
   return path;
 }
 
-/** Match `/sesiones/:id` → returns id or null. */
+/**
+ * Match `/sesiones/:id` → returns id or null.
+ * Acepta int positivo (legacy MariaDB id) o UUID (Supabase sessions nuevas
+ * via pipeline YouTube). El BFF resuelve cuál fuente consultar en runtime.
+ */
 export function matchSesionId(path: string): string | null {
-  const m = path.match(/^\/sesiones\/(\d+)\/?$/);
+  const m = path.match(/^\/sesiones\/(\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/?$/i);
   return m ? m[1] : null;
 }
 
@@ -166,4 +170,9 @@ export function matchWorkspaceId(path: string): string | null {
 /** Match `/centinela` — Centinela page (alerts feed + watchlist + prefs). */
 export function isCentinela(path: string): boolean {
   return /^\/centinela\/?$/.test(path);
+}
+
+/** Match `/mi-memoria` — neuron management panel (Track 0b). */
+export function isMiMemoria(path: string): boolean {
+  return /^\/mi-memoria\/?$/.test(path);
 }

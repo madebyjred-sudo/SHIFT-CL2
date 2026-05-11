@@ -16,20 +16,22 @@ export function TopDock({ onOpenHistory, onToggleHistory, isHistoryOpen }: TopDo
   const { theme, toggleTheme } = useTheme();
   const path = useRoute();
   const { replay: replayTour, hasCompleted: tourCompleted } = useOnboarding();
-  const currentView: 'chat' | 'live' | 'sil' | 'audios' | 'admin' | 'hojas' | 'centinela' =
+  const currentView: 'chat' | 'live' | 'sil' | 'audios' | 'admin' | 'hojas' | 'centinela' | 'mi-memoria' =
     path.startsWith('/admin') ? 'admin'
     : path.startsWith('/sil') ? 'sil'
     : path.startsWith('/audios') ? 'audios'
     : path.startsWith('/hojas') ? 'hojas'
     : path.startsWith('/centinela') ? 'centinela'
+    : path.startsWith('/mi-memoria') ? 'mi-memoria'
     : path.startsWith('/sesiones') || path.startsWith('/expediente') ? 'live'
     : 'chat';
-  const handleNavigate = (view: 'chat' | 'live' | 'sil' | 'audios' | 'admin' | 'hojas' | 'centinela') => {
+  const handleNavigate = (view: 'chat' | 'live' | 'sil' | 'audios' | 'admin' | 'hojas' | 'centinela' | 'mi-memoria') => {
     if (view === 'admin') navigate('/admin/overview');
     else if (view === 'sil') navigate('/sil');
     else if (view === 'audios') navigate('/audios');
     else if (view === 'hojas') navigate('/hojas');
     else if (view === 'centinela') navigate('/centinela');
+    else if (view === 'mi-memoria') navigate('/mi-memoria');
     else navigate(view === 'live' ? '/sesiones' : '/');
   };
 

@@ -9,8 +9,9 @@ import { OnboardingProvider } from './components/onboarding/OnboardingProvider';
 import { OnboardingGate } from './components/onboarding/OnboardingGate';
 import { SupabaseAuthView } from './components/SupabaseAuthView';
 import { AuthCallback } from './components/AuthCallback';
+import { AccessGate } from './components/access/AccessGate';
 import { useSupabaseStore } from './store/useSupabaseStore';
-import { useRoute, matchSesionId, matchExpedienteNumero, matchAdminSection, isSilBrowse, isLandingPage, isWorkspacesList, matchWorkspaceId, isAudiosPage, matchPodcastShareToken, isCentinela } from './lib/router';
+import { useRoute, matchSesionId, matchExpedienteNumero, matchAdminSection, isSilBrowse, isLandingPage, isWorkspacesList, matchWorkspaceId, isAudiosPage, matchPodcastShareToken, isCentinela, isMiMemoria } from './lib/router';
 import { SesionesListPage } from './pages/SesionesListPage';
 import { SesionViewPage } from './pages/SesionViewPage';
 import { SubirSesionPage } from './pages/SubirSesionPage';
@@ -19,6 +20,7 @@ import { AdminApp } from './pages/admin/AdminApp';
 import { SilBrowsePage } from './pages/SilBrowsePage';
 import { WorkspacesListPage } from './pages/WorkspacesListPage';
 import { CentinelaPage } from './pages/CentinelaPage';
+import { MiMemoriaPage } from './pages/MiMemoriaPage';
 import { WorkspaceCanvasPage } from './pages/WorkspaceCanvasPage';
 import { LandingPage } from './pages/LandingPage';
 import { AudiosPage } from './pages/AudiosPage';
@@ -94,6 +96,7 @@ export default function App() {
   return (
     <ErrorBoundary>
       <ThemeProvider>
+        <AccessGate>
         <ChatProvider>
           <OnboardingProvider>
           <OnboardingGate />
@@ -117,6 +120,8 @@ export default function App() {
             <WorkspaceCanvasPage id={workspaceId} />
           ) : isCentinela(path) ? (
             <CentinelaPage />
+          ) : isMiMemoria(path) ? (
+            <MiMemoriaPage />
           ) : (
           <div className="h-screen flex flex-col bg-gray-50 dark:bg-mesh text-gray-900 dark:text-white font-sans relative overflow-hidden transition-colors duration-500">
             {/* Pixel dotted overlay — barely visible */}
@@ -153,6 +158,7 @@ export default function App() {
           )}
           </OnboardingProvider>
         </ChatProvider>
+        </AccessGate>
       </ThemeProvider>
     </ErrorBoundary>
   );

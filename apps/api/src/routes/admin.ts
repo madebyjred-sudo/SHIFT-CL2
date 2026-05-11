@@ -7,17 +7,68 @@
  * Auth: any authenticated user can call these during the demo. When we
  * open up to outside tenants, hoist a role check on top of the router.
  */
-import { Router } from 'express';
+import { Router, type Request } from 'express';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { audit, auditFromReq } from '../services/auditLog.js';
-import { getUserFromRequest } from '../services/auth.js';
+import { getUserFromRequest, loadUserAccess } from '../services/auth.js';
 import { snapshotAll } from '../services/agentStats.js';
 import { getOverride, loadOverrides, setOverride } from '../services/agentOverrides.js';
 import { loadFlags, setFlag } from '../services/featureFlags.js';
 import { logger } from '../services/logger.js';
+import { writeNeuronFile } from '../services/cerebroNeuron.js';
 import { listTranscripciones, type LegacyTranscripcion } from '../services/legacyCl2Client.js';
 
 const adminRouter = Router();
+
+// ── Guard: solo admin + operador acceden a /api/admin/* ────────────────
+// Esto protege los 30+ endpoints del admin panel de un saque. Aplica
+// antes de cualquier handler. Cuando Ronald apruebe a su equipo como
+// 'lector' o 'editor', el frontend les muestra la app pero ESTOS
+// endpoints van a responder 403 si intentan invocarlos.
+//
+// El guard es defensa en profundidad: el frontend también esconde el
+// menú /admin para non-admins (AdminApp gate). Pero la verdadera
+// frontera de seguridad vive acá — un curioso con curl no entra.
+const ADMIN_ALLOWED_ROLES = new Set(['admin', 'operador']);
+adminRouter.use(async (req, res, next) => {
+  // /summary, /activity, /alerts son llamados por la home logueada para
+  // mostrar los conteos en /admin sidebar. Si el user no es admin, igual
+  // queremos que el resto de la app cargue sin errores 403 ruidosos.
+  // Solo bloqueamos endpoints reales del admin.
+  const u = await getUserFromRequest(req);
+  if (!u) {
+    res.status(401).json({ ok: false, error: 'auth_required' });
+    return;
+  }
+  try {
+    const access = await loadUserAccess(u.id);
+    // Si la tabla user_access no existe (migration aún no aplicada) o el
+    // user no tiene row (race del trigger), degradamos a deny en vez de
+    // permit — es admin panel, mejor falla cerrada.
+    if (!access) {
+      res.status(403).json({ ok: false, error: 'access_unknown' });
+      return;
+    }
+    if (access.status !== 'active') {
+      res.status(403).json({ ok: false, error: `access_${access.status}` });
+      return;
+    }
+    if (!access.role || !ADMIN_ALLOWED_ROLES.has(access.role)) {
+      res.status(403).json({
+        ok: false,
+        error: 'admin_only',
+        hint: 'Tu rol no tiene acceso al panel de administración.',
+      });
+      return;
+    }
+    // Útil para handlers downstream.
+    (req as Request & { adminUser?: typeof access }).adminUser = access;
+    next();
+  } catch (err) {
+    req.log?.error('admin_guard_failed', { error: (err as Error).message });
+    res.status(500).json({ ok: false, error: 'admin_guard_error' });
+  }
+});
 
 interface MockedResponse<T> {
   ok: true;
@@ -51,6 +102,13 @@ function supa(): SupabaseClient {
 }
 
 // ─── Operational summary ─────────────────────────────────────────────
+// Suma todas las "cosas pendientes humanas" para que el Overview muestre
+// la cola REAL (no la cola legacy de marzo). Post-audit 2026-05-10:
+//   • pending_transcripciones: sesiones con status='pending_review' en
+//     sistema nuevo (cron descargó transcript, espera revisión humana)
+//   • sessions_pending_processing: sesiones con status='pending' o
+//     'transcript_not_ready' (cron las descubrió, transcript no listo)
+//   • pending_corrections: transcript_corrections sin moderar
 adminRouter.get('/summary', async (req, res) => {
   try {
     const s = supa();
@@ -58,22 +116,31 @@ adminRouter.get('/summary', async (req, res) => {
       { count: chunksCount },
       { count: sessionsCount },
       { count: expedientesCount },
-      { count: pendingTransCount },
-      { count: pendingWatchlistCount },
+      { count: pendingReviewCount },
+      { count: pendingSessionsCount },
+      { count: pendingCorrectionsCount },
+      { count: watchlistCount },
     ] = await Promise.all([
       s.from('legislative_chunks').select('id', { count: 'exact', head: true }),
       s.from('sessions').select('id', { count: 'exact', head: true }),
       s.from('sil_expedientes').select('id', { count: 'exact', head: true }),
-      s.from('transcripciones_review').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
-      s.from('expedientes_watchlist').select('user_id', { count: 'exact', head: true }),
+      // Sesiones esperando revisión humana (transcript ya bajado, espera approve/reject)
+      s.from('sessions').select('id', { count: 'exact', head: true }).eq('status', 'pending_review'),
+      // Sesiones aún sin transcript (cron las recogió de YouTube)
+      s.from('sessions').select('id', { count: 'exact', head: true }).in('status', ['pending', 'transcript_not_ready']),
+      // Correcciones LLM sin moderar
+      s.from('transcript_corrections').select('id', { count: 'exact', head: true }).eq('human_review', 'pending'),
+      s.from('centinela_watchlist').select('user_id', { count: 'exact', head: true }),
     ]);
     res.json(
       live({
         chunks: chunksCount ?? 0,
         sessions: sessionsCount ?? 0,
         expedientes: expedientesCount ?? 0,
-        pending_transcripciones: pendingTransCount ?? 0,
-        watchlist_total: pendingWatchlistCount ?? 0,
+        pending_transcripciones: pendingReviewCount ?? 0,          // ← cola humana real
+        sessions_pending_processing: pendingSessionsCount ?? 0,    // ← cola de pipeline
+        pending_corrections: pendingCorrectionsCount ?? 0,         // ← cola correcciones LLM
+        watchlist_total: watchlistCount ?? 0,
       }),
     );
   } catch (err) {
@@ -83,11 +150,17 @@ adminRouter.get('/summary', async (req, res) => {
 });
 
 // ─── Recent activity stream (live from audit_log + Supabase events) ──
+// Filtramos los eventos "Sistema arrancó admin BFF" para que el feed muestre
+// acciones humanas. Los restarts de Cloud Run estaban inundando el feed
+// (14 entries idénticas en un día). Si querés ver restarts, hay un endpoint
+// dedicado /admin/build con cold-start metrics — esos no compiten con el
+// feed de actividad humana.
 adminRouter.get('/activity', async (_req, res) => {
   try {
     const { data, error } = await supa()
       .from('audit_log')
       .select('id, ts, actor_email, actor_kind, verb, resource, resource_kind, result')
+      .not('verb', 'eq', 'arrancó')
       .order('ts', { ascending: false })
       .limit(15);
     if (error) throw new Error(error.message);
@@ -125,28 +198,39 @@ adminRouter.get('/alerts', async (_req, res) => {
   }
 });
 
-// ─── Transcripciones — legacy CL2 sessions × review state ────────────
+// ─── Transcripciones — sistema nuevo (Supabase sessions) × review state ────
 //
-// The queue is NOT a fake list. The legacy CL2 worker (running on the
-// VPS) transcribes plenarias automatically and stores the result in
-// MariaDB. This endpoint reads from there + cross-references with our
-// `transcripciones_review` table, which records the operator's
-// per-session approve/reject decision.
+// CAMBIO 2026-05-10: este endpoint pasó de leer la API legacy
+// (api.agentescl2.com vía listTranscripciones) a leer directo de
+// `sessions` + `transcript_segments` en Supabase. Razones:
 //
-// Status derivation (per legacy session):
+//   1. Las sesiones nuevas llegan vía cron `transcripts-sync` →
+//      youtubeSync.ts → sessions con status='pending'. El cron
+//      `process-pending` baja transcripts (yt-dlp + cookies) e inserta
+//      segments. Una vez listo marca status='pending_review'.
+//   2. La API legacy (sistema v1 que decepcionó al cliente CL2 Consultoría)
+//      sigue corriendo en VPS pero ya no es la fuente de verdad. Las
+//      sesiones nuevas no llegan ahí. Mantenerlo en el panel = mostrar
+//      data muerta.
+//   3. Workflow human-in-the-loop: cada sesión `pending_review` espera
+//      que un operador la apruebe (→ 'indexed', visible al equipo) o
+//      rechace (→ 'rejected', oculta). Es la regla "sin cita, sin respuesta"
+//      aplicada a la fuente: el equipo solo ve transcripts que un humano
+//      validó.
 //
-//   review row exists → use its status (approved | rejected | pending)
-//   no review row     → status = 'pending'
+// Status derivation (por sesión):
 //
-// In other words: every transcribed session lands in the queue once,
-// the operator reviews it, and from then on it's tagged. There's a
-// configurable `since` window (default 30 days) to keep the list
-// manageable — older sessions are assumed already-audited and don't
-// clutter the moderation surface.
+//   sessions.status                  → QueueRow.status mostrado al admin
+//   ─────────────────────────────────  ──────────────────────────────────
+//   pending / processing /            → 'pending' (esperando transcript
+//   transcript_not_ready                 — el cron sigue intentando)
+//   pending_review                    → 'in_progress' (esperando humano)
+//   indexed (con review aprobado o    → 'approved'
+//      sin review por ser legacy)
+//   rejected                          → 'rejected'
 //
-// When the legacy backend is unreachable we degrade to an empty list
-// with `degraded: true` rather than 500ing. The operator still sees
-// the section frame.
+// Si una sesión tiene fila en transcripciones_review, su status manda;
+// si no, derivamos del status de la sesión.
 
 // 60 days keeps the moderation queue meaningful: recent sessions land
 // here for review; anything older is assumed already-audited so we
@@ -199,25 +283,150 @@ function legacyToQueueRow(
   };
 }
 
+/**
+ * Mapeo de sessions.status → QueueRow.status que la UI muestra.
+ * Centralizado en una función para que el detalle endpoint use la misma
+ * lógica.
+ */
+function mapSessionStatus(
+  sessionStatus: string,
+  reviewStatus: string | null,
+): 'pending' | 'in_progress' | 'approved' | 'rejected' {
+  // El review explícito siempre manda — un revisor que rechaza algo no
+  // queremos que vuelva a 'pending' por un retry del cron.
+  if (reviewStatus === 'approved') return 'approved';
+  if (reviewStatus === 'rejected') return 'rejected';
+  if (reviewStatus === 'pending') return 'in_progress';
+  // Sin review row, derivamos del status de la sesión.
+  switch (sessionStatus) {
+    case 'pending_review':
+      return 'in_progress';
+    case 'indexed':
+      // Sesiones legacy / pre-workflow review: se asumen aprobadas porque
+      // ya viven en /sesiones y el equipo las usa. Cuando llegue su turno
+      // de re-revisión post-demo, el reviewer las puede ratificar.
+      return 'approved';
+    case 'rejected':
+      return 'rejected';
+    case 'pending':
+    case 'processing':
+    case 'transcript_not_ready':
+    case 'permanent_failure':
+    case 'error':
+    default:
+      return 'pending';
+  }
+}
+
 adminRouter.get('/transcripciones', async (req, res) => {
-  // Pull last N days from legacy. If legacy is down, surface a clear
-  // degraded payload so the UI shows an informational state.
   const today = new Date();
   const since = new Date(today);
   since.setDate(today.getDate() - REVIEW_WINDOW_DAYS);
-  const fmt = (d: Date) => d.toISOString().slice(0, 10);
 
-  let legacyRows: LegacyTranscripcion[] | null = null;
   try {
-    legacyRows = await listTranscripciones({
-      fecha_inicio: fmt(since),
-      fecha_fin: fmt(today),
-      limit: 200,
+    // 1) Sessions del sistema nuevo (Supabase) en la ventana
+    const { data: sessions, error: sErr } = await supa()
+      .from('sessions')
+      .select('id, youtube_video_id, fecha, tipo, comision, status, metadata, created_at, updated_at')
+      .gte('created_at', since.toISOString())
+      .order('created_at', { ascending: false })
+      .limit(300);
+    if (sErr) throw new Error(`sessions read failed: ${sErr.message}`);
+
+    const sessionRows = (sessions ?? []) as Array<{
+      id: string;
+      youtube_video_id: string | null;
+      fecha: string | null;
+      tipo: string | null;
+      comision: string | null;
+      status: string;
+      metadata: Record<string, unknown> | null;
+      created_at: string;
+      updated_at: string;
+    }>;
+
+    // 2) Cross-ref con transcripciones_review (revisor humano)
+    const reviewBySessionId = new Map<string, { status: string; reviewer_note: string | null }>();
+    if (sessionRows.length > 0) {
+      const ids = sessionRows.map((r) => r.id);
+      const { data: reviews } = await supa()
+        .from('transcripciones_review')
+        .select('session_id, status, reviewer_note')
+        .in('session_id', ids);
+      for (const row of (reviews ?? []) as Array<{ session_id: string; status: string; reviewer_note: string | null }>) {
+        reviewBySessionId.set(row.session_id, { status: row.status, reviewer_note: row.reviewer_note });
+      }
+    }
+
+    // 3) Conteo de segments para mostrar densidad real (más útil que confidence dummy)
+    const segCountBySessionId = new Map<string, number>();
+    if (sessionRows.length > 0) {
+      const ids = sessionRows.map((r) => r.id);
+      // PostgREST no expone GROUP BY directo — usamos count=exact via prefer
+      // header pero es un round-trip por sesión; mejor aceptar conteo aprox
+      // en el listado y pedir el exacto solo en detalle. Para el listado
+      // marcamos has_segments boolean.
+      const { data: anySegs } = await supa()
+        .from('transcript_segments')
+        .select('session_id', { count: 'exact', head: false })
+        .in('session_id', ids);
+      for (const row of (anySegs ?? []) as Array<{ session_id: string }>) {
+        segCountBySessionId.set(row.session_id, (segCountBySessionId.get(row.session_id) ?? 0) + 1);
+      }
+    }
+
+    // 4) Convertir a QueueRow (wire shape que ya espera la UI)
+    const items: QueueRow[] = sessionRows.map((s) => {
+      const review = reviewBySessionId.get(s.id) ?? null;
+      const status = mapSessionStatus(s.status, review?.status ?? null);
+      const meta = (s.metadata ?? {}) as { raw_title?: string; sesion_label?: string; duration_seconds?: number };
+      const title = meta.raw_title || meta.sesion_label || `Sesión ${s.youtube_video_id ?? s.id.slice(0, 8)}`;
+      const segCount = segCountBySessionId.get(s.id) ?? 0;
+      return {
+        external_id: s.id,
+        session_id: null, // legacy field — el id real es uuid en external_id
+        sesion_label: title,
+        expediente: null,
+        date: s.fecha ?? s.created_at.slice(0, 10),
+        duration_seconds: typeof meta.duration_seconds === 'number' ? meta.duration_seconds : 0,
+        // Confidence sintética: si tiene segments, es 100; si no, 0. La UI
+        // pinta esto como "transcript ready vs pending".
+        confidence: segCount > 0 ? 100 : 0,
+        flagged_segments: 0,
+        status,
+        source: s.youtube_video_id ? `YouTube · ${s.youtube_video_id}` : 'CL2 sync',
+        speaker: s.tipo === 'plenario' ? 'Plenaria' : (s.comision ?? 'Comisión'),
+        excerpt_text: title.slice(0, 220),
+        excerpt_ts: '0:00:00',
+      };
     });
+
+    const counts = {
+      pending: items.filter((i) => i.status === 'pending').length,
+      in_progress: items.filter((i) => i.status === 'in_progress').length,
+      approved: items.filter((i) => i.status === 'approved').length,
+      rejected: items.filter((i) => i.status === 'rejected').length,
+    };
+
+    const wireItems = items.map((i) => ({
+      id: i.external_id,
+      session_id: i.session_id,
+      sesion_label: i.sesion_label,
+      expediente: i.expediente,
+      date: i.date,
+      duration_seconds: i.duration_seconds,
+      confidence: i.confidence,
+      flagged_segments: i.flagged_segments,
+      status: i.status,
+      source: i.source,
+      speaker: i.speaker,
+      excerpt: i.excerpt_text,
+      excerpt_ts: i.excerpt_ts,
+    }));
+
+    res.json(live({ counts, items: wireItems }));
   } catch (err) {
-    req.log?.warn('admin/transcripciones legacy read failed', {
-      error: (err as Error).message,
-    });
+    req.log?.warn('admin/transcripciones read failed', { error: (err as Error).message });
     res.json({
       ok: true,
       mock: false,
@@ -229,209 +438,124 @@ adminRouter.get('/transcripciones', async (req, res) => {
         items: [],
       },
     });
-    return;
   }
-
-  // Cross-reference with the review state table.
-  let reviewBySessionId = new Map<string, { status: string; reviewer_note?: string | null }>();
-  try {
-    const ids = legacyRows.map((r) => String(r.id));
-    if (ids.length > 0) {
-      const { data } = await supa()
-        .from('transcripciones_review')
-        .select('session_id, status, reviewer_note')
-        .in('session_id', ids);
-      for (const row of (data ?? []) as Array<{
-        session_id: string;
-        status: string;
-        reviewer_note: string | null;
-      }>) {
-        reviewBySessionId.set(row.session_id, { status: row.status, reviewer_note: row.reviewer_note });
-      }
-    }
-  } catch (err) {
-    req.log?.warn('admin/transcripciones review join failed', {
-      error: (err as Error).message,
-    });
-    reviewBySessionId = new Map();
-  }
-
-  const items = legacyRows.map((l) => legacyToQueueRow(l, reviewBySessionId));
-  const counts = {
-    pending: items.filter((i) => i.status === 'pending').length,
-    in_progress: items.filter((i) => i.status === 'in_progress').length,
-    approved: items.filter((i) => i.status === 'approved').length,
-    rejected: items.filter((i) => i.status === 'rejected').length,
-  };
-
-  // Map QueueRow to the wire shape the UI already expects.
-  const wireItems = items.map((i) => ({
-    id: i.external_id,
-    session_id: i.session_id,
-    sesion_label: i.sesion_label,
-    expediente: i.expediente,
-    date: i.date,
-    duration_seconds: i.duration_seconds,
-    confidence: i.confidence,
-    flagged_segments: i.flagged_segments,
-    status: i.status,
-    source: i.source,
-    speaker: i.speaker,
-    excerpt: i.excerpt_text,
-    excerpt_ts: i.excerpt_ts,
-  }));
-
-  res.json(live({ counts, items: wireItems }));
 });
 
 adminRouter.get('/transcripciones/:id', async (req, res) => {
-  // The id here is the legacy session id (string of the integer).
+  // El id ahora es el uuid de la sesión en Supabase (no el int legacy).
   const sessionId = String(req.params.id);
   try {
-    // 1) Find the legacy session — pull a wide window so we don't miss
-    //    older sessions the operator may want to re-review. Iterating
-    //    the whole list is fine because legacyCl2Client caps at 200.
-    const today = new Date();
-    const since = new Date(today);
-    since.setDate(today.getDate() - 365);
-    const fmt = (d: Date) => d.toISOString().slice(0, 10);
-    const legacyRows = await listTranscripciones({
-      fecha_inicio: fmt(since),
-      fecha_fin: fmt(today),
-      limit: 500,
-    });
-    const legacy = legacyRows.find((r) => String(r.id) === sessionId);
-    if (!legacy) {
+    // 1) Sesión + review row en una pasada
+    const { data: session, error: sErr } = await supa()
+      .from('sessions')
+      .select('id, youtube_video_id, fecha, tipo, comision, status, metadata, created_at, updated_at')
+      .eq('id', sessionId)
+      .maybeSingle();
+    if (sErr) throw new Error(`session read failed: ${sErr.message}`);
+    if (!session) {
       res.status(404).json({ ok: false, error: 'not_found' });
       return;
     }
+    const sessionRow = session as {
+      id: string;
+      youtube_video_id: string | null;
+      fecha: string | null;
+      tipo: string | null;
+      comision: string | null;
+      status: string;
+      metadata: Record<string, unknown> | null;
+      created_at: string;
+      updated_at: string;
+    };
 
-    // 2) Pull the review row if any.
     const { data: reviewRow } = await supa()
       .from('transcripciones_review')
       .select('status, reviewer_note, reviewed_at, payload')
       .eq('session_id', sessionId)
       .maybeSingle();
-
-    const review = (reviewRow ?? null) as {
+    const review = reviewRow as {
       status?: string;
       reviewer_note?: string | null;
       reviewed_at?: string | null;
-      payload?: { segments?: unknown[]; diarization?: unknown[]; total_segments?: number; total_words?: number };
+      payload?: Record<string, unknown>;
     } | null;
 
-    const item = legacyToQueueRow(legacy, new Map([[sessionId, { status: review?.status ?? 'pending' }]]));
+    // 2) Transcript segments — primeros 12 para preview de moderación.
+    //    El admin operador ve estos para decidir si aprueba/rechaza.
+    const { data: segs } = await supa()
+      .from('transcript_segments')
+      .select('segment_idx, start_seconds, end_seconds, text, source')
+      .eq('session_id', sessionId)
+      .order('segment_idx', { ascending: true })
+      .limit(12);
+    const segmentRows = (segs ?? []) as Array<{
+      segment_idx: number;
+      start_seconds: number;
+      end_seconds: number;
+      text: string;
+      source: string;
+    }>;
+
+    // Total segments — head=true para conteo sin payload
+    const { count: totalSegmentsCount } = await supa()
+      .from('transcript_segments')
+      .select('*', { count: 'exact', head: true })
+      .eq('session_id', sessionId);
+    const totalSegments = totalSegmentsCount ?? segmentRows.length;
+    const totalWords = segmentRows.reduce((acc, s) => acc + (s.text?.split(/\s+/).length ?? 0), 0);
+
+    // 3) Wire shape — mismo que la UI ya espera
+    const meta = (sessionRow.metadata ?? {}) as { raw_title?: string; sesion_label?: string; duration_seconds?: number };
+    const title = meta.raw_title || meta.sesion_label || `Sesión ${sessionRow.youtube_video_id ?? sessionId.slice(0, 8)}`;
+    const status = mapSessionStatus(sessionRow.status, review?.status ?? null);
+
     const wireItem = {
-      id: item.external_id,
-      session_id: item.session_id,
-      sesion_label: item.sesion_label,
-      expediente: item.expediente,
-      date: item.date,
-      duration_seconds: item.duration_seconds,
-      confidence: item.confidence,
-      flagged_segments: item.flagged_segments,
-      status: item.status,
-      source: item.source,
-      speaker: item.speaker,
-      excerpt: item.excerpt_text,
-      excerpt_ts: item.excerpt_ts,
+      id: sessionRow.id,
+      session_id: null,
+      sesion_label: title,
+      expediente: null,
+      date: sessionRow.fecha ?? sessionRow.created_at.slice(0, 10),
+      duration_seconds: typeof meta.duration_seconds === 'number' ? meta.duration_seconds : 0,
+      confidence: totalSegments > 0 ? 100 : 0,
+      flagged_segments: 0,
+      status,
+      source: sessionRow.youtube_video_id ? `YouTube · ${sessionRow.youtube_video_id}` : 'CL2 sync',
+      speaker: sessionRow.tipo === 'plenario' ? 'Plenaria' : (sessionRow.comision ?? 'Comisión'),
+      excerpt: title.slice(0, 220),
+      excerpt_ts: '0:00:00',
     };
 
-    // 3) Fetch transcript segments from the legacy GCS URL when
-    //    available. Best-effort — if the JSON isn't accessible we
-    //    fall back to a single-row excerpt from the resumen.
-    let segments: Array<{ ts: string; speaker: string; text: string; confidence: number; flagged: boolean }> = [];
-    let totalSegments = 0;
-    let totalWords = 0;
+    const segments = segmentRows.map((s) => ({
+      ts: secondsToTs(s.start_seconds),
+      speaker: 'Plenaria',
+      text: s.text,
+      confidence: 100, // youtube_auto no expone confidence per-segment
+      flagged: false,
+    }));
 
-    if (legacy.transcripcion) {
-      try {
-        const r = await fetch(legacy.transcripcion);
-        if (r.ok) {
-          // Legacy GCS transcript shape: array with a single object
-          //   [{ ok: true, transcription: { text, words: [...], ... } }]
-          // `words` is per-token: { text, start, end, type, logprob }.
-          // `type === 'word'` are real tokens; `type === 'spacing'` are
-          // separators we can either keep as-is or filter — keeping
-          // them for natural reading flow.
-          const raw = (await r.json()) as Array<{
-            transcription?: {
-              text?: string;
-              words?: Array<{ text?: string; start?: number; end?: number; type?: string; logprob?: number }>;
-            };
-          }>;
-          const trans = raw[0]?.transcription ?? {};
-          const words = trans.words ?? [];
-          totalWords = words.filter((w) => w.type === 'word').length;
-
-          // Group words into pseudo-segments by silence gap (>1.2s) OR
-          // a hard cap of 35 words per segment. Each segment becomes
-          // a row in the moderation pane. Confidence is average of
-          // word logprobs converted to probability.
-          interface Group {
-            words: typeof words;
-            start: number;
-            end: number;
-          }
-          const groups: Group[] = [];
-          let current: Group | null = null;
-          for (const w of words) {
-            if (typeof w.start !== 'number' || typeof w.end !== 'number') continue;
-            const gap = current ? w.start - current.end : 0;
-            const tooMany = current && current.words.length >= 35;
-            if (!current || gap > 1.2 || tooMany) {
-              if (current) groups.push(current);
-              current = { words: [w], start: w.start, end: w.end };
-            } else {
-              current.words.push(w);
-              current.end = w.end;
-            }
-          }
-          if (current) groups.push(current);
-          totalSegments = groups.length;
-
-          // First 12 groups → segments for the pane. Logprob → confidence:
-          // probability = e^logprob; pct = probability * 100. We average
-          // across the group for a single confidence number.
-          segments = groups.slice(0, 12).map((g) => {
-            const text = g.words.map((w) => w.text ?? '').join('').trim();
-            const wordOnly = g.words.filter((w) => w.type === 'word' && typeof w.logprob === 'number');
-            const avgProb = wordOnly.length
-              ? wordOnly.reduce((acc, w) => acc + Math.exp(w.logprob ?? 0), 0) / wordOnly.length
-              : 1;
-            const conf = Math.round(avgProb * 100);
-            return {
-              ts: secondsToTs(g.start),
-              speaker: 'Plenaria',
-              text,
-              confidence: conf,
-              flagged: conf < 70,
-            };
-          });
-        }
-      } catch (err) {
-        req.log?.warn('admin/transcripciones detail: transcript fetch failed', {
-          error: (err as Error).message,
-          url: legacy.transcripcion,
-        });
-      }
-    }
-
-    if (segments.length === 0 && legacy.resumen) {
-      // Fallback: render the resumen as a single segment so the pane
-      // isn't empty.
-      segments = [
-        { ts: '0:00:00', speaker: 'Resumen ejecutivo', text: legacy.resumen.slice(0, 600), confidence: 100, flagged: false },
-      ];
+    if (segments.length === 0) {
+      // Sin segments — la sesión está pendiente de procesamiento. Mostramos
+      // un placeholder para que el panel no quede vacío.
+      segments.push({
+        ts: '0:00:00',
+        speaker: 'Status',
+        text: status === 'pending'
+          ? 'Transcript pendiente de descarga. El cron volverá a intentarlo en su próxima corrida.'
+          : 'Sin transcript disponible.',
+        confidence: 100,
+        flagged: false,
+      });
     }
 
     res.json(
       live({
         item: wireItem,
         segments,
-        diarization: [], // legacy doesn't expose; future Whisper job will fill
-        total_segments: totalSegments || segments.length,
+        diarization: [],
+        total_segments: totalSegments,
         total_words: totalWords,
+        review_note: review?.reviewer_note ?? null,
+        reviewed_at: review?.reviewed_at ?? null,
       }),
     );
   } catch (err) {
@@ -456,53 +580,46 @@ adminRouter.post('/transcripciones/:id/review', async (req, res) => {
     res.status(400).json({ ok: false, error: 'action must be approve|reject' });
     return;
   }
-  // The id is the legacy session id (string of an int). The review row
-  // is keyed by session_id so each session gets exactly one decision.
+  // El id ahora es uuid de la sesión en Supabase (no el int legacy).
   const sessionId = String(req.params.id);
 
   try {
     const user = await getUserFromRequest(req);
-    const status = action === 'approve' ? 'approved' : 'rejected';
+    const reviewStatus = action === 'approve' ? 'approved' : 'rejected';
+    // El status de la sesión cambia para reflejar la decisión del humano.
+    // Approve → 'indexed' (visible al equipo en /sesiones).
+    // Reject  → 'rejected' (oculto al equipo, queda en el panel admin).
+    const sessionStatus = action === 'approve' ? 'indexed' : 'rejected';
 
-    // Upsert by session_id. If the operator changes their mind later,
-    // a second call with the opposite action overwrites the row — the
-    // audit log keeps both entries so the history is intact.
-    type ReviewUpsert = {
-      session_id: string;
-      external_id: string;
-      status: string;
-      reviewed_by: string | null;
-      reviewed_at: string;
-      reviewer_note: string | null;
-    };
-    const upsertClient = supa() as unknown as {
-      from: (t: string) => {
-        upsert: (
-          v: ReviewUpsert,
-          opts: { onConflict: string },
-        ) => Promise<{ error: { message: string } | null }>;
-      };
-    };
-    const { error } = await upsertClient.from('transcripciones_review').upsert(
-      {
-        session_id: sessionId,
-        external_id: sessionId, // unique constraint — keep mirrored
-        status,
-        reviewed_by: user?.id ?? null,
-        reviewed_at: new Date().toISOString(),
-        reviewer_note: note,
-      },
-      { onConflict: 'external_id' },
-    );
-    if (error) throw new Error(error.message);
+    // 1) Upsert review row (auditable, una decisión por sesión)
+    const { error: rErr } = await supa()
+      .from('transcripciones_review')
+      .upsert(
+        {
+          session_id: sessionId,
+          status: reviewStatus,
+          reviewer_id: user?.id ?? null,
+          reviewed_at: new Date().toISOString(),
+          reviewer_note: note,
+        },
+        { onConflict: 'session_id' },
+      );
+    if (rErr) throw new Error(`review upsert failed: ${rErr.message}`);
+
+    // 2) Update sessions.status para que el resto de la app refleje la decisión
+    const { error: sErr } = await supa()
+      .from('sessions')
+      .update({ status: sessionStatus, updated_at: new Date().toISOString() })
+      .eq('id', sessionId);
+    if (sErr) throw new Error(`session update failed: ${sErr.message}`);
 
     await auditFromReq(req, {
       verb: action === 'approve' ? 'aprobó' : 'rechazó',
-      resource: `transcripción sesión #${sessionId}`,
+      resource: `transcripción sesión ${sessionId.slice(0, 8)}`,
       resource_kind: 'transcription',
       resource_id: sessionId,
       result: 'ok',
-      metadata: { note },
+      metadata: { note, session_status: sessionStatus },
     });
 
     res.json({ ok: true, id: sessionId, action, ts: new Date().toISOString() });
@@ -616,7 +733,7 @@ adminRouter.get('/watchlist', async (req, res) => {
       return;
     }
     const { data, error } = await supa()
-      .from('expedientes_watchlist')
+      .from('centinela_watchlist')
       .select('expediente_id')
       .eq('user_id', user.id);
     if (error) {
@@ -666,7 +783,7 @@ adminRouter.post('/watchlist/:id', async (req, res) => {
     const action = req.body?.action;
     if (action === 'add') {
       const { error } = await supa()
-        .from('expedientes_watchlist')
+        .from('centinela_watchlist')
         .upsert({ user_id: user.id, expediente_id: expedienteId });
       if (error) throw new Error(error.message);
       await auditFromReq(req, {
@@ -678,7 +795,7 @@ adminRouter.post('/watchlist/:id', async (req, res) => {
       });
     } else if (action === 'remove') {
       const { error } = await supa()
-        .from('expedientes_watchlist')
+        .from('centinela_watchlist')
         .delete()
         .eq('user_id', user.id)
         .eq('expediente_id', expedienteId);
@@ -769,33 +886,234 @@ adminRouter.get('/audit.csv', async (req, res) => {
 // ─── Users — list + role + invite ────────────────────────────────────
 adminRouter.get('/users', async (_req, res) => {
   try {
+    // Source of truth: user_access (migration 0025). Combina rows con
+    // auth.users para traer last_sign_in_at que la API admin nos da gratis.
     const s = supa();
-    const { data, error } = await s.auth.admin.listUsers({ page: 1, perPage: 50 });
+    const { data: accessRows, error } = await s
+      .from('user_access')
+      .select('user_id, email, full_name, avatar_url, status, role, approved_at, requested_at, last_seen_at, notes')
+      .order('requested_at', { ascending: false })
+      .limit(200);
     if (error) throw new Error(error.message);
-    const items = (data?.users ?? []).map((u) => ({
-      id: u.id,
-      email: u.email ?? '',
-      created_at: u.created_at,
-      last_sign_in_at: u.last_sign_in_at ?? null,
-      role: ((u.user_metadata as { role?: string } | null)?.role as string | null) ?? 'lector',
-      status: u.last_sign_in_at ? 'activo' : 'invitado',
-    }));
+
+    // Cruzá con auth.users para last_sign_in_at (la API admin pagina; pedimos
+    // un solo page de 200 que cubre comodamente — CL2 tiene <50 users).
+    const authList = await s.auth.admin.listUsers({ page: 1, perPage: 200 }).catch(() => null);
+    const lastSignInByUserId = new Map<string, string | null>();
+    for (const u of authList?.data?.users ?? []) {
+      lastSignInByUserId.set(u.id, u.last_sign_in_at ?? null);
+    }
+
+    const items = (accessRows ?? []).map((row) => {
+      const r = row as {
+        user_id: string;
+        email: string;
+        full_name: string | null;
+        avatar_url: string | null;
+        status: string;
+        role: string | null;
+        approved_at: string | null;
+        requested_at: string;
+        last_seen_at: string | null;
+      };
+      return {
+        id: r.user_id,
+        email: r.email,
+        full_name: r.full_name,
+        avatar_url: r.avatar_url,
+        created_at: r.requested_at,
+        last_sign_in_at: lastSignInByUserId.get(r.user_id) ?? r.last_seen_at ?? null,
+        role: r.role,
+        status: r.status,
+        approved_at: r.approved_at,
+      };
+    });
     res.json(live({ items }));
   } catch (err) {
     logger.warn('admin/users live read failed', { error: (err as Error).message });
-    // Fall through to mock when admin API isn't available.
     res.json(
-      mocked({
-        items: [
-          { id: 'mock-1', email: 'juanma@shiftlab.cr',         created_at: '2026-01-12T00:00:00Z', last_sign_in_at: new Date(Date.now() - 120_000).toISOString(),   role: 'admin',    status: 'activo'   },
-          { id: 'mock-2', email: 'diana.rodriguez@asamblea.go.cr', created_at: '2026-02-03T00:00:00Z', last_sign_in_at: new Date(Date.now() - 14*60_000).toISOString(),  role: 'operador', status: 'activo'   },
-          { id: 'mock-3', email: 'andres@shiftlab.cr',         created_at: '2026-02-08T00:00:00Z', last_sign_in_at: new Date(Date.now() - 5*60*60_000).toISOString(), role: 'editor',   status: 'activo'   },
-          { id: 'mock-4', email: 'tatiana.vargas@asamblea.go.cr', created_at: '2026-04-22T00:00:00Z', last_sign_in_at: null,                                            role: 'lector',   status: 'invitado' },
-          { id: 'mock-5', email: 'msolano@asamblea.go.cr',     created_at: '2026-03-01T00:00:00Z', last_sign_in_at: new Date(Date.now() - 18*60*60_000).toISOString(), role: 'lector',   status: 'activo'   },
-          { id: 'mock-6', email: 'rrojas@example.com',         created_at: '2026-04-25T00:00:00Z', last_sign_in_at: null,                                            role: null,       status: 'solicitud' },
-        ],
-      }),
+      live({ items: [], degraded_reason: (err as Error).message }),
     );
+  }
+});
+
+// ── POST /api/admin/users/:id/approve ────────────────────────────────
+// Cambia status='active' + asigna role. Solo admin/operador del CL2
+// puede invocarlo (rate limit + chequeo de role en el caller, pendiente
+// hardening para post-demo).
+//
+// Track 0a (2026-05-11): después de aprobar, sembramos templates en la
+// neurona del user (Cerebro). Cuando el user entre por primera vez al
+// SPA y vaya a /mi-memoria, ya tiene archivos editables. La escritura
+// es best-effort — si Cerebro está caído, la aprobación NO se revierte
+// (el user puede usar la app igual; va a poblar la neurona a mano
+// después).
+adminRouter.post('/users/:id/approve', async (req, res) => {
+  const userId = String(req.params.id);
+  const body = req.body as { role?: string } | undefined;
+  const role = body?.role ?? 'lector';
+  const ALLOWED_ROLES = new Set(['lector', 'editor', 'operador', 'admin']);
+  if (!ALLOWED_ROLES.has(role)) {
+    res.status(400).json({ ok: false, error: 'bad_role' });
+    return;
+  }
+  try {
+    const s = supa();
+    const { data: updatedRow, error } = await s
+      .from('user_access')
+      .update({
+        status: 'active',
+        role,
+        approved_at: new Date().toISOString(),
+      })
+      .eq('user_id', userId)
+      .select('email, full_name')
+      .single();
+    if (error) throw new Error(error.message);
+
+    // Track 0a — seed neuron templates. Fire-and-forget; no await del
+    // resultado para no atar la respuesta del approve al RTT de
+    // Cerebro. Si falla, se loggea y listo.
+    if (updatedRow?.email) {
+      void seedNeuronTemplates(updatedRow.email, {
+        full_name: (updatedRow as { full_name?: string | null }).full_name ?? null,
+        role,
+      }).catch((err) => {
+        logger.warn('admin.approve: neuron seed failed', {
+          user_id: userId,
+          error: (err as Error).message,
+        });
+      });
+    }
+
+    await auditFromReq(req, {
+      verb: 'aprobó',
+      resource: userId,
+      resource_kind: 'user',
+      resource_id: userId,
+      result: 'ok',
+      metadata: { role },
+    });
+    res.json({ ok: true, role });
+  } catch (err) {
+    await auditFromReq(req, {
+      verb: 'falló aprobar',
+      resource: userId,
+      resource_kind: 'user',
+      result: 'error',
+      metadata: { error: (err as Error).message },
+    });
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// ─── Track 0a · neuron seed templates ─────────────────────────────────
+// Idempotente: re-aprobaciones sobreescriben templates. Si el user ya
+// editó /memories/perfil.md, lo sobreescribimos con la versión limpia
+// — es una decisión consciente: re-aprobar = reset templates. Como las
+// re-aprobaciones son raras (operador clickeando dos veces), no creo
+// que sea un problema real, y la alternativa (mergear / detectar edits)
+// agrega complejidad para un edge-case.
+//
+// Templates escritos:
+//   /memories/perfil.md     — estructura editable de identidad
+//   /memories/preferencias.md — cómo quiere que los agentes le hablen
+//   /memories/bienvenida.md  — meta-explicación + link a /mi-memoria
+async function seedNeuronTemplates(
+  email: string,
+  ctx: { full_name: string | null; role: string },
+): Promise<void> {
+  const name = ctx.full_name?.trim() || email.split('@')[0];
+  const fechaIso = new Date().toISOString().slice(0, 10);
+
+  const perfil = `# Perfil
+
+Vos sos el usuario. Estos son los datos básicos que CL2 va a usar para
+adaptar las respuestas de Lexa, Atlas y Centinela.
+
+- **Nombre**: ${name}
+- **Email**: ${email}
+- **Rol en CL2**: ${ctx.role}
+- **Organización**: _(editá esto: para qué organización trabajás)_
+- **Cargo**: _(diputado, asesor, lobbyist, consultor independiente, etc.)_
+- **Áreas de foco**: _(ej: reforma fiscal, minería, fintech)_
+- **Clientes / fracción**: _(opcional)_
+
+> Esta hoja la podés editar libremente desde /mi-memoria.
+> Los agentes la leen al inicio de cada conversación, así que mientras
+> más rico esté el perfil, más útiles son las respuestas.
+
+_Aprobado: ${fechaIso}_
+`;
+
+  const preferencias = `# Preferencias
+
+Cómo quiero que los agentes me hablen y entreguen información.
+
+- **Tono**: _(formal / cercano / mixto)_
+- **Longitud de respuesta**: _(breve / detallado / depende)_
+- **Estructura preferida**: _(prosa corrida / bullets / secciones con títulos)_
+- **Idioma**: _(es-CR / es-AR / es-ES / es-CO)_
+- **Análisis profundo**: _(¿cuándo querés que activen Deep Insight por default?)_
+
+> Estas preferencias se respetan en cada turno. Editá libremente.
+`;
+
+  const bienvenida = `# Bienvenida
+
+CL2 te acaba de aprobar como usuario (rol: ${ctx.role}).
+
+Esta carpeta \`/memories\` es **tu memoria personal**. Todo lo que viva
+acá lo ven los agentes Lexa, Atlas y Centinela en cada conversación,
+así que les sirve para no preguntarte siempre lo mismo y adaptar su
+tono a tu trabajo.
+
+Cosas que podés hacer desde /mi-memoria:
+
+- Editar el perfil con tu rol, foco temático, clientes
+- Definir preferencias (tono, longitud, idioma)
+- Subir un documento corto (max 50 KB) con contexto adicional
+- Borrar lo que no quieras que recuerden
+
+La memoria es privada — solo vos y los agentes con los que conversás la
+ven. No la comparte CL2 con otros usuarios.
+
+_Sembrado el ${fechaIso}._
+`;
+
+  // Disparamos las tres en paralelo. Si una falla, las otras siguen.
+  await Promise.allSettled([
+    writeNeuronFile(email, '/memories/perfil.md', perfil),
+    writeNeuronFile(email, '/memories/preferencias.md', preferencias),
+    writeNeuronFile(email, '/memories/bienvenida.md', bienvenida),
+  ]);
+}
+
+// ── POST /api/admin/users/:id/reject ─────────────────────────────────
+adminRouter.post('/users/:id/reject', async (req, res) => {
+  const userId = String(req.params.id);
+  const body = req.body as { reason?: string } | undefined;
+  try {
+    const s = supa();
+    const { error } = await s
+      .from('user_access')
+      .update({
+        status: 'rejected',
+        notes: body?.reason ?? null,
+      })
+      .eq('user_id', userId);
+    if (error) throw new Error(error.message);
+
+    await auditFromReq(req, {
+      verb: 'rechazó',
+      resource: userId,
+      resource_kind: 'user',
+      result: 'ok',
+      metadata: { reason: body?.reason ?? null },
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
   }
 });
 

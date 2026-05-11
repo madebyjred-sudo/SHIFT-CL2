@@ -19,6 +19,8 @@ import { Router, type Request, type Response } from 'express';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { getUserIdFromRequest } from '../services/auth.js';
 import { logger } from '../services/logger.js';
+import { cerebroInvoke } from '../services/cerebroLlmClient.js';
+import { getUserFromRequest } from '../services/auth.js';
 
 let _supa: SupabaseClient | null = null;
 function supa(): SupabaseClient {
@@ -118,9 +120,10 @@ onboardingRouter.post('/complete', async (req, res) => {
 // Body: { agent: 'lexa'|'atlas'|'centinela', field: string, context: object }
 // Returns: { suggestion: string }  OR  { suggestions: string[] }
 //
-// Implementation: a single OpenRouter call with a tight system prompt per
-// (agent, field) pair. Output is JSON-fenced; we parse + sanitize.
-const OR_BASE = 'https://openrouter.ai/api/v1';
+// Implementation: a single Cerebro `/v1/llm/invoke` call con
+// `enable_memory=true` para que la neurona del user se vaya enriqueciendo
+// a medida que pasa el wizard (Track 0c, 2026-05-11). Output is
+// JSON-fenced; we parse + sanitize.
 const OR_MODEL = 'anthropic/claude-sonnet-4.5';
 
 const MAGIC_HELP_PROMPTS: Record<string, (ctx: Record<string, unknown>) => string> = {
@@ -157,8 +160,11 @@ DEVOLVÉ JSON: {"suggestions": ["sub-tema 1", "sub-tema 2", ...]}`,
 };
 
 onboardingRouter.post('/magic-help', async (req, res) => {
-  const userId = await requireUser(req, res);
-  if (!userId) return;
+  // Necesitamos id + email — el email es el user_id canónico de Cerebro.
+  const user = await getUserFromRequest(req);
+  if (!user) { res.status(401).json({ ok: false, error: 'auth_required' }); return; }
+  const userId = user.id;
+  const userEmail = user.email;
   const { agent, field, context } = (req.body ?? {}) as {
     agent?: string; field?: string; context?: Record<string, unknown>;
   };
@@ -169,34 +175,24 @@ onboardingRouter.post('/magic-help', async (req, res) => {
     return;
   }
 
-  const orKey = process.env.OPENROUTER_API_KEY;
-  if (!orKey) {
-    res.status(503).json({ ok: false, error: 'no_openrouter_key' });
-    return;
-  }
-
   const systemPrompt = promptBuilder(context ?? {});
   try {
-    const r = await fetch(`${OR_BASE}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${orKey}`,
-      },
-      body: JSON.stringify({
-        model: OR_MODEL,
-        messages: [{ role: 'system', content: systemPrompt }],
-        max_tokens: 400,
-        temperature: 0.7,
-        response_format: { type: 'json_object' },
-      }),
+    // Cerebro: enable_memory=true → si el user ya tiene contexto en su
+    // neurona (de turnos anteriores del onboarding o de chat) se inyecta
+    // automático. Y si el LLM detecta info persistible en la respuesta,
+    // la escribe back sin código del lado de CL2.
+    const resp = await cerebroInvoke({
+      model: OR_MODEL,
+      messages: [{ role: 'system', content: systemPrompt }],
+      max_tokens: 400,
+      temperature: 0.7,
+      app_id: 'cl2',
+      trace_label: `onboarding:magic-help:${key}`,
+      realm: 'cl2',
+      user_id: userEmail,
+      enable_memory: Boolean(userEmail),
     });
-    if (!r.ok) {
-      const txt = await r.text();
-      throw new Error(`openrouter ${r.status}: ${txt.slice(0, 200)}`);
-    }
-    const data = (await r.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    const raw = data.choices?.[0]?.message?.content ?? '{}';
+    const raw = resp.text || '{}';
     const stripped = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
     const parsed = JSON.parse(stripped) as { suggestion?: string; suggestions?: string[] };
     res.json({ ok: true, ...parsed });
@@ -215,15 +211,11 @@ onboardingRouter.post('/magic-help', async (req, res) => {
 // simple and just ask the LLM (no RAG) — output is suggestions-as-numbers
 // plus rationale. The wizard renders [Agregar] / [Saltar] for each.
 onboardingRouter.post('/suggest-watchlist', async (req, res) => {
-  const userId = await requireUser(req, res);
-  if (!userId) return;
+  const user = await getUserFromRequest(req);
+  if (!user) { res.status(401).json({ ok: false, error: 'auth_required' }); return; }
+  const userId = user.id;
+  const userEmail = user.email;
   const profile = (req.body?.profile ?? {}) as { cargo?: string; enfoque?: string; temas?: string[] };
-
-  const orKey = process.env.OPENROUTER_API_KEY;
-  if (!orKey) {
-    res.status(503).json({ ok: false, error: 'no_openrouter_key' });
-    return;
-  }
 
   const systemPrompt =
     `Sos Centinela. Un usuario quiere armar su watchlist inicial. Su perfil:\n\n` +
@@ -237,20 +229,18 @@ onboardingRouter.post('/suggest-watchlist', async (req, res) => {
     `entity_type es siempre "tema" en este endpoint (no proponemos números de expediente — el usuario los buscará después). entity_id puede ser igual al label.`;
 
   try {
-    const r = await fetch(`${OR_BASE}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${orKey}` },
-      body: JSON.stringify({
-        model: OR_MODEL,
-        messages: [{ role: 'system', content: systemPrompt }],
-        max_tokens: 800,
-        temperature: 0.5,
-        response_format: { type: 'json_object' },
-      }),
+    const resp = await cerebroInvoke({
+      model: OR_MODEL,
+      messages: [{ role: 'system', content: systemPrompt }],
+      max_tokens: 800,
+      temperature: 0.5,
+      app_id: 'cl2',
+      trace_label: 'onboarding:suggest-watchlist',
+      realm: 'cl2',
+      user_id: userEmail,
+      enable_memory: Boolean(userEmail),
     });
-    if (!r.ok) throw new Error(`openrouter ${r.status}`);
-    const data = (await r.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    const raw = data.choices?.[0]?.message?.content ?? '{}';
+    const raw = resp.text || '{}';
     const stripped = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
     const parsed = JSON.parse(stripped) as {
       suggestions?: Array<{ label: string; entity_type: string; entity_id: string; rationale: string }>;

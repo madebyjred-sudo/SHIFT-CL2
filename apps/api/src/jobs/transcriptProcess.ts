@@ -22,12 +22,18 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { randomUUID } from 'crypto';
 import { fetchTranscript, YoutubeTranscriptError } from '../services/youtubeTranscript.js';
-import { withTimeout, withRetry } from '../services/resilience.js';
+import { withRetry } from '../services/resilience.js';
 import { logger } from '../services/logger.js';
+import { cerebroInvoke } from '../services/cerebroLlmClient.js';
 import { scanSessionForMentions } from './centinelaMentions.js';
 
-// ── OpenRouter ────────────────────────────────────────────────────────────────
-const OR_BASE = 'https://openrouter.ai/api/v1';
+// ── LLM ───────────────────────────────────────────────────────────────────────
+// El review de transcripciones es un job no-streaming, batch, sin
+// usuario asociado (corre sobre las sessions, no sobre un user). Por
+// eso NO seteamos enable_memory aquí — no hay user_id contra el que
+// escribir. Lo migramos igual a Cerebro para tener cost logging
+// centralizado y para que un futuro cambio de provider no requiera
+// tocar este archivo.
 const DEFAULT_MODEL = 'anthropic/claude-sonnet-4-6';
 const DEFAULT_LLM_TIMEOUT_MS = 120_000;
 
@@ -304,50 +310,33 @@ async function runLlmReview(
     });
   }
 
-  // Call OpenRouter with retry (2 attempts) + timeout
-  const res = await withRetry(
+  // Llamada via Cerebro `/v1/llm/invoke` (Track 0c). withRetry preserva
+  // la política original de 2 intentos por fallas transitorias de red;
+  // el timeout vive dentro de cerebroInvoke (60s default — para
+  // transcripts largas le subimos el opts.timeoutMs lo tiene este
+  // wrapper, pero el de Cerebro client ya es 60s). Si una transcripción
+  // muy larga necesita más, la decisión sería bajar el size del input
+  // antes que extender timeout. apiKey ya no aplica — Cerebro maneja
+  // OpenRouter del otro lado con su propia key.
+  void apiKey; // referenciado para evitar unused-var; check de presencia ya pasó
+  const llmResp = await withRetry(
     () =>
-      withTimeout(
-        (signal) =>
-          fetch(`${OR_BASE}/chat/completions`, {
-            signal,
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${apiKey}`,
-              'Content-Type': 'application/json',
-              'HTTP-Referer': 'https://agentescl2.com',
-              'X-Title': 'CL2 Transcript Review',
-            },
-            body: JSON.stringify({
-              model: opts.model,
-              messages: [
-                { role: 'system', content: SYSTEM_PROMPT },
-                { role: 'user', content: userMessage },
-              ],
-              response_format: { type: 'json_object' },
-              max_tokens: 8_000,
-              temperature: 0.1,
-            }),
-          }),
-        { ms: opts.timeoutMs, label },
-      ),
+      cerebroInvoke({
+        model: opts.model,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: userMessage },
+        ],
+        max_tokens: 8_000,
+        temperature: 0.1,
+        app_id: 'cl2',
+        trace_label: `transcripts:review:${session.id}`,
+        // NO enable_memory acá — el "user" es el sistema, no el end user.
+      }),
     { attempts: 2, baseDelayMs: 2_000, label },
   );
 
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    logger.warn('transcript_process_llm_http_failed', {
-      session_id: session.id,
-      status: res.status,
-      detail: detail.slice(0, 200),
-    });
-    throw new Error(`LLM review HTTP ${res.status}`);
-  }
-
-  const json = (await res.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  const content = json.choices?.[0]?.message?.content?.trim() ?? '';
+  const content = (llmResp.text || '').trim();
 
   if (!content) {
     logger.warn('transcript_process_llm_empty_response', { session_id: session.id });
@@ -537,7 +526,13 @@ export async function processSession(
   let rawSegments: Awaited<ReturnType<typeof fetchTranscript>>;
 
   try {
-    rawSegments = await fetchTranscript(session.youtube_video_id);
+    // Pasamos durationS si el sync ya lo guardó en metadata. Gemini lo usa
+    // para chunkear plenarias largas (>10min) en ventanas que caben en
+    // max_output_tokens. Sin durationS Gemini cae a una sola llamada y
+    // riesgo de truncation para videos largos.
+    const meta = (session.metadata ?? {}) as { duration_seconds?: number };
+    const durationS = typeof meta.duration_seconds === 'number' ? meta.duration_seconds : undefined;
+    rawSegments = await fetchTranscript(session.youtube_video_id, { durationS });
   } catch (err) {
     if (err instanceof YoutubeTranscriptError) {
       // Cancelled: rethrow — don't swallow user-initiated cancel
@@ -689,14 +684,22 @@ export async function processSession(
     logger.info('transcript_process_llm_skipped', { session_id: sessionId });
   }
 
-  // ── Step 6: Mark as 'indexed' ───────────────────────────────────────────────
+  // ── Step 6: Mark as 'pending_review' (no 'indexed' directo) ───────────────
+  // Cambio 2026-05-10 (migration 0024): el pipeline ya no auto-publica al
+  // equipo. Cuando un transcript se descarga + parsea OK, queda
+  // 'pending_review' esperando que un operador lo apruebe en
+  // /admin/transcripciones. Una vez aprobado, status pasa a 'indexed' y
+  // entonces aparece en /sesiones para todo el equipo.
+  //
+  // Esto implementa el "human-in-the-loop" que CL2 Consultoría pidió:
+  // que un revisor confirme calidad antes de que el equipo lo use.
   const { error: indexedErr } = await supa()
     .from('sessions')
-    .update({ status: 'indexed' })
+    .update({ status: 'pending_review' })
     .eq('id', sessionId);
 
   if (indexedErr) {
-    throw new Error(`failed to mark session indexed: ${indexedErr.message}`);
+    throw new Error(`failed to mark session pending_review: ${indexedErr.message}`);
   }
 
   result.status = 'success';
