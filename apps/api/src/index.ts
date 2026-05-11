@@ -40,6 +40,7 @@ import { uploadsRouter } from './routes/uploads.js';
 import { expedientesRouter } from './routes/expedientes.js';
 import { puntoMedioRouter } from './routes/puntoMedio.js';
 import { adminRouter } from './routes/admin.js';
+import { meRouter } from './routes/me.js';
 import { silRouter } from './routes/sil.js';
 import { workspaceRouter } from './routes/workspace.js';
 import { conversationsRouter } from './routes/conversations.js';
@@ -49,6 +50,7 @@ import { podcastsRouter } from './routes/podcasts.js';
 import { transcriptsAdminRouter, internalTriggersRouter } from './routes/transcripts.js';
 import { centinelaAdminRouter, centinelaInternalRouter, centinelaUserRouter } from './routes/centinela.js';
 import { onboardingRouter } from './routes/onboarding.js';
+import { neuronRouter } from './routes/neuron.js';
 import { requestContext } from './middleware/requestContext.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { logger } from './services/logger.js';
@@ -64,6 +66,15 @@ app.use(requestContext);
 
 // /health stays unrate-limited — load balancers hammer it.
 app.use('/health', healthRouter);
+// /api/me — endpoint que devuelve el access del user actual (status + role).
+// El frontend lo llama post-auth para decidir si mostrar la app o la
+// pantalla "pendiente de aprobación". Rate limit alto porque el cliente
+// puede consultarlo seguido en navigation events.
+app.use(
+  '/api/me',
+  rateLimit({ bucket: 'me', max: 120, windowMs: 60_000 }),
+  meRouter,
+);
 // Agents list is anon + cheap, but a runaway client could still hit it
 // thousands of times. Loose cap keeps the endpoint useful for the SPA
 // without inviting accidental DDoS.
@@ -128,6 +139,15 @@ app.use(
   '/api/workspace',
   rateLimit({ bucket: 'workspace', max: 300, windowMs: 60_000 }),
   workspaceRouter,
+);
+app.use(
+  // /api/neuron — per-user memory proxy to Cerebro. Server-side token,
+  // realm hardcoded to "cl2". Each call is small (list / read / patch
+  // small files) but a panel that polls every few seconds is plausible,
+  // so generous cap. See routes/neuron.ts and services/cerebroNeuron.ts.
+  '/api/neuron',
+  rateLimit({ bucket: 'neuron', max: 120, windowMs: 60_000 }),
+  neuronRouter,
 );
 app.use(
   // Chat history — sidebar hydration + multi-device read across the

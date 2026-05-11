@@ -84,7 +84,15 @@ gcloud run deploy "$SERVICE_NAME" \
   --set-env-vars "INTERNAL_TRIGGER_SECRET=$INTERNAL_TRIGGER_SECRET" \
   --set-env-vars "GAMMA_API_KEY=$GAMMA_API_KEY" \
   --set-env-vars "CL2_ASSETS_BUCKET=shift-cl2-podcasts" \
-  --set-env-vars "ASSET_GCS_BUCKET=shift-cl2-podcasts"
+  --set-env-vars "ASSET_GCS_BUCKET=shift-cl2-podcasts" \
+  --set-env-vars "GEMINI_TRANSCRIPT_ENABLED=true" \
+  --set-env-vars "YT_COOKIES_PATH=/secrets/youtube-cookies.txt" \
+  --set-env-vars "SHIFT_INTERNAL_TOKEN=$SHIFT_INTERNAL_TOKEN"
+# IMPORTANTE: `gcloud run deploy --set-env-vars` REEMPLAZA todas las env vars
+# del revision. Cualquier env seteada vía `gcloud run services update` después
+# del último deploy se PIERDE en el próximo deploy. Por eso GEMINI_TRANSCRIPT_ENABLED
+# y YT_COOKIES_PATH viven acá, no en `update`. Si agregás otra env, agregala
+# acá también para que sobreviva los redeploys.
 
 # ─── 3. Print the service URL so the next step can grab it ────────────
 SERVICE_URL=$(gcloud run services describe "$SERVICE_NAME" \

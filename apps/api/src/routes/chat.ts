@@ -2,13 +2,15 @@ import { Router } from 'express';
 import type { CerebroRequest, CerebroStreamChunk } from '@shift-cl2/shared-types';
 import { openRouterStream } from '../services/openRouterClient.js';
 import { getAgent } from '../services/agentLoader.js';
-import { getUserIdFromRequest } from '../services/auth.js';
+import { getUserFromRequest, getUserIdFromRequest } from '../services/auth.js';
 import { requireQuota, logAiCall } from '../services/aiQuota.js';
 import { ResilienceError } from '../services/resilience.js';
 import { estimateConfidence } from '../services/confidence.js';
 import {
   loadSessionContext,
+  loadSessionContextByUuid,
   buildSessionSystemPrompt,
+  buildSessionSystemPromptByUuid,
 } from '../services/sessionContextLoader.js';
 import {
   ensureConversation,
@@ -72,7 +74,13 @@ chatRouter.post('/stream', async (req, res) => {
   // Auth + quota MUST happen before SSE headers flush — once we
   // commit Content-Type: text/event-stream the response is locked
   // into 200 and we can't return a real 401/429.
-  const userId = await getUserIdFromRequest(req);
+  // Single auth call — return both id and email so we can pass the email
+  // to openRouterStream for Cerebro neuron lookup. Falls back to id-only
+  // checks if Supabase returns a user without email (shouldn't happen
+  // in our auth flow, but defensive).
+  const authedUser = await getUserFromRequest(req);
+  const userId = authedUser?.id ?? null;
+  const userEmail = authedUser?.email ?? null;
   if (!userId) {
     res.status(401).json({ ok: false, error: 'auth_required', message: 'Iniciá sesión para chatear con Lexa.' });
     return;
@@ -110,6 +118,16 @@ chatRouter.post('/stream', async (req, res) => {
       ? body.scope.legacy_session_id
       : null;
 
+  // Sesión nueva (Supabase, UUID). Si viene este campo, el contexto se carga
+  // de la fuente nueva en vez del MariaDB legacy. Solo aceptamos UUIDs bien
+  // formados — protege contra inyección de strings raros desde el cliente.
+  const scopeSessionUuidRaw = (body.scope as { session_uuid?: unknown } | undefined)?.session_uuid;
+  const scopeSessionUuid =
+    typeof scopeSessionUuidRaw === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(scopeSessionUuidRaw)
+      ? scopeSessionUuidRaw.toLowerCase()
+      : null;
+
   // Workspace scope: when the user is chatting from /hojas/:id, the client
   // should pass scope.workspace_id. This unlocks Atlas's generate_presentation
   // tool — without it, the model can't know which canvas to convert.
@@ -132,6 +150,20 @@ chatRouter.post('/stream', async (req, res) => {
       req.log.error('scope_load_failed', {
         error: (err as Error).message,
         id: scopeLegacySessionId,
+      });
+    }
+  } else if (scopeSessionUuid !== null) {
+    try {
+      const ctx = await loadSessionContextByUuid(scopeSessionUuid);
+      if (ctx) {
+        scopeSystemPrompt = buildSessionSystemPromptByUuid(scopeSessionUuid, ctx);
+      } else {
+        req.log.warn('scope_session_uuid_not_found', { uuid: scopeSessionUuid });
+      }
+    } catch (err) {
+      req.log.error('scope_uuid_load_failed', {
+        error: (err as Error).message,
+        uuid: scopeSessionUuid,
       });
     }
   }
@@ -203,6 +235,10 @@ chatRouter.post('/stream', async (req, res) => {
       scope_legacy_session_id: scopeLegacySessionId,
       scope_workspace_id: scopeWorkspaceId,
       user_id: userId ?? null,
+      // Cerebro neuron lookup key. Email is the canonical user_id across
+      // realms ("cl2" realm here) — openRouterStream uses it to fetch
+      // /memories before the LLM call and inject as a system block.
+      user_email: userEmail,
       // Forward conversation history sent by the client (keeps the model
       // aware of prior turns). The frontend trims to its own window; the
       // server caps at MAX_HISTORY_MESSAGES as a safety net.

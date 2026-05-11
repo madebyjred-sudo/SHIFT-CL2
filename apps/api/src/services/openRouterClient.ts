@@ -12,6 +12,7 @@ import {
   renderReglamentoForLlm,
 } from './silClient.js';
 import { queryLightrag, type LightragMode } from './lightragClient.js';
+import { buildNeuronSystemBlock } from './cerebroNeuron.js';
 import { withTimeout, withRetry, ResilienceError } from './resilience.js';
 
 // Pass-1 (non-stream) is short and idempotent → retry safely.
@@ -52,6 +53,12 @@ interface StreamArgs {
   // (currently: generate_presentation, which UPDATEs workspaces.last_pptx).
   // Caller (chat router) should set this from the verified Supabase JWT.
   user_id?: string | null;
+  // Canonical email for Cerebro neuron lookups. When present, we fetch the
+  // user's /memories before the LLM call and inject as a system block —
+  // gives Lexa/Atlas/Centinela memory across conversations without going
+  // through Cerebro's /v1/llm/invoke (the bypass-closure path; deferred).
+  // null/undefined → skip injection silently.
+  user_email?: string | null;
   // Prior turns of this conversation, in OAI {role,content} shape. Without
   // this, every turn is a "first turn" to the LLM (it can't see what it
   // said last time, so references like "el #1" or "expandí esa idea" miss).
@@ -636,8 +643,18 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // See docs/AGENTS.md §Deep Insight for the design rationale.
   const systemPrompt = buildAgentSystemPrompt(agent, args.deep_insight);
 
+  // Cerebro neuron — best-effort read of the user's /memories. Skipped
+  // when there's no email (anon / public demo), when SHIFT_INTERNAL_TOKEN
+  // isn't set, or when Cerebro is unreachable. Never throws — the chat
+  // turn must run even if the memory layer is degraded. See
+  // AGENTS/CEREBRO/handoffs/2026-05-10-neurons-wiring-clients.md.
+  const neuronBlock = await buildNeuronSystemBlock(args.user_email ?? null);
+
   const messages: OAMessage[] = [
     { role: 'system', content: systemPrompt },
+    ...(neuronBlock
+      ? [{ role: 'system' as const, content: neuronBlock }]
+      : []),
     ...(args.dynamic_rag_prompt
       ? [{ role: 'system' as const, content: args.dynamic_rag_prompt }]
       : []),
