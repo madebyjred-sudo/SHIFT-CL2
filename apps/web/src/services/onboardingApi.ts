@@ -53,12 +53,18 @@ export async function completeOnboarding(): Promise<void> {
 
 export interface MagicHelpResult {
   suggestion?: string;
-  suggestions?: string[];
+  /** Para queries simples (lexa:temas) viene como string[]. Para queries
+   *  ricas (centinela:enfoque, centinela:cliente-watchlist) viene como
+   *  array de objetos {label, entity_type, entity_id, rationale}. */
+  suggestions?: Array<string | { label: string; entity_type: string; entity_id: string; rationale: string }>;
 }
 
 export async function magicHelp(input: {
   agent: 'lexa' | 'atlas' | 'centinela';
-  field: 'cargo' | 'enfoque' | 'temas';
+  /** 2026-05-11: agregamos 'cliente-watchlist' para sugerencias de
+   *  watchlist scopeadas a un cliente del consultor (centinela_watchlist
+   *  con client_id). Mantiene retro-compat con los antiguos. */
+  field: 'cargo' | 'enfoque' | 'temas' | 'cliente-watchlist';
   context: Record<string, unknown>;
 }): Promise<MagicHelpResult> {
   const r = await call<{ ok: true } & MagicHelpResult>('/magic-help', {

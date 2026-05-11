@@ -51,6 +51,7 @@ import { transcriptsAdminRouter, internalTriggersRouter } from './routes/transcr
 import { centinelaAdminRouter, centinelaInternalRouter, centinelaUserRouter } from './routes/centinela.js';
 import { onboardingRouter } from './routes/onboarding.js';
 import { neuronRouter } from './routes/neuron.js';
+import { clientesRouter } from './routes/clientes.js';
 import { requestContext } from './middleware/requestContext.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { logger } from './services/logger.js';
@@ -148,6 +149,15 @@ app.use(
   '/api/neuron',
   rateLimit({ bucket: 'neuron', max: 120, windowMs: 60_000 }),
   neuronRouter,
+);
+app.use(
+  // /api/clientes — clientes que cada consultor asesora. Cada cliente
+  // se sincroniza también como /memories/clientes/<slug>.md en la
+  // neurona. CRUD sencillo, cap razonable porque el usuario carga
+  // la lista cada vez que abre el sidebar de Centinela o Mi memoria.
+  '/api/clientes',
+  rateLimit({ bucket: 'clientes', max: 120, windowMs: 60_000 }),
+  clientesRouter,
 );
 app.use(
   // Chat history — sidebar hydration + multi-device read across the

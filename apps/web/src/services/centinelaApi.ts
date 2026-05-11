@@ -130,6 +130,8 @@ export async function addToWatchlist(input: {
   entity_id: string;
   label?: string;
   notes?: string;
+  /** Si presente, scopa la suscripción a un cliente del consultor. */
+  client_id?: string | null;
 }): Promise<WatchlistItem> {
   const r = await apiFetch<{ ok: true; item: WatchlistItem }>('/watchlist', {
     method: 'POST',

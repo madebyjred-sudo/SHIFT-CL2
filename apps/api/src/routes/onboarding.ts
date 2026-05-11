@@ -276,6 +276,24 @@ TEMA: "${ctx.draft ?? ''}"
 Proponele 4-6 sub-temas relacionados que probablemente también le importen. Una palabra o frase corta por sub-tema, sin viñetas, sin numeración.
 
 DEVOLVÉ JSON: {"suggestions": ["sub-tema 1", "sub-tema 2", ...]}`,
+
+  // Centinela on "cliente-watchlist" — sugerir watchlist para un cliente
+  // específico del consultor (no del consultor en general). Usado en el
+  // wizard Step 3 (post-cliente-add) y en /centinela cuando el user
+  // selecciona un cliente y pide "qué le sugerirías vigilar".
+  'centinela:cliente-watchlist': (ctx) =>
+    `Sos Centinela, watchdog legislativo costarricense. Un consultor de CL2 acaba de registrar un cliente que tiene que vigilar. Datos del cliente:
+
+LABEL: ${ctx.label ?? '(no especificado)'}
+SECTOR: ${ctx.sector ?? '(no especificado)'}
+BRIEF DEL CLIENTE: ${ctx.description ?? '(no especificado)'}
+
+Proponé 3-5 áreas o tipos de expediente que ESTE CLIENTE específicamente querría vigilar en la Asamblea Legislativa de Costa Rica. Considerá su sector y los intereses declarados. Para cada uno: nombre corto (label) + razón breve (rationale) explicando por qué le importa a este cliente.
+
+DEVOLVÉ JSON con esta forma exacta:
+{"suggestions": [{"label": "...", "entity_type": "tema", "entity_id": "...", "rationale": "..."}, ...]}
+
+entity_type es siempre "tema" (no proponemos números de expediente — los buscaremos después). entity_id puede ser igual al label en kebab-case.`,
 };
 
 onboardingRouter.post('/magic-help', async (req, res) => {

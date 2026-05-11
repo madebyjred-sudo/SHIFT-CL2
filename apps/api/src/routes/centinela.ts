@@ -515,8 +515,9 @@ centinelaUserRouter.get('/watchlist', async (req, res) => {
 centinelaUserRouter.post('/watchlist', async (req, res) => {
   const userId = await requireUser(req, res);
   if (!userId) return;
-  const { entity_type, entity_id, label, notes } = (req.body ?? {}) as {
+  const { entity_type, entity_id, label, notes, client_id } = (req.body ?? {}) as {
     entity_type?: string; entity_id?: string; label?: string; notes?: string;
+    client_id?: string | null;
   };
   if (!entity_type || !entity_id) {
     res.status(400).json({ ok: false, error: 'entity_type_and_entity_id_required' });
@@ -531,23 +532,31 @@ centinelaUserRouter.post('/watchlist', async (req, res) => {
   if (label) metadata.label = label;
   if (notes) metadata.notes = notes;
 
+  // client_id (opcional, 2026-05-11) — scopa la entrada a un cliente
+  // del consultor. La misma entidad puede aparecer scopeada a varios
+  // clientes con intereses distintos. Si viene `null` o no viene, queda
+  // como watchlist "general" del consultor (compat con el modelo viejo).
+  const insertRow: Record<string, unknown> = {
+    user_id: userId,
+    entity_type,
+    entity_id,
+    source: 'manual',
+    metadata,
+  };
+  if (client_id) insertRow.client_id = client_id;
+
   try {
     const { data, error } = await supa()
       .from('centinela_watchlist')
-      .upsert(
-        {
-          user_id: userId,
-          entity_type,
-          entity_id,
-          source: 'manual',
-          metadata,
-        },
-        {
-          onConflict: 'user_id,entity_type,entity_id,source',
-          ignoreDuplicates: false,
-        },
-      )
-      .select('id, entity_type, entity_id, source, metadata, created_at')
+      .upsert(insertRow, {
+        // Con migration 0027, el unique cambió a (user_id, entity_type,
+        // entity_id, source, client_id). Reflejamos eso acá para que el
+        // upsert no choque cuando agregás la misma entidad para dos
+        // clientes distintos.
+        onConflict: 'user_id,entity_type,entity_id,source,client_id',
+        ignoreDuplicates: false,
+      })
+      .select('id, entity_type, entity_id, source, metadata, client_id, created_at')
       .single();
     if (error) throw new Error(error.message);
     const meta = (data.metadata ?? {}) as { label?: string; notes?: string };

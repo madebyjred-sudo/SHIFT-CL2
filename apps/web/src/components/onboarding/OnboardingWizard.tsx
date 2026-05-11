@@ -1,61 +1,70 @@
 /**
- * OnboardingWizard — multi-step modal for first-time users.
+ * OnboardingWizard — first-time setup para consultores CL2.
  *
- * Auto-shows when `profile.onboarded_at` is NULL on initial app load.
+ * Reescrito 2026-05-11 después del smoke con shiftagentics. Modelo
+ * mental nuevo: el usuario es un CONSULTOR (no diputado), tiene
+ * múltiples CLIENTES, cada cliente con sus propios intereses.
+ *
  * Steps:
- *   1. WELCOME       — meet the 3 agents, value props
- *   2. PROFILE       — cargo + enfoque (with magic-help per field)
- *   3. WATCHLIST     — Centinela proposes themes; user adds + searches
- *   4. NOTIFICATIONS — alert prefs + digest opt-in
- *   5. READY         — quick try cards (one per agent)
+ *   1. VOS — rol + cómo querés que los agentes te hablen
+ *   2. CLIENTES — agregar 1-N clientes (label + sector + brief).
+ *                 Botón opcional "🪄 Brief profundo con tu IA" abre
+ *                 modal con prompt copiable + textarea para pegar.
+ *   3. VIGILANCIA — Centinela sugiere watchlists por cliente;
+ *                   user checkbox lo que vigilar; click empezar.
  *
- * Magic help is the differentiator: each text field has a ✨ button that
- * pops a small dropdown asking the relevant agent for help. The result
- * is offered as a suggestion the user can accept or dismiss.
+ * Resultado:
+ *   - user_profile: cargo + (preferencias futuras)
+ *   - cl2_clients: una row por cliente (sync auto a /memories/clientes/)
+ *   - centinela_watchlist: entries con client_id si el user las eligió
+ *   - onboarded_at: marca el momento de cierre
  *
- * Skip is allowed at every step — gating onboarding is friction. The
- * profile gets saved progressively so even partial completion gives
- * Centinela something to work with.
+ * Skip permitido en cada step — gating onboarding es fricción. La
+ * memoria se va llenando con lo que el usuario alcance a llenar.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  X, ArrowRight, ArrowLeft, Sparkles, BookOpen, Hammer, Eye,
-  Loader2, Plus, Check, MessageSquare,
+  X, ArrowRight, ArrowLeft, Sparkles, Loader2, Plus, Check,
+  Users, BookHeart, Eye, Trash2, Copy, ClipboardPaste, ChevronDown,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   getProfile, updateProfile, completeOnboarding,
-  magicHelp, suggestWatchlist,
-  type UserProfile, type WatchlistSuggestion,
+  magicHelp,
+  type UserProfile,
 } from '@/services/onboardingApi';
-import { addToWatchlist, updatePrefs, type AlertType } from '@/services/centinelaApi';
+import {
+  listClientes, createCliente, updateCliente, deleteCliente,
+  type Cliente,
+} from '@/services/clientesApi';
+import { addToWatchlist } from '@/services/centinelaApi';
 
-type Step = 'welcome' | 'profile' | 'watchlist' | 'notifications' | 'ready';
-const STEP_ORDER: Step[] = ['welcome', 'profile', 'watchlist', 'notifications', 'ready'];
+type Step = 'vos' | 'clientes' | 'vigilancia';
+const STEP_ORDER: Step[] = ['vos', 'clientes', 'vigilancia'];
 
 export function OnboardingWizard({ onClose }: { onClose: () => void }) {
-  const [step, setStep] = useState<Step>('welcome');
+  const [step, setStep] = useState<Step>('vos');
   const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [clientes, setClientes] = useState<Cliente[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    getProfile()
-      .then((p) => {
-        setProfile(p);
-        // Resume at the last step the user reached, falling back to welcome
-        if (p.onboarding_step && STEP_ORDER.includes(p.onboarding_step as Step)) {
-          setStep(p.onboarding_step as Step);
-        }
-      })
-      .catch(() => {
-        // Defaults — onboarding still proceeds, just with empty draft
-        setProfile({
-          user_id: '', cargo: null, enfoque: null, temas: [], partido: null,
-          onboarded_at: null, onboarding_step: 'welcome',
-        });
-      })
-      .finally(() => setLoading(false));
+    Promise.all([
+      getProfile().catch(() => null),
+      listClientes().catch(() => []),
+    ]).then(([p, cs]) => {
+      setProfile(p ?? {
+        user_id: '', cargo: null, enfoque: null, temas: [], partido: null,
+        onboarded_at: null, onboarding_step: 'vos',
+      });
+      setClientes(cs);
+      // Resume at last saved step
+      const savedStep = p?.onboarding_step;
+      if (savedStep && (STEP_ORDER as string[]).includes(savedStep)) {
+        setStep(savedStep as Step);
+      }
+    }).finally(() => setLoading(false));
   }, []);
 
   const goNext = useCallback(async () => {
@@ -86,6 +95,11 @@ export function OnboardingWizard({ onClose }: { onClose: () => void }) {
   const stepIdx = STEP_ORDER.indexOf(step);
   const totalSteps = STEP_ORDER.length;
 
+  // Step 3 sólo tiene sentido si hay clientes — sino, "Empezar" cierra
+  // directo en step 2. Esto es un edge case del flow "skip clientes"
+  const finalStep = clientes.length > 0 ? 'vigilancia' : 'clientes';
+  const isLastStep = step === finalStep;
+
   return (
     <div
       role="dialog"
@@ -93,8 +107,8 @@ export function OnboardingWizard({ onClose }: { onClose: () => void }) {
       className="fixed inset-0 z-[200] flex items-center justify-center"
     >
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
-      <div className="relative w-full max-w-2xl mx-4 max-h-[90vh] flex flex-col bg-white dark:bg-[#161616] rounded-2xl shadow-2xl border border-black/5 dark:border-white/10 overflow-hidden">
-        {/* Progress + close */}
+      <div className="relative w-full max-w-2xl mx-4 max-h-[92vh] flex flex-col bg-white dark:bg-[#161616] rounded-2xl shadow-2xl border border-black/5 dark:border-white/10 overflow-hidden">
+        {/* Progress */}
         <div className="flex items-center gap-3 px-6 pt-5 pb-4 border-b border-black/5 dark:border-white/10">
           <div className="flex-1 flex gap-1">
             {STEP_ORDER.map((s, i) => (
@@ -121,15 +135,21 @@ export function OnboardingWizard({ onClose }: { onClose: () => void }) {
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto px-6 py-6">
-          {step === 'welcome' && <WelcomeStep />}
-          {step === 'profile' && profile && (
-            <ProfileStep profile={profile} onChange={setProfile} />
+          {step === 'vos' && profile && (
+            <VosStep profile={profile} onChange={setProfile} />
           )}
-          {step === 'watchlist' && profile && (
-            <WatchlistStep profile={profile} />
+          {step === 'clientes' && (
+            <ClientesStep
+              clientes={clientes}
+              onListChange={setClientes}
+            />
           )}
-          {step === 'notifications' && <NotificationsStep />}
-          {step === 'ready' && <ReadyStep />}
+          {step === 'vigilancia' && (
+            <VigilanciaStep
+              clientes={clientes}
+              profile={profile}
+            />
+          )}
         </div>
 
         {/* Footer */}
@@ -149,10 +169,10 @@ export function OnboardingWizard({ onClose }: { onClose: () => void }) {
             Saltar todo
           </button>
           <button
-            onClick={goNext}
+            onClick={isLastStep ? skip : goNext}
             className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-cl2-burgundy text-white text-[13px] font-medium hover:bg-cl2-burgundy/90 transition-colors"
           >
-            {step === 'ready' ? 'Empezar a usar CL2' : 'Continuar'}
+            {isLastStep ? 'Empezar a usar CL2' : 'Continuar'}
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
         </div>
@@ -161,78 +181,15 @@ export function OnboardingWizard({ onClose }: { onClose: () => void }) {
   );
 }
 
-// ─── Step 1: Welcome ──────────────────────────────────────────────────────
-function WelcomeStep() {
-  return (
-    <div className="space-y-5">
-      <div>
-        <p className="text-[11px] font-semibold uppercase tracking-widest text-cl2-burgundy/80 mb-1.5">
-          Bienvenida a CL2
-        </p>
-        <h2 className="font-display text-[28px] leading-tight font-semibold text-[#0e1745] dark:text-white">
-          Tres agentes, una sola asamblea
-        </h2>
-        <p className="mt-2 text-[13px] text-[#0e1745]/60 dark:text-white/55 leading-relaxed">
-          Cerebro Legislativo 2.0 es tu asistente para la Asamblea de Costa Rica. Cada agente tiene un trabajo específico — y todos hablan el mismo idioma: el del SIL, del Reglamento y de las sesiones plenarias.
-        </p>
-      </div>
-
-      <div className="space-y-2.5">
-        {[
-          {
-            icon: <MessageSquare className="w-4 h-4" />,
-            name: 'Lexa',
-            tagline: 'Pregunta · Cita',
-            blurb: 'Te responde cualquier pregunta legislativa con citas inline a los expedientes, transcripciones o el Reglamento.',
-          },
-          {
-            icon: <Hammer className="w-4 h-4" />,
-            name: 'Atlas',
-            tagline: 'Construye',
-            blurb: 'En el workspace, arma briefs, matrices comparativas y presentaciones (.pptx) sobre los temas que le pidas.',
-          },
-          {
-            icon: <Eye className="w-4 h-4" />,
-            name: 'Centinela',
-            tagline: 'Vigila',
-            blurb: 'Sigue 24/7 los expedientes, diputados o temas de tu watchlist y te avisa cuando algo cambia (estado, plazos, menciones, agenda).',
-          },
-        ].map((a) => (
-          <div
-            key={a.name}
-            className="flex items-start gap-3 p-3.5 rounded-xl bg-black/3 dark:bg-white/5 border border-black/5 dark:border-white/8"
-          >
-            <div className="w-9 h-9 rounded-lg bg-cl2-burgundy/10 text-cl2-burgundy flex items-center justify-center flex-shrink-0">
-              {a.icon}
-            </div>
-            <div className="min-w-0">
-              <div className="flex items-baseline gap-2 flex-wrap">
-                <span className="font-display text-[15px] font-semibold text-[#0e1745] dark:text-white">{a.name}</span>
-                <span className="text-[10.5px] uppercase tracking-wider text-cl2-burgundy/80">{a.tagline}</span>
-              </div>
-              <p className="mt-0.5 text-[12px] text-[#0e1745]/60 dark:text-white/55 leading-relaxed">{a.blurb}</p>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <p className="text-[11.5px] text-[#0e1745]/45 dark:text-white/40 italic leading-relaxed">
-        En los próximos pasos vamos a personalizar Centinela para que sólo te avise sobre lo que importa. Toma 2-3 minutos.
-      </p>
-    </div>
-  );
-}
-
-// ─── Step 2: Profile (with magic-help) ─────────────────────────────────────
-function ProfileStep({
+// ════════════════════════════════════════════════════════════════════════
+// STEP 1 — VOS
+// ════════════════════════════════════════════════════════════════════════
+function VosStep({
   profile, onChange,
 }: { profile: UserProfile; onChange: (p: UserProfile) => void }) {
   const [cargo, setCargo] = useState(profile.cargo ?? '');
   const [enfoque, setEnfoque] = useState(profile.enfoque ?? '');
-  const [helping, setHelping] = useState<'cargo-atlas' | 'enfoque-centinela' | null>(null);
-  const [suggestions, setSuggestions] = useState<{ field: string; items: string[] } | null>(null);
 
-  // Persist on blur (per-field) so partial answers don't get lost.
   const persist = useCallback(async (patch: Partial<UserProfile>) => {
     try {
       const updated = await updateProfile(patch);
@@ -240,188 +197,106 @@ function ProfileStep({
     } catch { /* non-fatal */ }
   }, [onChange]);
 
-  const askAtlasForCargo = async () => {
-    if (!cargo.trim()) return;
-    setHelping('cargo-atlas');
-    try {
-      const r = await magicHelp({ agent: 'atlas', field: 'cargo', context: { draft: cargo } });
-      if (r.suggestion) {
-        setSuggestions({ field: 'cargo', items: [r.suggestion] });
-      }
-    } catch { /* swallow */ }
-    finally { setHelping(null); }
-  };
-
-  const askCentinelaForEnfoque = async () => {
-    setHelping('enfoque-centinela');
-    try {
-      const r = await magicHelp({ agent: 'centinela', field: 'enfoque', context: { cargo } });
-      if (r.suggestions?.length) {
-        setSuggestions({ field: 'enfoque', items: r.suggestions });
-      }
-    } catch { /* swallow */ }
-    finally { setHelping(null); }
-  };
-
   return (
     <div className="space-y-5">
       <div>
         <p className="text-[11px] font-semibold uppercase tracking-widest text-cl2-burgundy/80 mb-1.5">
-          Sobre vos
+          Paso 1 · Vos
         </p>
         <h2 className="font-display text-[26px] leading-tight font-semibold text-[#0e1745] dark:text-white">
-          ¿Cuál es tu rol?
+          ¿Quién sos en CL2?
         </h2>
         <p className="mt-1.5 text-[13px] text-[#0e1745]/55 dark:text-white/50 leading-relaxed">
-          Estos campos calibran a Centinela y al resto. Cuanto más concreto, mejor te sigue.
+          Tu rol en la firma y tu tipo de práctica. Esto calibra a Lexa, Atlas y Centinela — pero NO es lo más importante. Tus <em>clientes</em> son lo que más vamos a usar para personalizar.
         </p>
       </div>
 
-      {/* Cargo */}
       <div>
-        <div className="flex items-center justify-between mb-1.5">
-          <label className="text-[12px] font-medium text-[#0e1745] dark:text-white/85">Cargo y comisiones</label>
-          <button
-            onClick={askAtlasForCargo}
-            disabled={!cargo.trim() || helping !== null}
-            className={cn(
-              'flex items-center gap-1.5 px-2 py-1 rounded text-[10.5px] font-medium transition-colors',
-              cargo.trim() && helping === null
-                ? 'text-cl2-burgundy hover:bg-cl2-burgundy/10'
-                : 'text-[#0e1745]/30 dark:text-white/25 cursor-not-allowed',
-            )}
-            title="Atlas pulirá tu descripción"
-          >
-            {helping === 'cargo-atlas'
-              ? <Loader2 className="w-3 h-3 animate-spin" />
-              : <Sparkles className="w-3 h-3" />}
-            Atlas mejora esto
-          </button>
-        </div>
-        <textarea
+        <label className="block text-[12px] font-medium text-[#0e1745] dark:text-white/85 mb-1.5">
+          Rol y firma
+        </label>
+        <input
+          type="text"
           value={cargo}
           onChange={(e) => setCargo(e.target.value)}
           onBlur={() => persist({ cargo })}
-          placeholder="Diputada por Cartago, asistente legislativa, miembro Comisión Hacendarios…"
-          rows={2}
-          className="w-full px-3 py-2 rounded-lg bg-black/3 dark:bg-white/5 border border-black/8 dark:border-white/10 text-[13px] text-[#0e1745] dark:text-white placeholder:text-[#0e1745]/35 dark:placeholder:text-white/30 resize-none focus:outline-none focus:border-cl2-burgundy/40"
+          placeholder="Consultora senior en CL2 Consultoría · Asesora regulatoria · Socia fundadora…"
+          className="w-full px-3 py-2 rounded-lg bg-black/3 dark:bg-white/5 border border-black/8 dark:border-white/10 text-[13px] text-[#0e1745] dark:text-white placeholder:text-[#0e1745]/35 dark:placeholder:text-white/30 focus:outline-none focus:border-cl2-burgundy/40"
         />
-        {suggestions?.field === 'cargo' && (
-          <SuggestionPill
-            text={suggestions.items[0]}
-            onAccept={() => { setCargo(suggestions.items[0]); persist({ cargo: suggestions.items[0] }); setSuggestions(null); }}
-            onDismiss={() => setSuggestions(null)}
-          />
-        )}
+        <p className="mt-1 text-[10.5px] text-[#0e1745]/40 dark:text-white/35">
+          Una línea. Los agentes la leen al inicio de cada conversación.
+        </p>
       </div>
 
-      {/* Enfoque */}
       <div>
-        <div className="flex items-center justify-between mb-1.5">
-          <label className="text-[12px] font-medium text-[#0e1745] dark:text-white/85">Enfoque y temas que seguís</label>
-          <button
-            onClick={askCentinelaForEnfoque}
-            disabled={helping !== null}
-            className={cn(
-              'flex items-center gap-1.5 px-2 py-1 rounded text-[10.5px] font-medium transition-colors',
-              helping === null
-                ? 'text-cl2-burgundy hover:bg-cl2-burgundy/10'
-                : 'text-[#0e1745]/30 dark:text-white/25 cursor-not-allowed',
-            )}
-            title="Centinela sugiere áreas según tu cargo"
-          >
-            {helping === 'enfoque-centinela'
-              ? <Loader2 className="w-3 h-3 animate-spin" />
-              : <Sparkles className="w-3 h-3" />}
-            Centinela me sugiere
-          </button>
-        </div>
-        <textarea
+        <label className="block text-[12px] font-medium text-[#0e1745] dark:text-white/85 mb-1.5">
+          Tipo de práctica <span className="text-[#0e1745]/40 dark:text-white/40 font-normal">(opcional)</span>
+        </label>
+        <input
+          type="text"
           value={enfoque}
           onChange={(e) => setEnfoque(e.target.value)}
           onBlur={() => persist({ enfoque })}
-          placeholder="Reforma fiscal, transparencia presupuestaria, pequeña empresa, derechos digitales…"
-          rows={3}
-          className="w-full px-3 py-2 rounded-lg bg-black/3 dark:bg-white/5 border border-black/8 dark:border-white/10 text-[13px] text-[#0e1745] dark:text-white placeholder:text-[#0e1745]/35 dark:placeholder:text-white/30 resize-none focus:outline-none focus:border-cl2-burgundy/40"
+          placeholder="Regulatorio · Fiscal · Financiero · Sectores regulados · Litigio constitucional…"
+          className="w-full px-3 py-2 rounded-lg bg-black/3 dark:bg-white/5 border border-black/8 dark:border-white/10 text-[13px] text-[#0e1745] dark:text-white placeholder:text-[#0e1745]/35 dark:placeholder:text-white/30 focus:outline-none focus:border-cl2-burgundy/40"
         />
-        {suggestions?.field === 'enfoque' && suggestions.items.length > 0 && (
-          <div className="mt-2 space-y-1.5">
-            <div className="text-[10.5px] uppercase tracking-wider text-cl2-burgundy/70">Centinela propone</div>
-            <div className="flex flex-wrap gap-1.5">
-              {suggestions.items.map((s, i) => (
-                <button
-                  key={i}
-                  onClick={() => {
-                    const next = enfoque.trim() ? `${enfoque}, ${s}` : s;
-                    setEnfoque(next); persist({ enfoque: next });
-                  }}
-                  className="px-2.5 py-1 rounded-full bg-cl2-burgundy/10 hover:bg-cl2-burgundy/20 text-cl2-burgundy text-[11px] font-medium flex items-center gap-1 transition-colors"
-                >
-                  <Plus className="w-2.5 h-2.5" />
-                  {s}
-                </button>
-              ))}
-              <button
-                onClick={() => setSuggestions(null)}
-                className="text-[11px] text-[#0e1745]/40 dark:text-white/40 hover:text-[#0e1745]/70 px-2 py-1"
-              >
-                Descartar
-              </button>
-            </div>
-          </div>
-        )}
+      </div>
+
+      <div className="p-3 rounded-lg bg-cl2-burgundy/5 border border-cl2-burgundy/15 flex items-start gap-2">
+        <Users className="w-3.5 h-3.5 text-cl2-burgundy mt-0.5 flex-shrink-0" />
+        <p className="text-[11.5px] text-[#0e1745]/70 dark:text-white/65 leading-relaxed">
+          En el próximo paso vas a agregar tus <strong>clientes</strong>. Cada cliente tiene su propia carpeta de memoria, su brief, y va a poder tener su propia watchlist de Centinela. Podés agregar dos clientes con intereses opuestos — los agentes los manejan separados.
+        </p>
       </div>
     </div>
   );
 }
 
-function SuggestionPill({
-  text, onAccept, onDismiss,
-}: { text: string; onAccept: () => void; onDismiss: () => void }) {
-  return (
-    <div className="mt-2 p-2.5 rounded-lg bg-cl2-burgundy/8 border border-cl2-burgundy/15 flex items-start gap-2">
-      <Sparkles className="w-3.5 h-3.5 text-cl2-burgundy flex-shrink-0 mt-0.5" />
-      <div className="flex-1 min-w-0">
-        <p className="text-[12px] text-[#0e1745] dark:text-white leading-relaxed">{text}</p>
-        <div className="mt-1.5 flex gap-2">
-          <button onClick={onAccept} className="text-[10.5px] font-medium text-cl2-burgundy hover:text-cl2-burgundy/80 flex items-center gap-0.5">
-            <Check className="w-3 h-3" /> Usar esto
-          </button>
-          <button onClick={onDismiss} className="text-[10.5px] text-[#0e1745]/45 dark:text-white/40 hover:text-[#0e1745]/70">Descartar</button>
-        </div>
-      </div>
-    </div>
-  );
-}
+// ════════════════════════════════════════════════════════════════════════
+// STEP 2 — CLIENTES (multi-add con paste-from-LLM opcional)
+// ════════════════════════════════════════════════════════════════════════
+function ClientesStep({
+  clientes, onListChange,
+}: {
+  clientes: Cliente[];
+  onListChange: (cs: Cliente[]) => void;
+}) {
+  const [creating, setCreating] = useState(false);
+  const [draft, setDraft] = useState<{
+    label: string; sector: string; description: string;
+  }>({ label: '', sector: '', description: '' });
+  const [busy, setBusy] = useState(false);
+  const [pasteOpen, setPasteOpen] = useState(false);
 
-// ─── Step 3: Watchlist ─────────────────────────────────────────────────────
-function WatchlistStep({ profile }: { profile: UserProfile }) {
-  const [suggestions, setSuggestions] = useState<WatchlistSuggestion[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [added, setAdded] = useState<Set<string>>(new Set());
+  const startCreating = () => {
+    setDraft({ label: '', sector: '', description: '' });
+    setCreating(true);
+  };
+  const cancelCreating = () => {
+    setCreating(false);
+    setDraft({ label: '', sector: '', description: '' });
+  };
 
-  const fetchSuggestions = useCallback(async () => {
-    setLoading(true);
+  const submitDraft = async () => {
+    if (!draft.label.trim()) return;
+    setBusy(true);
     try {
-      const s = await suggestWatchlist({
-        cargo: profile.cargo ?? undefined,
-        enfoque: profile.enfoque ?? undefined,
-        temas: profile.temas ?? [],
+      const created = await createCliente({
+        label: draft.label.trim(),
+        sector: draft.sector.trim() || undefined,
+        description: draft.description.trim() || undefined,
       });
-      setSuggestions(s);
-    } catch {
-      setSuggestions([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [profile]);
+      onListChange([created, ...clientes]);
+      cancelCreating();
+    } catch { /* swallow */ }
+    finally { setBusy(false); }
+  };
 
-  useEffect(() => { void fetchSuggestions(); }, [fetchSuggestions]);
-
-  const handleAdd = async (s: WatchlistSuggestion) => {
+  const removeOne = async (id: string) => {
+    if (!window.confirm('¿Borrar este cliente? También se borra su carpeta de memoria.')) return;
     try {
-      await addToWatchlist({ entity_type: s.entity_type, entity_id: s.entity_id, label: s.label });
-      setAdded((cur) => new Set([...cur, s.entity_id]));
+      await deleteCliente(id);
+      onListChange(clientes.filter((c) => c.id !== id));
     } catch { /* swallow */ }
   };
 
@@ -429,225 +304,505 @@ function WatchlistStep({ profile }: { profile: UserProfile }) {
     <div className="space-y-5">
       <div>
         <p className="text-[11px] font-semibold uppercase tracking-widest text-cl2-burgundy/80 mb-1.5">
-          Watchlist · Centinela
+          Paso 2 · Tus clientes
         </p>
         <h2 className="font-display text-[26px] leading-tight font-semibold text-[#0e1745] dark:text-white">
-          Decidile a Centinela qué vigilar
+          ¿A quién asesorás?
         </h2>
         <p className="mt-1.5 text-[13px] text-[#0e1745]/55 dark:text-white/50 leading-relaxed">
-          Basándose en tu perfil, Centinela propone temas que probablemente te importen. Agregá los que resuenen — después podés sumar expedientes y diputados específicos desde <code className="text-[11px] px-1 py-0.5 rounded bg-black/5 dark:bg-white/10">/centinela</code>.
+          Agregá los clientes que vas a usar en CL2. Por cada uno podés escribir un brief corto a mano O pedirle a tu IA habitual (ChatGPT, Claude, Gemini…) que lo redacte por vos — esa opción está adentro.
         </p>
       </div>
 
-      {loading ? (
-        <div className="flex items-center gap-2 text-[12px] text-[#0e1745]/45 dark:text-white/40 py-6 justify-center">
-          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-          Centinela está leyendo tu perfil…
-        </div>
-      ) : suggestions && suggestions.length > 0 ? (
+      {/* Lista de clientes existentes */}
+      {clientes.length > 0 && (
         <div className="space-y-2">
-          {suggestions.map((s, i) => {
-            const isAdded = added.has(s.entity_id);
-            return (
-              <div
-                key={i}
-                className={cn(
-                  'p-3.5 rounded-xl border transition-all',
-                  isAdded
-                    ? 'bg-cl2-burgundy/5 border-cl2-burgundy/20'
-                    : 'bg-white dark:bg-white/[0.04] border-black/8 dark:border-white/10',
-                )}
-              >
-                <div className="flex items-start gap-3">
-                  <div className="flex-1 min-w-0">
-                    <div className="text-[13px] font-medium text-[#0e1745] dark:text-white">{s.label}</div>
-                    <div className="text-[11px] text-[#0e1745]/55 dark:text-white/50 mt-0.5 leading-relaxed">{s.rationale}</div>
-                  </div>
-                  <button
-                    onClick={() => !isAdded && handleAdd(s)}
-                    disabled={isAdded}
-                    className={cn(
-                      'flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-medium flex-shrink-0 transition-colors',
-                      isAdded
-                        ? 'bg-cl2-burgundy/15 text-cl2-burgundy cursor-default'
-                        : 'bg-cl2-burgundy text-white hover:bg-cl2-burgundy/90',
-                    )}
-                  >
-                    {isAdded ? <><Check className="w-3 h-3" /> Agregado</> : <><Plus className="w-3 h-3" /> Vigilar</>}
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      ) : (
-        <div className="text-center py-8 text-[12px] text-[#0e1745]/45 dark:text-white/40">
-          No pude generar sugerencias. Podés agregar a tu watchlist manualmente desde <code className="text-[11px] px-1 py-0.5 rounded bg-black/5 dark:bg-white/10">/centinela</code>.
+          {clientes.map((c) => (
+            <ClienteCard key={c.id} cliente={c} onRemove={() => removeOne(c.id)} />
+          ))}
         </div>
       )}
+
+      {/* Form de nuevo cliente o botón "Agregar" */}
+      {creating ? (
+        <div className="p-4 rounded-xl bg-black/3 dark:bg-white/5 border border-cl2-burgundy/20 space-y-3">
+          <div>
+            <label className="block text-[11px] font-medium text-[#0e1745]/70 dark:text-white/65 mb-1">
+              Nombre del cliente
+            </label>
+            <input
+              type="text"
+              autoFocus
+              value={draft.label}
+              onChange={(e) => setDraft({ ...draft, label: e.target.value })}
+              placeholder="Acme S.A. · Cámara de Hoteleros · Garnier & Asociados…"
+              className="w-full px-3 py-2 rounded-lg bg-white dark:bg-white/5 border border-black/10 dark:border-white/10 text-[13px] text-[#0e1745] dark:text-white focus:outline-none focus:border-cl2-burgundy/50"
+            />
+          </div>
+          <div>
+            <label className="block text-[11px] font-medium text-[#0e1745]/70 dark:text-white/65 mb-1">
+              Sector <span className="text-[#0e1745]/40 dark:text-white/40 font-normal">(opcional)</span>
+            </label>
+            <input
+              type="text"
+              value={draft.sector}
+              onChange={(e) => setDraft({ ...draft, sector: e.target.value })}
+              placeholder="Fintech · Infraestructura · Turismo · Salud · Energía · …"
+              className="w-full px-3 py-2 rounded-lg bg-white dark:bg-white/5 border border-black/10 dark:border-white/10 text-[13px] text-[#0e1745] dark:text-white focus:outline-none focus:border-cl2-burgundy/50"
+            />
+          </div>
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-[11px] font-medium text-[#0e1745]/70 dark:text-white/65">
+                Brief <span className="text-[#0e1745]/40 dark:text-white/40 font-normal">(opcional, recomendado)</span>
+              </label>
+              <button
+                onClick={() => setPasteOpen(true)}
+                disabled={!draft.label.trim()}
+                className="flex items-center gap-1 text-[10.5px] font-medium text-cl2-burgundy hover:bg-cl2-burgundy/10 px-2 py-1 rounded disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                title="Generá un brief profundo pegando un prompt en tu IA"
+              >
+                <Sparkles className="w-3 h-3" />
+                Brief con tu IA
+              </button>
+            </div>
+            <textarea
+              value={draft.description}
+              onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+              rows={5}
+              placeholder="Qué hacen, qué les importa, qué expedientes típicamente les interesan, intereses políticos, contactos clave..."
+              className="w-full px-3 py-2 rounded-lg bg-white dark:bg-white/5 border border-black/10 dark:border-white/10 text-[12.5px] text-[#0e1745] dark:text-white placeholder:text-[#0e1745]/35 dark:placeholder:text-white/30 resize-none focus:outline-none focus:border-cl2-burgundy/50"
+            />
+          </div>
+          <div className="flex justify-end gap-2 pt-1">
+            <button
+              onClick={cancelCreating}
+              className="px-3 py-1.5 text-[12px] rounded-md text-[#0e1745]/55 dark:text-white/55 hover:bg-black/5 dark:hover:bg-white/5"
+            >
+              Cancelar
+            </button>
+            <button
+              onClick={submitDraft}
+              disabled={!draft.label.trim() || busy}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] rounded-md bg-cl2-burgundy text-white hover:bg-cl2-burgundy/90 disabled:opacity-40 transition-colors"
+            >
+              {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+              Guardar cliente
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          onClick={startCreating}
+          className="w-full p-4 rounded-xl border-2 border-dashed border-black/10 dark:border-white/10 hover:border-cl2-burgundy/40 hover:bg-cl2-burgundy/5 transition-colors flex items-center justify-center gap-2 text-[13px] font-medium text-[#0e1745]/60 dark:text-white/60"
+        >
+          <Plus className="w-4 h-4" />
+          {clientes.length === 0 ? 'Agregar tu primer cliente' : 'Agregar otro cliente'}
+        </button>
+      )}
+
+      {clientes.length === 0 && !creating && (
+        <p className="text-[11px] text-[#0e1745]/45 dark:text-white/40 italic text-center">
+          Podés saltar este paso y agregar clientes después desde Mi memoria.
+        </p>
+      )}
+
+      <PasteFromLlmModal
+        open={pasteOpen}
+        clienteLabel={draft.label}
+        clienteSector={draft.sector}
+        onCancel={() => setPasteOpen(false)}
+        onConfirm={(text) => {
+          setDraft({ ...draft, description: text });
+          setPasteOpen(false);
+        }}
+      />
     </div>
   );
 }
 
-// ─── Step 4: Notifications ─────────────────────────────────────────────────
-function NotificationsStep() {
-  const [enabledTypes, setEnabledTypes] = useState<Set<AlertType>>(
-    new Set(['state_change', 'deadline', 'mention', 'agenda']),
+function ClienteCard({
+  cliente, onRemove,
+}: { cliente: Cliente; onRemove: () => void }) {
+  return (
+    <div className="p-3 rounded-xl bg-white dark:bg-white/[0.04] border border-black/8 dark:border-white/10 flex items-start gap-3">
+      <div className="w-8 h-8 rounded-lg bg-cl2-burgundy/10 text-cl2-burgundy flex items-center justify-center flex-shrink-0 mt-0.5">
+        <Users className="w-3.5 h-3.5" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-baseline gap-2 flex-wrap">
+          <span className="text-[13px] font-medium text-[#0e1745] dark:text-white">{cliente.label}</span>
+          {cliente.sector && (
+            <span className="text-[10.5px] text-cl2-burgundy/80 bg-cl2-burgundy/10 px-1.5 py-0.5 rounded">
+              {cliente.sector}
+            </span>
+          )}
+        </div>
+        {cliente.description && (
+          <p className="mt-1 text-[11.5px] text-[#0e1745]/55 dark:text-white/50 leading-relaxed line-clamp-2">
+            {cliente.description}
+          </p>
+        )}
+      </div>
+      <button
+        onClick={onRemove}
+        title="Borrar cliente"
+        className="p-1.5 rounded text-[#0e1745]/40 dark:text-white/40 hover:text-cl2-burgundy hover:bg-cl2-burgundy/8 transition-colors"
+      >
+        <Trash2 className="w-3.5 h-3.5" />
+      </button>
+    </div>
   );
-  const [digest, setDigest] = useState(false);
-  const [savedAt, setSavedAt] = useState<number | null>(null);
+}
 
-  const toggle = (t: AlertType) => {
-    setEnabledTypes((cur) => {
-      const next = new Set(cur);
-      if (next.has(t)) next.delete(t); else next.add(t);
+// ─── Paste-from-LLM modal ───────────────────────────────────────────
+function buildPromptForCliente(label: string, sector: string): string {
+  const sectorLine = sector.trim() ? ` Sector: ${sector.trim()}.` : '';
+  return `Voy a empezar a usar una herramienta legislativa llamada CL2 con agentes IA que asesoran sobre la Asamblea Legislativa de Costa Rica. Necesito que generes un brief sobre uno de mis clientes para que esos agentes lo conozcan desde el día uno.
+
+Cliente: ${label || '(nombre del cliente)'}.${sectorLine}
+
+Generá un brief en markdown que cubra, en este orden:
+
+1. **Identidad** — qué es esta organización, a qué se dedica, escala (regional / nacional / multinacional), antigüedad si la sabés.
+2. **Stakeholders clave** — quiénes son los decisores típicos en una organización así (cargos), no necesariamente los nombres.
+3. **Intereses legislativos típicos** — qué áreas legislativas tienden a importarle a una organización de este tipo en Costa Rica. Plazos, regulación sectorial, fiscales, laborales, etc.
+4. **Postura habitual** — cómo suelen posicionarse organizaciones de este tipo frente a reforma regulatoria: pro-mercado, pro-protección, sectorial, agnóstica.
+5. **Riesgos políticos** — qué amenazas legislativas o regulatorias podrían afectarles.
+6. **Tono recomendado** — cómo le hablaría un asesor a este tipo de cliente.
+
+Máximo 600 palabras. Sin viñetas dentro de párrafos, español de Costa Rica, registro profesional. NO inventes datos específicos (números, nombres propios) que no sepas con certeza — preferí decir "típicamente" o "en organizaciones de este tipo".`;
+}
+
+function PasteFromLlmModal({
+  open, clienteLabel, clienteSector, onCancel, onConfirm,
+}: {
+  open: boolean;
+  clienteLabel: string;
+  clienteSector: string;
+  onCancel: () => void;
+  onConfirm: (text: string) => void;
+}) {
+  const [pasted, setPasted] = useState('');
+  const [copied, setCopied] = useState(false);
+  const promptText = useMemo(
+    () => buildPromptForCliente(clienteLabel, clienteSector),
+    [clienteLabel, clienteSector],
+  );
+
+  useEffect(() => {
+    if (!open) { setPasted(''); setCopied(false); }
+  }, [open]);
+
+  if (!open) return null;
+
+  const copyPrompt = async () => {
+    try {
+      await navigator.clipboard.writeText(promptText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch { /* clipboard denied */ }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[250] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onCancel} />
+      <div className="relative w-full max-w-3xl max-h-[90vh] flex flex-col bg-white dark:bg-[#161616] rounded-2xl shadow-2xl border border-black/5 dark:border-white/10 overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-black/5 dark:border-white/10">
+          <h3 className="font-display text-[17px] text-[#0e1745] dark:text-white">
+            Brief con tu IA — {clienteLabel || 'cliente'}
+          </h3>
+          <button onClick={onCancel} className="text-[#0e1745]/55 dark:text-white/55 hover:text-[#0e1745] dark:hover:text-white">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-5 grid grid-cols-1 md:grid-cols-2 gap-5">
+          {/* Columna 1 — Prompt */}
+          <div>
+            <p className="text-[11px] uppercase tracking-wider text-cl2-burgundy/80 font-medium mb-2">
+              1. Copiá este prompt
+            </p>
+            <pre className="text-[11.5px] leading-relaxed text-[#0e1745]/80 dark:text-white/75 bg-black/3 dark:bg-white/5 border border-black/8 dark:border-white/10 rounded-lg p-3 whitespace-pre-wrap font-mono max-h-[300px] overflow-y-auto">
+{promptText}
+            </pre>
+            <button
+              onClick={copyPrompt}
+              className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 text-[12px] rounded-md bg-cl2-burgundy text-white hover:bg-cl2-burgundy/90 transition-colors"
+            >
+              {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+              {copied ? 'Copiado' : 'Copiar prompt'}
+            </button>
+            <p className="mt-3 text-[11px] text-[#0e1745]/50 dark:text-white/45 leading-relaxed">
+              2. Pegalo en <strong>tu</strong> ChatGPT, Claude, Gemini, Notion AI, o donde sea que ya tengas contexto sobre este cliente.
+            </p>
+          </div>
+
+          {/* Columna 2 — Paste */}
+          <div className="flex flex-col">
+            <p className="text-[11px] uppercase tracking-wider text-cl2-burgundy/80 font-medium mb-2 flex items-center gap-1.5">
+              <ClipboardPaste className="w-3 h-3" />
+              3. Pegá la respuesta acá
+            </p>
+            <textarea
+              value={pasted}
+              onChange={(e) => setPasted(e.target.value)}
+              placeholder="La respuesta de tu IA en markdown…"
+              rows={14}
+              className="flex-1 px-3 py-2 rounded-lg bg-black/3 dark:bg-white/5 border border-black/8 dark:border-white/10 text-[12px] text-[#0e1745] dark:text-white placeholder:text-[#0e1745]/35 dark:placeholder:text-white/30 resize-none focus:outline-none focus:border-cl2-burgundy/40 font-mono leading-relaxed"
+            />
+            <div className="mt-1 text-[10.5px] text-[#0e1745]/40 dark:text-white/35">
+              {new TextEncoder().encode(pasted).length} bytes · máx ~50 KB
+            </div>
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 px-5 py-3 border-t border-black/5 dark:border-white/10">
+          <button
+            onClick={onCancel}
+            className="px-3 py-1.5 text-[12px] rounded-md text-[#0e1745]/55 dark:text-white/55 hover:bg-black/5 dark:hover:bg-white/5"
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={() => onConfirm(pasted)}
+            disabled={!pasted.trim()}
+            className="flex items-center gap-1.5 px-4 py-1.5 text-[12px] rounded-md bg-cl2-burgundy text-white hover:bg-cl2-burgundy/90 disabled:opacity-40 transition-colors"
+          >
+            <Check className="w-3.5 h-3.5" />
+            Usar este brief
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// STEP 3 — VIGILANCIA (sugerencias de Centinela por cliente)
+// ════════════════════════════════════════════════════════════════════════
+interface SuggestionsByClient {
+  [clientId: string]: {
+    loading: boolean;
+    suggestions: Array<{
+      label: string; entity_type: string; entity_id: string; rationale: string;
+    }>;
+    added: Set<string>;
+    error: string | null;
+  };
+}
+
+function VigilanciaStep({
+  clientes, profile,
+}: { clientes: Cliente[]; profile: UserProfile | null }) {
+  const [byClient, setByClient] = useState<SuggestionsByClient>({});
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  // Auto-expand the first cliente
+  useEffect(() => {
+    if (clientes.length > 0) {
+      setExpanded(new Set([clientes[0].id]));
+    }
+  }, [clientes]);
+
+  // Fetch sugerencias para cada cliente expandido si no las tenemos
+  useEffect(() => {
+    clientes.forEach((c) => {
+      if (!expanded.has(c.id)) return;
+      if (byClient[c.id]) return;
+      setByClient((prev) => ({
+        ...prev,
+        [c.id]: { loading: true, suggestions: [], added: new Set(), error: null },
+      }));
+      void magicHelp({
+        agent: 'centinela',
+        field: 'cliente-watchlist',
+        context: { label: c.label, sector: c.sector, description: c.description },
+      })
+        .then((r) => {
+          const items = (r.suggestions ?? []).map((s) =>
+            typeof s === 'string'
+              ? { label: s, entity_type: 'tema', entity_id: s, rationale: '' }
+              : s as { label: string; entity_type: string; entity_id: string; rationale: string },
+          );
+          setByClient((prev) => ({
+            ...prev,
+            [c.id]: { loading: false, suggestions: items, added: new Set(), error: null },
+          }));
+        })
+        .catch((err) => {
+          setByClient((prev) => ({
+            ...prev,
+            [c.id]: { loading: false, suggestions: [], added: new Set(), error: (err as Error).message },
+          }));
+        });
+    });
+  }, [expanded, clientes, byClient]);
+
+  const toggleExpanded = (id: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   };
 
-  const persist = useCallback(async () => {
+  const addToList = async (clientId: string, s: { label: string; entity_type: string; entity_id: string }) => {
     try {
-      await updatePrefs({
-        alert_types_on: Array.from(enabledTypes) as AlertType[],
-        digest_enabled: digest,
-        channels: { in_app: true },
+      await addToWatchlist({
+        entity_type: s.entity_type as 'tema',
+        entity_id: s.entity_id,
+        label: s.label,
+        client_id: clientId,
       });
-      setSavedAt(Date.now());
+      setByClient((prev) => ({
+        ...prev,
+        [clientId]: {
+          ...prev[clientId]!,
+          added: new Set([...prev[clientId]!.added, s.entity_id]),
+        },
+      }));
     } catch { /* swallow */ }
-  }, [enabledTypes, digest]);
+  };
 
-  useEffect(() => {
-    const t = setTimeout(() => void persist(), 600);
-    return () => clearTimeout(t);
-  }, [enabledTypes, digest, persist]);
+  if (clientes.length === 0) {
+    return (
+      <div className="space-y-5">
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-widest text-cl2-burgundy/80 mb-1.5">
+            Paso 3 · Vigilancia
+          </p>
+          <h2 className="font-display text-[26px] leading-tight font-semibold text-[#0e1745] dark:text-white">
+            Sin clientes, sin vigilancia
+          </h2>
+          <p className="mt-1.5 text-[13px] text-[#0e1745]/55 dark:text-white/50 leading-relaxed">
+            Saltaste el paso de clientes. Podés volver atrás y agregar al menos uno, o cerrar acá y agregar clientes después desde Mi memoria.
+          </p>
+        </div>
+        <div className="p-3 rounded-lg bg-black/3 dark:bg-white/5 text-[12px] text-[#0e1745]/55 dark:text-white/50 italic">
+          La watchlist de Centinela funciona por cliente. Cuando agregues uno, te vamos a sugerir qué vigilar para ese cliente.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5">
       <div>
         <p className="text-[11px] font-semibold uppercase tracking-widest text-cl2-burgundy/80 mb-1.5">
-          Notificaciones
+          Paso 3 · Vigilancia · Centinela
         </p>
         <h2 className="font-display text-[26px] leading-tight font-semibold text-[#0e1745] dark:text-white">
-          ¿Qué te avisamos?
+          ¿Qué tiene que seguir Centinela?
         </h2>
-        <p className="mt-1.5 text-[13px] text-[#0e1745]/55 dark:text-white/50">
-          Podés cambiar esto cuando quieras desde <code className="text-[11px] px-1 py-0.5 rounded bg-black/5 dark:bg-white/10">/centinela</code>.
+        <p className="mt-1.5 text-[13px] text-[#0e1745]/55 dark:text-white/50 leading-relaxed">
+          Centinela propone qué vigilar para cada uno de tus clientes según su sector y brief. Marcá lo que te sirva. Vas a poder ajustar después desde la página de Centinela.
         </p>
       </div>
 
       <div className="space-y-2">
-        {([
-          { t: 'state_change' as AlertType, label: 'Cambio de estado', hint: 'Cuando un expediente avanza o se archiva' },
-          { t: 'deadline'     as AlertType, label: 'Plazo próximo',    hint: 'A 3 días del vencimiento ordinario o cuatrienal' },
-          { t: 'agenda'       as AlertType, label: 'En agenda',        hint: 'Cuando aparece en el orden del día' },
-          { t: 'mention'      as AlertType, label: 'Mención en sesión',hint: 'Cuando lo nombran en plenario o comisión' },
-        ]).map(({ t, label, hint }) => {
-          const on = enabledTypes.has(t);
+        {clientes.map((c) => {
+          const state = byClient[c.id];
+          const isExpanded = expanded.has(c.id);
           return (
-            <button
-              key={t}
-              onClick={() => toggle(t)}
-              className={cn(
-                'w-full flex items-start gap-3 p-3.5 rounded-xl border text-left transition-colors',
-                on
-                  ? 'bg-cl2-burgundy/5 border-cl2-burgundy/25'
-                  : 'bg-black/3 dark:bg-white/[0.04] border-black/8 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/8',
+            <div key={c.id} className="rounded-xl border border-black/8 dark:border-white/10 overflow-hidden">
+              <button
+                onClick={() => toggleExpanded(c.id)}
+                className="w-full px-4 py-3 flex items-center gap-3 hover:bg-black/3 dark:hover:bg-white/[0.03] transition-colors"
+              >
+                <Users className="w-3.5 h-3.5 text-cl2-burgundy" />
+                <span className="text-[13px] font-medium text-[#0e1745] dark:text-white">{c.label}</span>
+                {c.sector && (
+                  <span className="text-[10px] text-cl2-burgundy/80 bg-cl2-burgundy/10 px-1.5 py-0.5 rounded">
+                    {c.sector}
+                  </span>
+                )}
+                <span className="ml-auto flex items-center gap-1 text-[11px] text-[#0e1745]/45 dark:text-white/45">
+                  {state && state.added.size > 0 && (
+                    <span className="text-cl2-burgundy/80">{state.added.size} elegidos</span>
+                  )}
+                  <ChevronDown className={cn(
+                    'w-3.5 h-3.5 transition-transform',
+                    isExpanded && 'rotate-180',
+                  )} />
+                </span>
+              </button>
+              {isExpanded && (
+                <div className="px-4 pb-4 border-t border-black/5 dark:border-white/5">
+                  {!state || state.loading ? (
+                    <div className="flex items-center gap-2 py-4 text-[11.5px] text-[#0e1745]/45 dark:text-white/40">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      Centinela está leyendo el brief de {c.label}…
+                    </div>
+                  ) : state.error ? (
+                    <div className="py-4 text-[11.5px] text-cl2-burgundy/80">
+                      No pude generar sugerencias automáticas. Podés agregar a la watchlist manualmente desde la página de Centinela.
+                    </div>
+                  ) : state.suggestions.length === 0 ? (
+                    <div className="py-4 text-[11.5px] text-[#0e1745]/45 dark:text-white/40 italic">
+                      Sin sugerencias para este cliente. Probá darle un brief más detallado.
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5 mt-3">
+                      {state.suggestions.map((s) => {
+                        const isAdded = state.added.has(s.entity_id);
+                        return (
+                          <div
+                            key={s.entity_id}
+                            className={cn(
+                              'flex items-start gap-2.5 p-2.5 rounded-lg transition-colors',
+                              isAdded
+                                ? 'bg-cl2-burgundy/5 border border-cl2-burgundy/15'
+                                : 'bg-white dark:bg-white/[0.03] border border-black/5 dark:border-white/8',
+                            )}
+                          >
+                            <div className="flex-1 min-w-0">
+                              <div className="text-[12.5px] font-medium text-[#0e1745] dark:text-white">{s.label}</div>
+                              {s.rationale && (
+                                <div className="text-[11px] text-[#0e1745]/55 dark:text-white/50 mt-0.5 leading-relaxed">{s.rationale}</div>
+                              )}
+                            </div>
+                            <button
+                              onClick={() => !isAdded && addToList(c.id, s)}
+                              disabled={isAdded}
+                              className={cn(
+                                'flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium flex-shrink-0 transition-colors',
+                                isAdded
+                                  ? 'bg-cl2-burgundy/15 text-cl2-burgundy cursor-default'
+                                  : 'bg-cl2-burgundy text-white hover:bg-cl2-burgundy/90',
+                              )}
+                            >
+                              {isAdded ? <><Check className="w-3 h-3" /> Vigilando</> : <><Eye className="w-3 h-3" /> Vigilar</>}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               )}
-            >
-              <div className={cn(
-                'w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 transition-colors',
-                on ? 'bg-cl2-burgundy text-white' : 'bg-black/8 dark:bg-white/10',
-              )}>
-                {on && <Check className="w-3 h-3" />}
-              </div>
-              <div className="min-w-0">
-                <div className="text-[13px] font-medium text-[#0e1745] dark:text-white">{label}</div>
-                <div className="text-[11px] text-[#0e1745]/55 dark:text-white/50 mt-0.5">{hint}</div>
-              </div>
-            </button>
+            </div>
           );
         })}
       </div>
 
-      <div className="pt-2 border-t border-black/6 dark:border-white/8">
-        <button
-          onClick={() => setDigest((v) => !v)}
-          className={cn(
-            'w-full flex items-start gap-3 p-3.5 rounded-xl border text-left transition-colors',
-            digest
-              ? 'bg-cl2-burgundy/5 border-cl2-burgundy/25'
-              : 'bg-black/3 dark:bg-white/[0.04] border-black/8 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/8',
-          )}
-        >
-          <Sparkles className={cn('w-4 h-4 flex-shrink-0 mt-0.5', digest ? 'text-cl2-burgundy' : 'text-[#0e1745]/40 dark:text-white/40')} />
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="text-[13px] font-medium text-[#0e1745] dark:text-white">Digest semanal Opus</span>
-              <span className="text-[9px] uppercase tracking-wider text-cl2-burgundy/80 bg-cl2-burgundy/10 px-1 py-0.5 rounded">PRO</span>
-            </div>
-            <div className="text-[11px] text-[#0e1745]/55 dark:text-white/50 mt-0.5 leading-relaxed">
-              Cada lunes a las 6am, brief sintetizado por Opus 4.7 con postura, coaliciones, momentum y oportunidades sobre tu watchlist.
-            </div>
-          </div>
-        </button>
-      </div>
-
-      {savedAt && (
-        <div className="text-[10.5px] text-[#0e1745]/40 dark:text-white/35 text-right">Guardado.</div>
-      )}
-    </div>
-  );
-}
-
-// ─── Step 5: Ready ──────────────────────────────────────────────────────────
-function ReadyStep() {
-  return (
-    <div className="space-y-5">
-      <div>
-        <p className="text-[11px] font-semibold uppercase tracking-widest text-cl2-burgundy/80 mb-1.5">
-          Listo
-        </p>
-        <h2 className="font-display text-[26px] leading-tight font-semibold text-[#0e1745] dark:text-white">
-          Probá pidiéndole algo a cada uno
-        </h2>
-        <p className="mt-1.5 text-[13px] text-[#0e1745]/55 dark:text-white/50">
-          Ya podés empezar. Acá hay tres maneras de arrancar.
+      <div className="p-3 rounded-lg bg-cl2-burgundy/5 border border-cl2-burgundy/15 flex items-start gap-2">
+        <BookHeart className="w-3.5 h-3.5 text-cl2-burgundy mt-0.5 flex-shrink-0" />
+        <p className="text-[11.5px] text-[#0e1745]/70 dark:text-white/65 leading-relaxed">
+          Cuando hagas click en "Empezar a usar CL2", todo lo que vigilás ya queda activo. Las alertas de Centinela aparecen en la página <code className="text-[10.5px] px-1 py-0.5 rounded bg-black/5 dark:bg-white/10">/centinela</code>.
         </p>
       </div>
 
-      <div className="space-y-2.5">
-        {[
-          {
-            agent: 'Lexa',
-            icon: <MessageSquare className="w-4 h-4" />,
-            sample: '"¿Qué pasó con el expediente 24.429?"',
-            where: 'Chat principal',
-          },
-          {
-            agent: 'Atlas',
-            icon: <Hammer className="w-4 h-4" />,
-            sample: '"Armame un brief sobre reforma fiscal"',
-            where: 'Workspace en /hojas',
-          },
-          {
-            agent: 'Centinela',
-            icon: <Eye className="w-4 h-4" />,
-            sample: 'Tu watchlist te va a ir generando alertas automáticamente',
-            where: '/centinela',
-          },
-        ].map((a) => (
-          <div key={a.agent} className="flex items-start gap-3 p-3.5 rounded-xl bg-black/3 dark:bg-white/5 border border-black/5 dark:border-white/8">
-            <div className="w-9 h-9 rounded-lg bg-cl2-burgundy/10 text-cl2-burgundy flex items-center justify-center flex-shrink-0">
-              {a.icon}
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-[13px] font-semibold text-[#0e1745] dark:text-white">{a.agent}</div>
-              <p className="text-[12px] text-[#0e1745]/65 dark:text-white/60 mt-0.5">{a.sample}</p>
-              <p className="text-[10.5px] text-[#0e1745]/40 dark:text-white/40 mt-0.5 uppercase tracking-wider">{a.where}</p>
-            </div>
-          </div>
-        ))}
-      </div>
+      {/* Tip: profile context (oculto en collapse para no distraer) */}
+      <details className="text-[11px] text-[#0e1745]/45 dark:text-white/40">
+        <summary className="cursor-pointer hover:text-[#0e1745]/70 dark:hover:text-white/65">
+          Mostrar mi perfil cargado
+        </summary>
+        <div className="mt-1.5 p-2 rounded bg-black/3 dark:bg-white/5 font-mono">
+          {profile?.cargo || '(sin rol)'} · {profile?.enfoque || '(sin práctica)'}
+        </div>
+      </details>
     </div>
   );
 }
