@@ -643,11 +643,13 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // See docs/AGENTS.md §Deep Insight for the design rationale.
   const systemPrompt = buildAgentSystemPrompt(agent, args.deep_insight);
 
-  // Cerebro neuron — best-effort read of the user's /memories. Skipped
-  // when there's no email (anon / public demo), when SHIFT_INTERNAL_TOKEN
-  // isn't set, or when Cerebro is unreachable. Never throws — the chat
-  // turn must run even if the memory layer is degraded. See
-  // AGENTS/CEREBRO/handoffs/2026-05-10-neurons-wiring-clients.md.
+  // Cerebro neuron — best-effort READ of the user's /memories (lectura
+  // pre-bypass-closure: ver cerebroNeuron.ts para el alcance). El loop
+  // completo (auto-write durante el turno) sólo vuelve a estar disponible
+  // cuando openRouterClient migre a `/v1/llm/invoke` con
+  // `enable_memory: true` (close-the-bypass — project_cl2_bypass.md).
+  // Skipped silently cuando no hay email (anon / public demo),
+  // SHIFT_INTERNAL_TOKEN sin setear, o Cerebro inalcanzable. Never throws.
   const neuronBlock = await buildNeuronSystemBlock(args.user_email ?? null);
 
   const messages: OAMessage[] = [

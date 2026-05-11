@@ -1,29 +1,47 @@
 /**
- * Cerebro Neuron client — read/write the per-user memory store that lives
- * in Cerebro Railway. See AGENTS/CEREBRO/handoffs/2026-05-10-neurons-wiring-clients.md
+ * Cerebro Neuron client — per-user memory store that lives in Cerebro
+ * Railway. See AGENTS/CEREBRO/handoffs/2026-05-10-neurons-wiring-clients.md
  * for the contract and design rationale.
  *
- * Two surfaces:
- *   1. Server-side read at chat time: load the user's `/memories` and
- *      hand it to openRouterClient as a compact system block. The LLM
- *      sees prior facts about the user without going through the full
- *      tool-use loop (which currently only lives behind Cerebro's
- *      `/v1/llm/invoke` — see project_cl2_bypass.md for the bypass story).
- *   2. BFF proxy (routes/neuron.ts): forwards the 5 user-facing endpoints
- *      (`list / read / write / delete / history`) so the frontend can
- *      render a "Mi memoria" panel without touching Cerebro directly.
+ * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ * ESTA INTEGRACIÓN ES DE LECTURA (PRE-BYPASS-CLOSURE)
+ * ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ * El handoff dice claro: la versión completa (auto-tool-use loop con
+ * memory tool inyectado por Cerebro, escrituras automáticas durante el
+ * turno) solo se activa cuando la app llama `/v1/llm/invoke` con
+ * `enable_memory: true`. CL2 hoy llama OpenRouter directo (10 callsites
+ * documentados en memory/project_cl2_bypass.md), así que NO podemos
+ * obtener el loop completo todavía.
  *
- * realm is hardcoded to "cl2" because every user of this BFF is a CL2
- * user; cross-realm reads are impossible at the DB level on the Cerebro
- * side (composite PK).
+ * Lo que SÍ hace este módulo:
+ *   1. LEE el neuron en cada turno de chat y lo inyecta como system
+ *      block — Lexa/Atlas/Centinela "se acuerdan" de lo que ya está
+ *      escrito.
+ *   2. Expone el BFF proxy para que un panel "Mi memoria" pueda LEER y
+ *      ESCRIBIR manualmente desde el frontend (PATCH /api/neuron/file).
  *
- * Auth: `x-shift-internal-token` header. The token is shared between
- * Shift Gateway (issuer) and CL2 (consumer); rotates manually. NEVER
- * exposed to the browser — server-side only.
+ * Lo que NO hace (porque no está cerrado el bypass):
+ *   - Escritura automática durante el turno. Si Ronald dice "mi cliente
+ *     se llama Acme", Lexa NO va a llamar `memory.create` para
+ *     persistirlo. La persistencia hoy es 100% manual desde el panel
+ *     (Phase A) o por la siguiente fase de bypass-closure (Phase B).
  *
- * Failure mode: any error reading the neuron during chat is logged and
- * we fall through with an empty context. Chat must NOT fail because the
- * memory layer is unreachable.
+ * Plan de cierre: feat/oai-compat en Cerebro + scoping agentes a
+ * app=cl2 → migración de openRouterClient.ts a `/v1/llm/invoke`. Cuando
+ * eso pase, `enable_memory: true` activa el loop completo y este módulo
+ * pasa a ser solo el BFF proxy (lectura por system block deja de tener
+ * sentido porque Cerebro la mete vía tool-use). Tracking en
+ * project_cl2_bypass.md y CRITICAL-DEBT.md.
+ *
+ * realm: hardcoded "cl2" — cross-realm reads imposibles a nivel DB
+ * (composite PK).
+ *
+ * Auth: `x-shift-internal-token` header. Server-side only — NUNCA al
+ * browser.
+ *
+ * Failure mode: cualquier error leyendo el neuron en chat se traga y
+ * caemos a string vacío. El chat debe responder aunque la memoria esté
+ * caída.
  */
 
 const CEREBRO_BASE_URL =
