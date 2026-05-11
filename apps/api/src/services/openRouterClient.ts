@@ -12,7 +12,6 @@ import {
   renderReglamentoForLlm,
 } from './silClient.js';
 import { queryLightrag, type LightragMode } from './lightragClient.js';
-import { buildNeuronSystemBlock } from './cerebroNeuron.js';
 import { withTimeout, withRetry, ResilienceError } from './resilience.js';
 
 // Pass-1 (non-stream) is short and idempotent → retry safely.
@@ -643,20 +642,22 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // See docs/AGENTS.md §Deep Insight for the design rationale.
   const systemPrompt = buildAgentSystemPrompt(agent, args.deep_insight);
 
-  // Cerebro neuron — best-effort READ of the user's /memories (lectura
-  // pre-bypass-closure: ver cerebroNeuron.ts para el alcance). El loop
-  // completo (auto-write durante el turno) sólo vuelve a estar disponible
-  // cuando openRouterClient migre a `/v1/llm/invoke` con
-  // `enable_memory: true` (close-the-bypass — project_cl2_bypass.md).
-  // Skipped silently cuando no hay email (anon / public demo),
-  // SHIFT_INTERNAL_TOKEN sin setear, o Cerebro inalcanzable. Never throws.
-  const neuronBlock = await buildNeuronSystemBlock(args.user_email ?? null);
+  // NOTA — memoria del usuario (neurons):
+  // El chat principal NO inyecta la neurona como system block. Ese fue un
+  // anti-pattern intentado el 2026-05-11 que se revirtió el mismo día.
+  // La integración correcta vive del lado de Cerebro: cuando aterrice
+  // `feat/oai-compat` extendido (Track A — sesión Cerebro), CL2 va a
+  // migrar `openRouterStream` a `/v1/chat/completions` de Cerebro con
+  // `enable_memory: true`, y el memory tool va a operar dentro del
+  // loop, leyendo y ESCRIBIENDO automáticamente sin que la app meta
+  // mano en el system prompt. Ver project_cl2_bypass.md.
+  //
+  // `args.user_email` se queda en StreamArgs porque Track B (la
+  // migración) lo va a necesitar como `user_id` en el payload de
+  // Cerebro. No se usa acá todavía.
 
   const messages: OAMessage[] = [
     { role: 'system', content: systemPrompt },
-    ...(neuronBlock
-      ? [{ role: 'system' as const, content: neuronBlock }]
-      : []),
     ...(args.dynamic_rag_prompt
       ? [{ role: 'system' as const, content: args.dynamic_rag_prompt }]
       : []),
