@@ -30,6 +30,36 @@ function supa(): SupabaseClient {
 
 const SUPA_TIMEOUT_MS = 5_000;
 
+/**
+ * Datos paralelos al estado del expediente que el SIL guarda. Estos campos
+ * son la fuente de verdad sobre HITOS FORMALES (no estado físico actual).
+ * Un asesor legislativo experimentado los consulta antes que `estado`:
+ *
+ *   • numero_ley         — si NO null → expediente ES LEY publicada
+ *   • numero_archivado   — si NO null → fue archivado (no avanzó)
+ *   • fecha_publicacion  — fecha de publicación en La Gaceta
+ *   • numero_gaceta      — número de Gaceta donde salió
+ *   • fecha_dispensa     — fast-track legislativo (dispensa de trámite)
+ *   • numero_acuerdo     — número de acuerdo legislativo (no ley)
+ *   • numero_alcance     — alcance/modificación posterior
+ *   • vencimiento_ordinario / cuatrienal — plazos legales para dictaminar
+ *   • comisiones         — historial completo de pase entre comisiones
+ *   • proponentes        — todos los co-firmantes (estado.proponente es solo el primero)
+ */
+export interface SilExtras {
+  numero_ley?: number | null;
+  numero_archivado?: number | null;
+  fecha_publicacion?: string | null;
+  numero_gaceta?: number | null;
+  fecha_dispensa?: string | null;
+  numero_acuerdo?: number | null;
+  numero_alcance?: number | null;
+  vencimiento_ordinario?: string | null;
+  vencimiento_cuatrienal?: string | null;
+  comisiones?: Array<{ fecha: string; organo: string }>;
+  proponentes?: string[];
+}
+
 export interface SilExpedienteRow {
   id: number;
   numero: string;
@@ -41,6 +71,7 @@ export interface SilExpedienteRow {
   tipo: string | null;
   legislatura: string | null;
   url_detalle: string;
+  extras?: SilExtras | null;
 }
 
 export interface SilExpedienteFull extends SilExpedienteRow {
@@ -145,7 +176,7 @@ export async function getExpedienteById(numero: number): Promise<SilExpedienteFu
         async (signal) => {
           const { data: exp, error: e1 } = await supa()
             .from('sil_expedientes')
-            .select('id, numero, titulo, proponente, comision, fecha_presentacion, estado, tipo, legislatura, url_detalle')
+            .select('id, numero, titulo, proponente, comision, fecha_presentacion, estado, tipo, legislatura, url_detalle, extras')
             .eq('id', numero)
             .abortSignal(signal)
             .maybeSingle();
@@ -407,14 +438,85 @@ export function renderExpedientesForLlm(rows: SilExpedienteRow[]): string {
     .join('\n\n');
 }
 
+/**
+ * Renderiza un expediente para el LLM. CRÍTICO: incluye una sección
+ * "ESTATUS FORMAL" al frente que interpreta los campos de `extras` y dice
+ * en lenguaje natural si el expediente ES LEY, fue ARCHIVADO, tiene
+ * dispensa, o sigue en trámite. Sin esto el LLM responde mirando solo
+ * `estado` (que es la comisión física actual) y se equivoca cuando un
+ * expediente avanzó a ley pero el listing no lo refleja inmediato.
+ *
+ * Este renderer es la base de "conocimiento procedural legislativo" —
+ * cualquier heurística nueva que aprendamos del cliente (Ronald, equipo
+ * CL2) debe sumarse acá para que TODOS los agentes la usen.
+ */
 export function renderExpedienteFullForLlm(exp: SilExpedienteFull): string {
+  const e = (exp.extras ?? {}) as SilExtras;
+
+  // ── Sección 1: estatus formal (lo que un asesor mira primero) ───────
+  const status: string[] = [];
+  if (e.numero_ley) {
+    status.push(`✅ ES LEY · publicada como Ley N° ${e.numero_ley}` +
+      (e.fecha_publicacion ? ` el ${e.fecha_publicacion}` : '') +
+      (e.numero_gaceta ? ` en La Gaceta N° ${e.numero_gaceta}` : ''));
+  }
+  if (e.numero_archivado) {
+    status.push(`📦 ARCHIVADO · número de archivo ${e.numero_archivado} (no avanzó a ley)`);
+  }
+  if (e.fecha_dispensa) {
+    status.push(`⚡ DISPENSA DE TRÁMITE · fecha ${e.fecha_dispensa} (fast-track, votado sin esperar comisión)`);
+  }
+  if (e.numero_acuerdo) {
+    status.push(`📋 ACUERDO LEGISLATIVO N° ${e.numero_acuerdo} (acuerdo de cámara, NO ley)`);
+  }
+  if (e.numero_alcance) {
+    status.push(`🔁 TIENE ALCANCE/MODIFICACIÓN N° ${e.numero_alcance} (la ley fue modificada después de publicarse)`);
+  }
+
+  // Vencimientos solo si NO es ley ni archivado (esos plazos ya no aplican)
+  if (!e.numero_ley && !e.numero_archivado) {
+    if (e.vencimiento_ordinario) {
+      status.push(`⏳ Vencimiento plazo ordinario para dictamen: ${e.vencimiento_ordinario}`);
+    }
+    if (e.vencimiento_cuatrienal) {
+      status.push(`⏳ Vencimiento plazo cuatrienal (caducidad legislativa): ${e.vencimiento_cuatrienal}`);
+    }
+  }
+
+  // Si NADA de lo anterior aplica, declaramos el estatus en negativo
+  // para que el LLM no asuma "es ley" por defecto.
+  if (status.length === 0) {
+    status.push(`🟡 EN TRÁMITE · todavía NO es ley ni fue archivado. Estado físico actual: ${exp.estado ?? 'sin estado'}.`);
+  }
+
+  // ── Sección 2: identificación ───────────────────────────────────────
   const head = `Expediente ${exp.numero} — ${exp.titulo ?? '(sin título)'}\n`
-    + `Fecha: ${exp.fecha_presentacion ?? '—'} · Estado: ${exp.estado ?? '—'} · Tipo: ${exp.tipo ?? '—'}\n`
-    + `Proponente: ${exp.proponente ?? '—'} · Comisión: ${exp.comision ?? '—'}\n`
-    + `URL: ${exp.url_detalle}\n`;
-  if (exp.documentos.length === 0) return head + '\n(sin documentos adjuntos en DB)';
-  const docs = exp.documentos
-    .map((d, i) => `  [${i + 1}] ${d.tipo}: ${d.titulo ?? '(s/título)'} ${d.fecha ?? ''} — ${d.source_url}`)
-    .join('\n');
-  return `${head}\nDocumentos:\n${docs}`;
+    + `Fecha presentación: ${exp.fecha_presentacion ?? '—'} · Tipo: ${exp.tipo ?? '—'}\n`
+    + `Proponente principal: ${exp.proponente ?? '—'}\n`
+    + (e.proponentes && e.proponentes.length > 1
+      ? `Co-firmantes (total ${e.proponentes.length}): ${e.proponentes.slice(0, 5).join(', ')}${e.proponentes.length > 5 ? '…' : ''}\n`
+      : '')
+    + `Comisión física actual: ${exp.comision ?? '—'}\n`
+    + `URL oficial: ${exp.url_detalle}\n`;
+
+  // ── Sección 3: historial de pase entre comisiones (si hay) ──────────
+  let historial = '';
+  if (e.comisiones && e.comisiones.length > 0) {
+    const pasos = e.comisiones.slice(-8); // últimos 8 pases
+    historial = `\nHistorial de pase (últimos ${pasos.length}):\n`
+      + pasos.map((c) => `  · ${c.fecha} → ${c.organo}`).join('\n')
+      + '\n';
+  }
+
+  // ── Sección 4: documentos adjuntos ──────────────────────────────────
+  let docsSection = '';
+  if (exp.documentos.length === 0) {
+    docsSection = '\n(sin documentos adjuntos indexados en la base)';
+  } else {
+    docsSection = '\nDocumentos:\n' + exp.documentos
+      .map((d, i) => `  [${i + 1}] ${d.tipo}: ${d.titulo ?? '(s/título)'} ${d.fecha ?? ''} — ${d.source_url}`)
+      .join('\n');
+  }
+
+  return `ESTATUS FORMAL:\n${status.map((s) => '  ' + s).join('\n')}\n\n${head}${historial}${docsSection}`;
 }
