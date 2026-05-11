@@ -21,6 +21,7 @@ import { getUserIdFromRequest } from '../services/auth.js';
 import { logger } from '../services/logger.js';
 import { cerebroInvoke } from '../services/cerebroLlmClient.js';
 import { getUserFromRequest } from '../services/auth.js';
+import { writeNeuronFile } from '../services/cerebroNeuron.js';
 
 let _supa: SupabaseClient | null = null;
 function supa(): SupabaseClient {
@@ -68,9 +69,22 @@ onboardingRouter.get('/profile', async (req, res) => {
 });
 
 // ── PATCH /api/onboarding/profile ──────────────────────────────────────────
+//
+// Write-through a la neurona del user (decisión 2026-05-11): cada vez que
+// el usuario completa un campo del wizard, el contenido se serializa a
+// markdown y se escribe en /memories/perfil/*.md. Esto deja la neurona
+// rica desde el día uno SIN que el user toque /mi-memoria.
+//
+// Por qué split en archivos en lugar de un /memories/perfil.md único:
+//   - Permite que carpetas se vean en el UI (folder grouping)
+//   - Cada campo es editable individualmente sin pisar el resto
+//   - Cuando Track A aterrice y Lexa quiera escribir "agregá esto a tus
+//     temas", apunta a un path específico y conserva los otros
 onboardingRouter.patch('/profile', async (req, res) => {
-  const userId = await requireUser(req, res);
-  if (!userId) return;
+  const user = await getUserFromRequest(req);
+  if (!user) { res.status(401).json({ ok: false, error: 'auth_required' }); return; }
+  const userId = user.id;
+  const userEmail = user.email;
   const body = (req.body ?? {}) as {
     cargo?: string | null; enfoque?: string | null;
     temas?: string[]; partido?: string | null;
@@ -91,6 +105,18 @@ onboardingRouter.patch('/profile', async (req, res) => {
       .select('*')
       .single();
     if (error) throw new Error(error.message);
+
+    // Write-through a la neurona. Fire-and-forget: si Cerebro está caído,
+    // el PATCH retorna ok igual y el wizard sigue. La neurona se
+    // sincronizará al siguiente campo que el user complete.
+    if (userEmail && data) {
+      void writeProfileToNeuron(userEmail, data as ProfileRow).catch((err) => {
+        logger.warn('onboarding.profile: neuron write-through failed', {
+          user_id: userId, error: (err as Error).message,
+        });
+      });
+    }
+
     res.json({ ok: true, profile: data });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
@@ -99,21 +125,114 @@ onboardingRouter.patch('/profile', async (req, res) => {
 
 // ── POST /api/onboarding/complete ──────────────────────────────────────────
 onboardingRouter.post('/complete', async (req, res) => {
-  const userId = await requireUser(req, res);
-  if (!userId) return;
+  const user = await getUserFromRequest(req);
+  if (!user) { res.status(401).json({ ok: false, error: 'auth_required' }); return; }
+  const userId = user.id;
+  const userEmail = user.email;
   try {
-    const { error } = await supa()
+    const { data, error } = await supa()
       .from('user_profile')
       .upsert(
         { user_id: userId, onboarded_at: new Date().toISOString(), onboarding_step: 'done' },
         { onConflict: 'user_id' },
-      );
+      )
+      .select('*')
+      .single();
     if (error) throw new Error(error.message);
+
+    // Write final state to neurona — barrido completo, no incremental.
+    if (userEmail && data) {
+      void writeProfileToNeuron(userEmail, data as ProfileRow).catch((err) => {
+        logger.warn('onboarding.complete: neuron write-through failed', {
+          user_id: userId, error: (err as Error).message,
+        });
+      });
+    }
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
 });
+
+// ─── Profile → neurona renderer ──────────────────────────────────────
+//
+// Cada campo del user_profile se vuelca a su propio archivo bajo
+// /memories/perfil/*.md. Esto le da al user (vía UI de Mi memoria) una
+// vista de "carpeta perfil" con campos editables individualmente, y le
+// da a Lexa/Atlas/Centinela cuando aterrice Track A handles granulares
+// para escribir "agregale un tema más" sin pisar cargo/enfoque/partido.
+//
+// Path layout:
+//   /memories/perfil/identidad.md   — nombre + email + rol approval-time
+//   /memories/perfil/cargo.md       — qué hace en la Asamblea
+//   /memories/perfil/enfoque.md     — línea de trabajo
+//   /memories/perfil/temas.md       — lista de áreas de interés
+//   /memories/perfil/partido.md     — fracción / bloque (si aplica)
+//
+// La función borra el archivo si el campo está vacío — el user puede
+// limpiar campos durante el wizard sin que queden archivos huérfanos.
+interface ProfileRow {
+  user_id: string;
+  cargo: string | null;
+  enfoque: string | null;
+  temas: string[] | null;
+  partido: string | null;
+  onboarded_at: string | null;
+  onboarding_step: string | null;
+}
+
+async function writeProfileToNeuron(email: string, profile: ProfileRow): Promise<void> {
+  const writes: Array<Promise<unknown>> = [];
+
+  // Identidad (siempre se escribe)
+  writes.push(
+    writeNeuronFile(
+      email,
+      '/memories/perfil/identidad.md',
+      `# Identidad\n\n- **Email**: ${email}\n- **Estado del onboarding**: ${profile.onboarding_step ?? 'pendiente'}\n${profile.onboarded_at ? `- **Completado**: ${profile.onboarded_at.slice(0, 10)}\n` : ''}`,
+    ),
+  );
+
+  if (profile.cargo && profile.cargo.trim()) {
+    writes.push(
+      writeNeuronFile(
+        email,
+        '/memories/perfil/cargo.md',
+        `# Cargo\n\n${profile.cargo.trim()}\n`,
+      ),
+    );
+  }
+  if (profile.enfoque && profile.enfoque.trim()) {
+    writes.push(
+      writeNeuronFile(
+        email,
+        '/memories/perfil/enfoque.md',
+        `# Enfoque\n\n${profile.enfoque.trim()}\n`,
+      ),
+    );
+  }
+  if (profile.temas && profile.temas.length > 0) {
+    const list = profile.temas.map((t) => `- ${t}`).join('\n');
+    writes.push(
+      writeNeuronFile(
+        email,
+        '/memories/perfil/temas.md',
+        `# Temas de interés\n\n${list}\n`,
+      ),
+    );
+  }
+  if (profile.partido && profile.partido.trim()) {
+    writes.push(
+      writeNeuronFile(
+        email,
+        '/memories/perfil/partido.md',
+        `# Partido / fracción\n\n${profile.partido.trim()}\n`,
+      ),
+    );
+  }
+
+  await Promise.allSettled(writes);
+}
 
 // ── POST /api/onboarding/magic-help ────────────────────────────────────────
 //

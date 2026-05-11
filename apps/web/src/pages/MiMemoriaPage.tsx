@@ -1,16 +1,22 @@
 /**
- * Mi memoria — Track 0b
+ * Mi memoria — Track 0b (refined 2026-05-11)
  *
- * Página dedicada a que el usuario gestione su neurona personal:
- * lista de archivos, editor inline, borrado, audit history.
+ * Página de gestión manual de la neurona personal. Diseño:
+ *   - Las rutas crudas (`/memories/perfil/cargo.md`) NO se muestran al
+ *     user; el prefijo `/memories/` se oculta y los path components se
+ *     convierten en folders + título amigable.
+ *   - El flujo normal es que la neurona se llene sola (wizard
+ *     onboarding write-through + agentes durante chat post-Track A).
+ *     Esta página es fallback / power-user — el copy hero lo dice.
  *
- * Backend: 5 endpoints en `/api/neuron/*` que proxean a Cerebro
- * (apps/api/src/routes/neuron.ts). El user_id se deriva server-side
- * del JWT; el SPA no manda email — la página solo trabaja con "mis
- * archivos", nunca puede leer los de otro user.
+ * Backend: 5 endpoints `/api/neuron/*` (Cerebro proxy). user_id viene
+ * del JWT server-side — el SPA nunca elige whose memory leer.
  */
 import { useEffect, useMemo, useState, useCallback } from 'react';
-import { BookHeart, FilePlus, Save, Trash2, X, History, AlertCircle } from 'lucide-react';
+import {
+  BookHeart, ChevronDown, ChevronRight, FilePlus, Folder,
+  FolderOpen, History, Save, Trash2, X, AlertCircle,
+} from 'lucide-react';
 import {
   listMyMemory,
   readMyMemoryFile,
@@ -20,6 +26,8 @@ import {
   type NeuronFileMeta,
   type NeuronHistoryEntry,
 } from '@/services/neuronApi';
+
+// ─── Helpers ────────────────────────────────────────────────────────
 
 function bytesToKb(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -41,6 +49,71 @@ function relativeTime(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+const MEMORIES_PREFIX = '/memories/';
+
+/** Convierte un slug de path (ej. "cargo", "punto-medio") a título
+ *  amigable Title Case con espacios y acentos básicos preservados. */
+function slugToTitle(slug: string): string {
+  const cleaned = slug.replace(/\.(md|txt|json)$/i, '').replace(/-/g, ' ').replace(/_/g, ' ');
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+}
+
+/** Quita /memories/ del display path. Para mostrar al user. */
+function displayPath(raw: string): string {
+  return raw.startsWith(MEMORIES_PREFIX) ? raw.slice(MEMORIES_PREFIX.length) : raw;
+}
+
+/** Etiqueta para el último segmento de un path (el "nombre del archivo"). */
+function fileLabel(raw: string): string {
+  const tail = raw.split('/').pop() ?? raw;
+  return slugToTitle(tail);
+}
+
+/** Agrupa los archivos por su carpeta inmediata bajo /memories/.
+ *
+ * Ejemplos:
+ *   /memories/bienvenida.md            → grupo "" (root)
+ *   /memories/perfil/cargo.md          → grupo "perfil"
+ *   /memories/perfil/temas.md          → grupo "perfil"
+ *   /memories/clientes/acme/notes.md   → grupo "clientes" (deja "acme/notes" como subpath)
+ *
+ * Conservamos la lista plana al final con su grupo asignado — el
+ * tree-rendering completo (subfolders profundas) es overkill para v1;
+ * los users no anidan más de 2 niveles realistamente. */
+interface GroupedFile {
+  meta: NeuronFileMeta;
+  group: string; // "" para root, sino "perfil", "clientes", etc.
+  shortName: string; // último segmento sin extensión
+}
+function groupFiles(files: NeuronFileMeta[]): Map<string, GroupedFile[]> {
+  const groups = new Map<string, GroupedFile[]>();
+  for (const f of files) {
+    const rel = displayPath(f.path); // sin /memories/
+    const segments = rel.split('/').filter(Boolean);
+    const group = segments.length > 1 ? segments[0] : '';
+    const shortName = segments[segments.length - 1] ?? rel;
+    const entry: GroupedFile = { meta: f, group, shortName };
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group)!.push(entry);
+  }
+  // Sort entries within each group by updated_at desc
+  for (const arr of groups.values()) {
+    arr.sort((a, b) => b.meta.updated_at.localeCompare(a.meta.updated_at));
+  }
+  return groups;
+}
+
+/** Orden visual de grupos: root files primero, después orden alfabético. */
+function sortedGroupKeys(groups: Map<string, GroupedFile[]>): string[] {
+  const keys = Array.from(groups.keys());
+  keys.sort((a, b) => {
+    if (a === '' && b !== '') return -1;
+    if (b === '' && a !== '') return 1;
+    return a.localeCompare(b);
+  });
+  return keys;
 }
 
 interface OpenFile {
@@ -102,7 +175,8 @@ export function MiMemoriaPage() {
 
   const deleteOpenFile = useCallback(async () => {
     if (!open) return;
-    if (!window.confirm(`¿Borrar ${open.path}? Esta acción no se puede deshacer.`)) return;
+    const friendly = fileLabel(open.path);
+    if (!window.confirm(`¿Borrar "${friendly}"? Esta acción no se puede deshacer.`)) return;
     try {
       await deleteMyMemoryFile(open.path);
       setOpen(null);
@@ -113,17 +187,37 @@ export function MiMemoriaPage() {
   }, [open, refresh]);
 
   const createNew = useCallback(async () => {
+    // Prompt friendly: aceptamos un nombre simple O "carpeta/nombre" para
+    // crear el archivo dentro de una carpeta. NO se muestra "/memories/"
+    // — eso lo agregamos detrás. Esto preserva la metáfora de folders y
+    // evita que el user vea rutas crudas.
     const raw = window.prompt(
-      'Nombre del archivo (ej: notas-cliente-acme, ideas-q3). Se guarda bajo /memories/',
-      'nueva-nota',
+      'Nombre del recuerdo (ej: "preferencias", "clientes/acme", "proyectos/reforma fiscal")',
+      'nueva nota',
     );
     if (!raw) return;
-    const slug = raw.trim().replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
-    if (!slug) return;
-    const path = slug.startsWith('/memories/') ? slug : `/memories/${slug}.md`;
+    // Slugify cada segmento por separado para conservar el separador "/"
+    const slugified = raw
+      .trim()
+      .split('/')
+      .map((seg) =>
+        seg
+          .trim()
+          .toLowerCase()
+          .replace(/[áàä]/g, 'a').replace(/[éèë]/g, 'e').replace(/[íìï]/g, 'i')
+          .replace(/[óòö]/g, 'o').replace(/[úùü]/g, 'u').replace(/ñ/g, 'n')
+          .replace(/[^a-z0-9-]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 40),
+      )
+      .filter(Boolean)
+      .join('/');
+    if (!slugified) return;
+    const path = `/memories/${slugified}.md`;
+    const title = raw.split('/').pop()?.trim() || 'Nueva nota';
     setOpen({
       path,
-      content: `# ${slug.replace(/-/g, ' ')}\n\n`,
+      content: `# ${title}\n\n`,
       dirty: true,
       saving: false,
       error: null,
@@ -144,6 +238,17 @@ export function MiMemoriaPage() {
 
   const totalFiles = files?.length ?? 0;
   const quotaUsedPct = useMemo(() => Math.min(100, Math.round((totalBytes / quotaBytes) * 100)), [totalBytes, quotaBytes]);
+  const grouped = useMemo(() => groupFiles(files ?? []), [files]);
+  const groupKeys = useMemo(() => sortedGroupKeys(grouped), [grouped]);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const toggleGroup = useCallback((g: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(g)) next.delete(g);
+      else next.add(g);
+      return next;
+    });
+  }, []);
 
   return (
     <div className="min-h-screen bg-cl2-bg text-cl2-ink">
@@ -158,9 +263,10 @@ export function MiMemoriaPage() {
             Lo que <em className="text-cl2-burgundy">CL2</em> sabe sobre vos
           </h1>
           <p className="mt-4 max-w-2xl text-cl2-ink/70 text-[15px] leading-relaxed">
-            Esta es tu memoria personal — la usan Lexa, Atlas y Centinela
-            al inicio de cada conversación para adaptar sus respuestas.
-            Es privada: nadie más la ve. Editá libremente.
+            Tu memoria personal la van armando los agentes con cada
+            conversación. Esta vista es para casos excepcionales —
+            revisar qué saben, ajustar algo puntual, borrar. El flujo
+            normal es que la mantengan ellos.
           </p>
         </div>
       </header>
@@ -209,9 +315,9 @@ export function MiMemoriaPage() {
 
       {/* Body */}
       <main className="mx-auto max-w-6xl px-6 py-8 grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-6">
-        {/* List */}
+        {/* List — grouped by folder, no /memories/ prefix shown */}
         <aside>
-          <h2 className="text-[11px] uppercase tracking-wider text-cl2-ink/50 mb-3">Archivos</h2>
+          <h2 className="text-[11px] uppercase tracking-wider text-cl2-ink/50 mb-3">Tu memoria</h2>
           {loadError && (
             <div className="text-sm text-cl2-burgundy/90 bg-cl2-burgundy/8 border border-cl2-burgundy/20 rounded-md p-3 mb-3 flex items-start gap-2">
               <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
@@ -219,33 +325,88 @@ export function MiMemoriaPage() {
             </div>
           )}
           {files && files.length === 0 && !loadError && (
-            <div className="text-sm text-cl2-ink/50 italic">
-              Tu memoria está vacía. Creá una nota o esperá a que un admin
-              te apruebe (los templates se siembran solos).
+            <div className="text-sm text-cl2-ink/50 italic leading-relaxed">
+              Tu memoria está vacía. Si todavía no completaste el wizard
+              de bienvenida, los agentes la van a empezar a poblar ahí.
+              También podés crear una nota a mano con el botón "Nueva
+              nota" si querés agregar algo puntual.
             </div>
           )}
-          <ul className="space-y-1.5">
-            {(files ?? []).map((f) => {
-              const isOpen = open?.path === f.path;
+          <div className="space-y-3">
+            {groupKeys.map((g) => {
+              const items = grouped.get(g) ?? [];
+              const isRoot = g === '';
+              const collapsed = collapsedGroups.has(g);
+              if (isRoot) {
+                // Root files: render flat, no folder chrome
+                return (
+                  <ul key="__root" className="space-y-1.5">
+                    {items.map((entry) => {
+                      const isOpen = open?.path === entry.meta.path;
+                      return (
+                        <li key={entry.meta.path}>
+                          <button
+                            onClick={() => openFile(entry.meta.path)}
+                            className={`w-full text-left rounded-md px-3 py-2 transition-colors ${
+                              isOpen ? 'bg-cl2-burgundy/10 ring-1 ring-cl2-burgundy/30' : 'hover:bg-white/5'
+                            }`}
+                          >
+                            <div className="text-[13px] text-cl2-ink/90 truncate">
+                              {slugToTitle(entry.shortName)}
+                            </div>
+                            <div className="mt-0.5 text-[11px] text-cl2-ink/50">
+                              {bytesToKb(entry.meta.size_bytes)} · {relativeTime(entry.meta.updated_at)}
+                            </div>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                );
+              }
               return (
-                <li key={f.path}>
+                <div key={g} className="border border-white/5 rounded-md overflow-hidden">
                   <button
-                    onClick={() => openFile(f.path)}
-                    className={`w-full text-left rounded-md px-3 py-2.5 transition-colors ${
-                      isOpen
-                        ? 'bg-cl2-burgundy/10 ring-1 ring-cl2-burgundy/30'
-                        : 'hover:bg-white/5'
-                    }`}
+                    onClick={() => toggleGroup(g)}
+                    className="w-full px-3 py-2 flex items-center gap-2 text-[12px] uppercase tracking-wider text-cl2-ink/60 hover:bg-white/5 transition-colors"
                   >
-                    <div className="font-mono text-[12px] text-cl2-ink/90 truncate">{f.path}</div>
-                    <div className="mt-0.5 text-[11px] text-cl2-ink/50">
-                      {bytesToKb(f.size_bytes)} · {relativeTime(f.updated_at)}
-                    </div>
+                    {collapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                    {collapsed ? <Folder className="w-3.5 h-3.5" /> : <FolderOpen className="w-3.5 h-3.5" />}
+                    <span className="font-medium normal-case text-[13px] text-cl2-ink/85">
+                      {slugToTitle(g)}
+                    </span>
+                    <span className="ml-auto text-[11px] text-cl2-ink/45 normal-case">
+                      {items.length}
+                    </span>
                   </button>
-                </li>
+                  {!collapsed && (
+                    <ul className="border-t border-white/5 divide-y divide-white/5">
+                      {items.map((entry) => {
+                        const isOpen = open?.path === entry.meta.path;
+                        return (
+                          <li key={entry.meta.path}>
+                            <button
+                              onClick={() => openFile(entry.meta.path)}
+                              className={`w-full text-left px-3 py-2 pl-9 transition-colors ${
+                                isOpen ? 'bg-cl2-burgundy/10' : 'hover:bg-white/[0.03]'
+                              }`}
+                            >
+                              <div className="text-[13px] text-cl2-ink/90 truncate">
+                                {slugToTitle(entry.shortName)}
+                              </div>
+                              <div className="mt-0.5 text-[11px] text-cl2-ink/50">
+                                {bytesToKb(entry.meta.size_bytes)} · {relativeTime(entry.meta.updated_at)}
+                              </div>
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
               );
             })}
-          </ul>
+          </div>
         </aside>
 
         {/* Editor */}
@@ -257,7 +418,31 @@ export function MiMemoriaPage() {
           ) : (
             <div className="rounded-md bg-white/[0.02] border border-white/5 overflow-hidden">
               <div className="flex items-center justify-between px-4 py-3 border-b border-white/5">
-                <div className="font-mono text-[12px] text-cl2-ink/80 truncate">{open.path}</div>
+                <div className="flex items-center gap-2 min-w-0">
+                  {(() => {
+                    const rel = displayPath(open.path);
+                    const segs = rel.split('/').filter(Boolean);
+                    if (segs.length <= 1) {
+                      return (
+                        <span className="text-[14px] font-medium text-cl2-ink/90 truncate">
+                          {slugToTitle(segs[0] ?? rel)}
+                        </span>
+                      );
+                    }
+                    const last = segs.pop()!;
+                    return (
+                      <>
+                        <span className="text-[11px] text-cl2-ink/50 truncate">
+                          {segs.map(slugToTitle).join(' · ')}
+                        </span>
+                        <span className="text-cl2-ink/30">/</span>
+                        <span className="text-[14px] font-medium text-cl2-ink/90 truncate">
+                          {slugToTitle(last)}
+                        </span>
+                      </>
+                    );
+                  })()}
+                </div>
                 <div className="flex items-center gap-2">
                   <button
                     onClick={saveOpenFile}

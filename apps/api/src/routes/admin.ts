@@ -1007,18 +1007,19 @@ adminRouter.post('/users/:id/approve', async (req, res) => {
   }
 });
 
-// ─── Track 0a · neuron seed templates ─────────────────────────────────
-// Idempotente: re-aprobaciones sobreescriben templates. Si el user ya
-// editó /memories/perfil.md, lo sobreescribimos con la versión limpia
-// — es una decisión consciente: re-aprobar = reset templates. Como las
-// re-aprobaciones son raras (operador clickeando dos veces), no creo
-// que sea un problema real, y la alternativa (mergear / detectar edits)
-// agrega complejidad para un edge-case.
+// ─── Track 0a · neuron seed mínima ────────────────────────────────────
+// Diseño 2026-05-11 (feedback Jred): NO sembramos templates vacíos con
+// placeholders "_(editá esto)_" — eso obliga al user a ir a /mi-memoria
+// inmediatamente, justo lo contrario de lo que queremos. La neurona se
+// va llenando sola via:
+//   - Wizard onboarding (write-through en routes/onboarding.ts)
+//   - Track A (cuando aterrice, los agentes van a escribir desde chat)
 //
-// Templates escritos:
-//   /memories/perfil.md     — estructura editable de identidad
-//   /memories/preferencias.md — cómo quiere que los agentes le hablen
-//   /memories/bienvenida.md  — meta-explicación + link a /mi-memoria
+// Acá al aprobar solo dejamos UN archivo: bienvenida.md. Es meta —
+// explica qué es la memoria, qué hace el wizard, dónde está /mi-memoria
+// para casos excepcionales. No tiene placeholders editables.
+//
+// Idempotente: re-aprobar sobreescribe bienvenida con la fecha actualizada.
 async function seedNeuronTemplates(
   email: string,
   ctx: { full_name: string | null; role: string },
@@ -1026,67 +1027,23 @@ async function seedNeuronTemplates(
   const name = ctx.full_name?.trim() || email.split('@')[0];
   const fechaIso = new Date().toISOString().slice(0, 10);
 
-  const perfil = `# Perfil
+  const bienvenida = `# Bienvenida a CL2
 
-Vos sos el usuario. Estos son los datos básicos que CL2 va a usar para
-adaptar las respuestas de Lexa, Atlas y Centinela.
+Hola, ${name}. Te acabamos de aprobar como usuario (rol: ${ctx.role}).
 
-- **Nombre**: ${name}
-- **Email**: ${email}
-- **Rol en CL2**: ${ctx.role}
-- **Organización**: _(editá esto: para qué organización trabajás)_
-- **Cargo**: _(diputado, asesor, lobbyist, consultor independiente, etc.)_
-- **Áreas de foco**: _(ej: reforma fiscal, minería, fintech)_
-- **Clientes / fracción**: _(opcional)_
+**Tu memoria personal** vive acá. La van armando los agentes (Lexa,
+Atlas, Centinela) en base a las conversaciones que tengas con ellos y
+al wizard de onboarding que te aparece al entrar. No tenés que llenar
+nada a mano — entrá, conversá, y la memoria se enriquece sola.
 
-> Esta hoja la podés editar libremente desde /mi-memoria.
-> Los agentes la leen al inicio de cada conversación, así que mientras
-> más rico esté el perfil, más útiles son las respuestas.
+Si en algún momento querés revisar qué saben de vos o limpiar algo,
+está la página **Mi memoria** en el menú superior. Es para casos
+excepcionales — el flujo normal es que los agentes la mantengan.
 
 _Aprobado: ${fechaIso}_
 `;
 
-  const preferencias = `# Preferencias
-
-Cómo quiero que los agentes me hablen y entreguen información.
-
-- **Tono**: _(formal / cercano / mixto)_
-- **Longitud de respuesta**: _(breve / detallado / depende)_
-- **Estructura preferida**: _(prosa corrida / bullets / secciones con títulos)_
-- **Idioma**: _(es-CR / es-AR / es-ES / es-CO)_
-- **Análisis profundo**: _(¿cuándo querés que activen Deep Insight por default?)_
-
-> Estas preferencias se respetan en cada turno. Editá libremente.
-`;
-
-  const bienvenida = `# Bienvenida
-
-CL2 te acaba de aprobar como usuario (rol: ${ctx.role}).
-
-Esta carpeta \`/memories\` es **tu memoria personal**. Todo lo que viva
-acá lo ven los agentes Lexa, Atlas y Centinela en cada conversación,
-así que les sirve para no preguntarte siempre lo mismo y adaptar su
-tono a tu trabajo.
-
-Cosas que podés hacer desde /mi-memoria:
-
-- Editar el perfil con tu rol, foco temático, clientes
-- Definir preferencias (tono, longitud, idioma)
-- Subir un documento corto (max 50 KB) con contexto adicional
-- Borrar lo que no quieras que recuerden
-
-La memoria es privada — solo vos y los agentes con los que conversás la
-ven. No la comparte CL2 con otros usuarios.
-
-_Sembrado el ${fechaIso}._
-`;
-
-  // Disparamos las tres en paralelo. Si una falla, las otras siguen.
-  await Promise.allSettled([
-    writeNeuronFile(email, '/memories/perfil.md', perfil),
-    writeNeuronFile(email, '/memories/preferencias.md', preferencias),
-    writeNeuronFile(email, '/memories/bienvenida.md', bienvenida),
-  ]);
+  await writeNeuronFile(email, '/memories/bienvenida.md', bienvenida);
 }
 
 // ── POST /api/admin/users/:id/reject ─────────────────────────────────
