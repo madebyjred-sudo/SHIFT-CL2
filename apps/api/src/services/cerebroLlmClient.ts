@@ -66,10 +66,13 @@ export interface CerebroInvokeUsage {
 }
 
 export interface CerebroInvokeResponse {
-  /** Texto final del assistant (después del memory loop, si aplica). */
+  /** Texto final del assistant (después del memory loop, si aplica).
+   *  Cuando el LLM emite JSON con fences, este string los conserva. */
   text: string;
-  /** Alias de text — Cerebro devuelve ambos para compatibilidad. */
-  output: string;
+  /** Cerebro intenta parsear `text` como JSON. Si lo logra, `output` es
+   *  el objeto ya parseado; si no, `output` es el mismo string que
+   *  `text`. Preferí leer `output` antes de hacer JSON.parse manual. */
+  output: unknown;
   usage: CerebroInvokeUsage;
   latency_ms: number;
   call_id: string;

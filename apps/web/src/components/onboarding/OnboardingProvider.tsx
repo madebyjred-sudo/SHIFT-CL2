@@ -17,6 +17,7 @@ import {
 } from 'react';
 import { useOnboardingTour } from './useOnboardingTour';
 import { useRoute, navigate } from '@/lib/router';
+import { getProfile } from '@/services/onboardingApi';
 
 type OnboardingContextValue = {
   /** Manually start (or restart) the tour. */
@@ -57,24 +58,55 @@ export function OnboardingProvider({ children }: OnboardingProviderProps) {
   const triggeredRef = useRef(false);
 
   // Auto-play the tour on first authenticated visit to the chat surface.
-  // We wait a bit after mount so all the DOM elements (Lexa input, top dock)
-  // are present and laid out correctly before driver.js measures them.
+  // PRECEDENCE: el wizard (OnboardingGate → OnboardingWizard) tiene
+  // prioridad sobre el tour. Si el user todavía no completó el wizard
+  // (`onboarded_at == null`), no iniciamos el tour — quedan apilados
+  // sino y rompe la sensación premium. El tour arranca recién cuando
+  // el wizard cierre (sea por "Empezar" o por skip).
+  //
+  // Implementación: chequeamos el profile antes de programar el timer.
+  // Si onboarded_at sigue null al chequear, polleamos cada 2s hasta que
+  // se complete o el componente desmonte. Polling es barato (cacheado
+  // server-side + caller es 1 user).
   useEffect(() => {
     if (triggeredRef.current) return;
     if (tour.hasCompleted()) return;
 
     // Only auto-play on the main chat surface — not on /sesiones, /hojas, etc.
-    // The other pages have their own elements, but the welcome tour is rooted
-    // in the chat experience.
     if (path !== '/' && path !== '') return;
 
-    triggeredRef.current = true;
-    const timer = window.setTimeout(() => {
-      tour.start();
-    }, 900);
+    let cancelled = false;
+    let pollTimer: number | null = null;
+    let startTimer: number | null = null;
+
+    const tryStartIfReady = async () => {
+      if (cancelled || triggeredRef.current) return;
+      try {
+        const profile = await getProfile();
+        if (cancelled) return;
+        if (!profile.onboarded_at) {
+          // Wizard sigue abierto → reintentar en 2s
+          pollTimer = window.setTimeout(tryStartIfReady, 2000);
+          return;
+        }
+      } catch {
+        // Si el endpoint falla, asumimos que el wizard no aplica y
+        // arrancamos el tour de todos modos (mejor mostrar el tour que
+        // dejar al user sin onboarding).
+      }
+      if (cancelled || triggeredRef.current) return;
+      triggeredRef.current = true;
+      startTimer = window.setTimeout(() => {
+        tour.start();
+      }, 600);
+    };
+
+    void tryStartIfReady();
 
     return () => {
-      window.clearTimeout(timer);
+      cancelled = true;
+      if (pollTimer) window.clearTimeout(pollTimer);
+      if (startTimer) window.clearTimeout(startTimer);
     };
   }, [path, tour]);
 

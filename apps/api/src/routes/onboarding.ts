@@ -296,10 +296,12 @@ onboardingRouter.post('/magic-help', async (req, res) => {
 
   const systemPrompt = promptBuilder(context ?? {});
   try {
-    // Cerebro: enable_memory=true → si el user ya tiene contexto en su
-    // neurona (de turnos anteriores del onboarding o de chat) se inyecta
-    // automático. Y si el LLM detecta info persistible en la respuesta,
-    // la escribe back sin código del lado de CL2.
+    // Cerebro: NO enable_memory acá. Estos magic-help son disparos chicos
+    // que esperan JSON estructurado de vuelta — si activamos memory tool,
+    // el modelo gasta iteraciones leyendo `/memories` antes de producir el
+    // JSON y la respuesta final puede venir contaminada con texto sobre
+    // las consultas hechas. El user no se beneficia de memoria en una
+    // sugerencia "qué temas seguir" basada solo en su cargo recién dado.
     const resp = await cerebroInvoke({
       model: OR_MODEL,
       messages: [{ role: 'system', content: systemPrompt }],
@@ -307,13 +309,19 @@ onboardingRouter.post('/magic-help', async (req, res) => {
       temperature: 0.7,
       app_id: 'cl2',
       trace_label: `onboarding:magic-help:${key}`,
-      realm: 'cl2',
-      user_id: userEmail,
-      enable_memory: Boolean(userEmail),
     });
-    const raw = resp.text || '{}';
-    const stripped = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-    const parsed = JSON.parse(stripped) as { suggestion?: string; suggestions?: string[] };
+    // Cerebro intenta parsear `text` y devuelve `output` como object si
+    // funciona, string si no. Si `output` ya es objeto, listo. Si es
+    // string (LLM emitió fences markdown o prosa), reintentamos parseo.
+    const parsed = parseLlmJson<{ suggestion?: string; suggestions?: string[] }>(resp);
+    if (!parsed) {
+      logger.warn('onboarding_magic_help_unparseable', {
+        userId, key,
+        text_preview: (resp.text ?? '').slice(0, 200),
+      });
+      res.status(502).json({ ok: false, error: 'llm_response_unparseable' });
+      return;
+    }
     res.json({ ok: true, ...parsed });
   } catch (err) {
     logger.warn('onboarding_magic_help_failed', {
@@ -348,6 +356,8 @@ onboardingRouter.post('/suggest-watchlist', async (req, res) => {
     `entity_type es siempre "tema" en este endpoint (no proponemos números de expediente — el usuario los buscará después). entity_id puede ser igual al label.`;
 
   try {
+    // Mismo razonamiento que magic-help: enable_memory=false acá. El
+    // sistema espera JSON limpio, no iteraciones de memory tool.
     const resp = await cerebroInvoke({
       model: OR_MODEL,
       messages: [{ role: 'system', content: systemPrompt }],
@@ -355,15 +365,18 @@ onboardingRouter.post('/suggest-watchlist', async (req, res) => {
       temperature: 0.5,
       app_id: 'cl2',
       trace_label: 'onboarding:suggest-watchlist',
-      realm: 'cl2',
-      user_id: userEmail,
-      enable_memory: Boolean(userEmail),
     });
-    const raw = resp.text || '{}';
-    const stripped = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-    const parsed = JSON.parse(stripped) as {
+    const parsed = parseLlmJson<{
       suggestions?: Array<{ label: string; entity_type: string; entity_id: string; rationale: string }>;
-    };
+    }>(resp);
+    if (!parsed) {
+      logger.warn('onboarding_suggest_watchlist_unparseable', {
+        userId, text_preview: (resp.text ?? '').slice(0, 200),
+      });
+      res.status(502).json({ ok: false, error: 'llm_response_unparseable' });
+      return;
+    }
+    void userEmail; // disponible para futuras iteraciones, no usado acá
     res.json({ ok: true, suggestions: parsed.suggestions ?? [] });
   } catch (err) {
     logger.warn('onboarding_suggest_watchlist_failed', {
@@ -372,3 +385,29 @@ onboardingRouter.post('/suggest-watchlist', async (req, res) => {
     res.status(502).json({ ok: false, error: (err as Error).message });
   }
 });
+
+/**
+ * Parsea la respuesta del LLM que se espera JSON. Tres rutas:
+ *   1. `resp.output` ya es un objeto → devolverlo directo.
+ *   2. `resp.output` es string → intentar JSON.parse strippeando fences.
+ *   3. Fall back a `resp.text` con el mismo strip+parse.
+ * Devuelve null si nada parsea — el caller maneja como error.
+ */
+function parseLlmJson<T>(resp: { output?: unknown; text?: string }): T | null {
+  if (resp.output && typeof resp.output === 'object') {
+    return resp.output as T;
+  }
+  const candidates = [
+    typeof resp.output === 'string' ? resp.output : null,
+    resp.text ?? null,
+  ].filter((s): s is string => Boolean(s));
+  for (const raw of candidates) {
+    const stripped = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+    try {
+      return JSON.parse(stripped) as T;
+    } catch {
+      // siguiente intento
+    }
+  }
+  return null;
+}
