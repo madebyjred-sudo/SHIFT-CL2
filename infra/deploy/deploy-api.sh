@@ -87,7 +87,8 @@ gcloud run deploy "$SERVICE_NAME" \
   --set-env-vars "ASSET_GCS_BUCKET=shift-cl2-podcasts" \
   --set-env-vars "GEMINI_TRANSCRIPT_ENABLED=true" \
   --set-env-vars "YT_COOKIES_PATH=/secrets/youtube-cookies.txt" \
-  --set-env-vars "SHIFT_INTERNAL_TOKEN=$SHIFT_INTERNAL_TOKEN"
+  --set-env-vars "SHIFT_INTERNAL_TOKEN=$SHIFT_INTERNAL_TOKEN" \
+  --set-env-vars "CEREBRO_API_KEY=$CEREBRO_API_KEY"
 # IMPORTANTE: `gcloud run deploy --set-env-vars` REEMPLAZA todas las env vars
 # del revision. Cualquier env seteada vía `gcloud run services update` después
 # del último deploy se PIERDE en el próximo deploy. Por eso GEMINI_TRANSCRIPT_ENABLED

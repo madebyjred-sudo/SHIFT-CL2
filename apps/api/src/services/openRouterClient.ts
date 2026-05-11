@@ -71,7 +71,15 @@ interface StreamArgs {
  *  client sends an unbounded transcript. ~20 turns ≈ 10-20K tokens. */
 const MAX_HISTORY_MESSAGES = 20;
 
-const OR_BASE = 'https://openrouter.ai/api/v1';
+// Track B (2026-05-11): el chat principal sale por Cerebro
+// (`/v1/chat/completions`), no por OpenRouter directo. Cerebro hace
+// passthrough de las 12 tools (external dispatching SSE) + maneja el
+// memory tool internamente cuando enable_memory=true.
+//
+// El nombre `OR_BASE` y `openRouterStream` se mantienen — refactorear
+// nombres ahora multiplica el diff sin valor. Operativamente, "OpenRouter
+// directo" murió este día.
+const OR_BASE = (process.env.CEREBRO_BASE_URL ?? 'https://shift-cerebro-production.up.railway.app') + '/v1';
 
 // OpenAI tool-call schema for search_transcripts. OpenRouter passes through
 // to Anthropic's tool_use API. Wired only for agents whose YAML declares it.
@@ -546,8 +554,6 @@ async function orFetch(
         headers: {
           Authorization: `Bearer ${orKey}`,
           'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://agentescl2.com',
-          'X-Title': 'Shift CL2',
         },
         body: JSON.stringify(body),
         signal,
@@ -603,19 +609,34 @@ async function streamCompletion(
 }
 
 /**
- * Streams Lexa/Atlas/Centinela responses via OpenRouter.
+ * Streams Lexa/Atlas/Centinela responses via Cerebro `/v1/chat/completions`.
  *
- * If agent declares `search_transcripts` tool, runs a 2-pass loop:
- *   Pass 1 (non-stream): model decides whether to tool_call.
- *   If tool_call: execute searchTranscripts, emit citation events,
- *                 then Pass 2 (stream) with tool result in context.
- *   If no tool_call: stream Pass 1's text response directly.
+ * Track B landed 2026-05-11. Antes: fetch directo a OpenRouter. Ahora:
+ * Cerebro `feat/oai-compat` extendido. Beneficios:
+ *   - cerebro_llm_calls insert con cost + cache + latency per turn
+ *   - prompt-caching (cache_control) → ~80% cost reduction en system blocks
+ *     repetidos turno a turno
+ *   - memory tool auto-dispatch server-side cuando enable_memory=true +
+ *     realm + user_id. Las 13 tools posibles (12 mías + memory) se
+ *     clasifican en el adapter: memory → swallowed + ejecutado contra
+ *     /v1/neuron storage; otras → streameadas al caller para dispatch.
+ *     Lexa "recuerda" sin que CL2 toque UI ni dispatcher de memoria.
+ *   - cierre del bypass arquitectural (Cerebro vuelve a ser gateway real)
  *
- * Cerebro tool layer would replace this in the future, same SSE protocol.
+ * Si agent declara tools, runs 2-pass loop:
+ *   Pass 1 (non-stream): model decide tool_calls (mis tools)
+ *   Pass 2 (stream): final answer con tool results
+ * Sin tools: 1-pass stream directo.
  */
 export async function openRouterStream(args: StreamArgs): Promise<void> {
-  const orKey = process.env.OPENROUTER_API_KEY ?? '';
-  if (!orKey) throw new Error('OPENROUTER_API_KEY not set');
+  // Track B: Bearer key es la de Cerebro (entregada con feat/oai-compat).
+  // Fallback a OPENROUTER_API_KEY mientras drainamos el rollout — si en
+  // alguna revisión el env de Cerebro no está seteado, podemos seguir
+  // funcionando contra OpenRouter directo (sin memory ni cost logging,
+  // pero el chat responde). Eliminamos el fallback en un commit
+  // siguiente cuando el smoke esté verde 24h.
+  const orKey = process.env.CEREBRO_API_KEY ?? process.env.OPENROUTER_API_KEY ?? '';
+  if (!orKey) throw new Error('CEREBRO_API_KEY not set');
 
   const agent = getAgent(args.agent_id);
   if (!agent) throw new Error(`unknown agent: ${args.agent_id}`);
@@ -634,6 +655,24 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     .filter((m) => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.trim().length > 0)
     .slice(-MAX_HISTORY_MESSAGES)
     .map((m) => ({ role: m.role, content: m.content }));
+
+  // Cerebro-specific body extras (Track B 2026-05-11). Estos campos los
+  // entiende `feat/oai-compat` y son los que disparan:
+  //   - cerebro_llm_calls insert con cost + cache + latency
+  //   - memory tool inyectado al loop server-side cuando user_email existe
+  //   - cache_control hint pasa intacto a Anthropic
+  // Si el user es anónimo (public demo) NO mandamos user_id ni enable_memory
+  // — Cerebro acepta requests sin memoria, y el adapter NO requiere realm
+  // cuando memoria está off.
+  const userEmail = args.user_email ?? null;
+  const cerebroExtras = {
+    tenant: 'cl2',
+    app_id: 'cl2',
+    trace_label: `cl2:chat:${args.agent_id}${args.deep_insight ? ':di' : ''}`,
+    ...(userEmail
+      ? { realm: 'cl2', user_id: userEmail, enable_memory: true }
+      : {}),
+  };
 
   // Build the system prompt with Deep Insight semantics applied per agent.
   // When DI is on, each agent's YAML may define a `deep_insight.prompt_addendum`
@@ -733,7 +772,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
 
   if (tools.length === 0) {
     await streamCompletion(
-      { model, messages, max_tokens: 2000 },
+      { model, messages, max_tokens: 2048, ...cerebroExtras },
       orKey,
       (t) => args.onChunk({ type: 'token', payload: t }),
     );
@@ -750,7 +789,8 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
           messages,
           tools,
           tool_choice: 'auto',
-          max_tokens: 2000,
+          max_tokens: 2048,
+          ...cerebroExtras,
         },
         orKey,
         { timeoutMs: OR_PASS1_TIMEOUT_MS, label: 'openrouter pass1' },
@@ -1978,7 +2018,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // because retrieval-grounded answers should not be creative — they should
   // restate evidence with citations, not synthesize.
   await streamCompletion(
-    { model, messages, max_tokens: 2000, temperature: 0.2 },
+    { model, messages, max_tokens: 2048, temperature: 0.2, ...cerebroExtras },
     orKey,
     (t) => args.onChunk({ type: 'token', payload: t }),
   );
