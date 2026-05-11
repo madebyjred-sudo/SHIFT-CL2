@@ -107,6 +107,7 @@ export type AdminSection =
   | 'podcasts'
   | 'usuarios'
   | 'auditoria'
+  | 'feedback'
   | 'config';
 
 const ADMIN_SECTIONS: ReadonlyArray<AdminSection> = [
@@ -120,6 +121,7 @@ const ADMIN_SECTIONS: ReadonlyArray<AdminSection> = [
   'podcasts',
   'usuarios',
   'auditoria',
+  'feedback',
   'config',
 ];
 

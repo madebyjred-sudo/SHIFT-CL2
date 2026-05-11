@@ -7,6 +7,7 @@ import { ThemeProvider } from './lib/theme-context';
 import { ErrorBoundary } from './components/error-boundary';
 import { OnboardingProvider } from './components/onboarding/OnboardingProvider';
 import { OnboardingGate } from './components/onboarding/OnboardingGate';
+import { FeedbackWidget } from './components/FeedbackWidget';
 import { SupabaseAuthView } from './components/SupabaseAuthView';
 import { AuthCallback } from './components/AuthCallback';
 import { AccessGate } from './components/access/AccessGate';
@@ -100,6 +101,7 @@ export default function App() {
         <ChatProvider>
           <OnboardingProvider>
           <OnboardingGate />
+          <FeedbackWidget />
           {path === '/sesiones/subir' ? (
             <SubirSesionPage />
           ) : path === '/sesiones' ? (

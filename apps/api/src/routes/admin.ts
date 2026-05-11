@@ -16,6 +16,7 @@ import { getOverride, loadOverrides, setOverride } from '../services/agentOverri
 import { loadFlags, setFlag } from '../services/featureFlags.js';
 import { logger } from '../services/logger.js';
 import { writeNeuronFile } from '../services/cerebroNeuron.js';
+import { adminFeedbackRouter } from './feedback.js';
 import { listTranscripciones, type LegacyTranscripcion } from '../services/legacyCl2Client.js';
 
 const adminRouter = Router();
@@ -69,6 +70,11 @@ adminRouter.use(async (req, res, next) => {
     res.status(500).json({ ok: false, error: 'admin_guard_error' });
   }
 });
+
+// Bandeja de feedback (bugs/preguntas/ideas) — endpoints separados en
+// routes/feedback.ts pero montados acá adentro para heredar el role
+// guard de admin/operador.
+adminRouter.use('/feedback', adminFeedbackRouter);
 
 interface MockedResponse<T> {
   ok: true;

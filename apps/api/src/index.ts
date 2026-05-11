@@ -52,6 +52,7 @@ import { centinelaAdminRouter, centinelaInternalRouter, centinelaUserRouter } fr
 import { onboardingRouter } from './routes/onboarding.js';
 import { neuronRouter } from './routes/neuron.js';
 import { clientesRouter } from './routes/clientes.js';
+import { feedbackRouter } from './routes/feedback.js';
 import { requestContext } from './middleware/requestContext.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { logger } from './services/logger.js';
@@ -159,6 +160,17 @@ app.use(
   rateLimit({ bucket: 'clientes', max: 120, windowMs: 60_000 }),
   clientesRouter,
 );
+app.use(
+  // /api/feedback — bandeja de bugs/preguntas/ideas. POST con multipart
+  // para screenshots; cap por minuto bajo porque cada reporte es un
+  // intentional action, no polling.
+  '/api/feedback',
+  rateLimit({ bucket: 'feedback', max: 20, windowMs: 60_000 }),
+  feedbackRouter,
+);
+// Admin feedback inbox se monta DENTRO del adminRouter (admin.ts mount
+// abajo) para heredar el role guard. Ver el `adminRouter.use('/feedback', …)`
+// en routes/admin.ts.
 app.use(
   // Chat history — sidebar hydration + multi-device read across the
   // user's persisted conversations. Read-heavy, low write volume.

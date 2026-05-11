@@ -26,6 +26,7 @@ import {
   Radio,
   Folder,
   Headphones,
+  MessageSquareWarning,
   Users,
   ScrollText,
   Settings2,
@@ -44,18 +45,22 @@ interface NavItem {
   group: 'Operación' | 'Contenido' | 'Acceso & sistema';
 }
 
+// Limpieza 2026-05-10 (post-audit):
+//   • Eliminados del rail:
+//       - 'transcripciones' (legacy CL2 worker MariaDB — duplicado, data muerta)
+//       - 'curaduria' (PuntoMedio — Cerebro Railway 404, sección zombie)
+//       - 'config' (modelos duplican Agentes, rate limits hardcoded, build info vacío)
+//   • Lo que queda son las 8 secciones con data real y CTAs funcionales.
 const NAV: ReadonlyArray<NavItem> = [
   { id: 'overview',        label: 'Vista general',       icon: LayoutDashboard, group: 'Operación' },
-  { id: 'transcripciones', label: 'Transcripciones',     icon: FileAudio,       group: 'Operación' },
-  { id: 'transcripts',     label: 'Pipeline YouTube',    icon: Youtube,         group: 'Operación' },
+  { id: 'transcripts',     label: 'Cola de revisión',    icon: Youtube,         group: 'Operación' },
   { id: 'agentes',         label: 'Agentes',             icon: Bot,             group: 'Operación' },
-  { id: 'curaduria',       label: 'Curaduría',           icon: ShieldCheck,     group: 'Operación' },
+  { id: 'feedback',        label: 'Feedback · Bugs',     icon: MessageSquareWarning, group: 'Operación' },
   { id: 'sesiones',        label: 'Sesiones plenarias',  icon: Radio,           group: 'Contenido' },
   { id: 'expedientes',     label: 'Expedientes SIL',     icon: Folder,          group: 'Contenido' },
   { id: 'podcasts',        label: 'Podcasts',            icon: Headphones,      group: 'Contenido' },
   { id: 'usuarios',        label: 'Usuarios',            icon: Users,           group: 'Acceso & sistema' },
   { id: 'auditoria',       label: 'Auditoría',           icon: ScrollText,      group: 'Acceso & sistema' },
-  { id: 'config',          label: 'Configuración',       icon: Settings2,       group: 'Acceso & sistema' },
 ];
 
 interface AdminShellProps {

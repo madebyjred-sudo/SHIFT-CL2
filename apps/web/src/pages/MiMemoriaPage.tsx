@@ -15,7 +15,8 @@
 import { useEffect, useMemo, useState, useCallback, type DragEvent } from 'react';
 import {
   BookHeart, ChevronDown, ChevronRight, FilePlus, Folder,
-  FolderOpen, FolderPlus, History, MoveRight, Save, Trash2, X, AlertCircle,
+  FolderOpen, FolderPlus, History, Loader2, MoveRight, Plus, Save,
+  Trash2, Users, X, AlertCircle,
 } from 'lucide-react';
 import {
   listMyMemory,
@@ -26,6 +27,7 @@ import {
   type NeuronFileMeta,
   type NeuronHistoryEntry,
 } from '@/services/neuronApi';
+import { createCliente } from '@/services/clientesApi';
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -344,6 +346,11 @@ export function MiMemoriaPage() {
   // Drag & drop state — el path del file en arrastre + folder bajo cursor.
   const [draggingPath, setDraggingPath] = useState<string | null>(null);
   const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
+
+  // Cliente create modal — atajo en la carpeta "clientes" para sumar
+  // un cliente sin volver al wizard de onboarding. La creación persiste
+  // en cl2_clients Y sincroniza /memories/clientes/<slug>.md.
+  const [clienteModalOpen, setClienteModalOpen] = useState(false);
 
   const openCreatePicker = useCallback(() => {
     setPickerInitialFolder('');
@@ -705,24 +712,50 @@ export function MiMemoriaPage() {
                           </li>
                         );
                       })}
+                      {/* Atajo especial cuando la carpeta es "clientes" —
+                          la creación pasa por /api/clientes (no por neuron
+                          directo) para que la tabla relacional quede
+                          alineada con el archivo de memoria. */}
+                      {g === 'clientes' && (
+                        <li>
+                          <button
+                            onClick={() => setClienteModalOpen(true)}
+                            className="w-full text-left px-3 py-2 pl-9 flex items-center gap-2 text-[12px] text-cl2-burgundy hover:bg-cl2-burgundy/8 transition-colors"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            Agregar cliente
+                          </button>
+                        </li>
+                      )}
                     </ul>
                   )}
                 </div>
               );
             })}
 
-            {/* "Nueva carpeta" CTA al final de la lista — atajo visual para
-                users que entendieron la metáfora. Abre el mismo picker;
-                el user elige "Nueva carpeta…" desde el dropdown ahí. */}
-            {existingFolders.length > 0 && (
+            {/* Atajos al pie de la lista. "+ Agregar cliente" siempre
+                visible (los users que aún no tienen ninguno también lo
+                necesitan); "Nueva carpeta" oculto si no hay carpetas
+                todavía (sólo es útil para users que entendieron el
+                paradigma). */}
+            <div className="mt-2 space-y-1">
               <button
-                onClick={openCreatePicker}
-                className="w-full mt-2 px-3 py-2 flex items-center gap-2 text-[12px] text-cl2-ink/50 hover:text-cl2-ink/80 hover:bg-white/[0.03] rounded-md transition-colors"
+                onClick={() => setClienteModalOpen(true)}
+                className="w-full px-3 py-2 flex items-center gap-2 text-[12px] text-cl2-burgundy hover:bg-cl2-burgundy/8 rounded-md transition-colors"
               >
-                <FolderPlus className="w-3.5 h-3.5" />
-                Nueva nota en carpeta nueva…
+                <Users className="w-3.5 h-3.5" />
+                Agregar cliente
               </button>
-            )}
+              {existingFolders.length > 0 && (
+                <button
+                  onClick={openCreatePicker}
+                  className="w-full px-3 py-2 flex items-center gap-2 text-[12px] text-cl2-ink/50 hover:text-cl2-ink/80 hover:bg-white/[0.03] rounded-md transition-colors"
+                >
+                  <FolderPlus className="w-3.5 h-3.5" />
+                  Nueva nota en carpeta nueva…
+                </button>
+              )}
+            </div>
           </div>
         </aside>
 
@@ -812,6 +845,20 @@ export function MiMemoriaPage() {
         </section>
       </main>
 
+      {/* Cliente create modal — atajo desde la carpeta /memories/clientes/.
+          Crea row en cl2_clients y sincroniza el archivo de memoria.
+          Después de crear, refresh trae el archivo nuevo a la lista. */}
+      <ClienteCreateModal
+        open={clienteModalOpen}
+        onCancel={() => setClienteModalOpen(false)}
+        onCreated={async () => {
+          setClienteModalOpen(false);
+          // Pequeño delay: el sync a neurona es fire-and-forget, dejamos
+          // un tick para que la escritura propague antes del re-list.
+          setTimeout(() => { void refresh(); }, 500);
+        }}
+      />
+
       {/* PathPicker modal — usado para crear note y para mover */}
       <PathPickerModal
         open={pickerMode !== null}
@@ -867,6 +914,128 @@ export function MiMemoriaPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── ClienteCreateModal ───────────────────────────────────────────────
+// Versión liviana del form que vive en el wizard de onboarding. No
+// expone paste-from-LLM acá (vive en el wizard) — para casos donde el
+// user quiere brief detallado puede ir al wizard via reset onboarding.
+// El 90% de los users con un cliente extra rápido lo cargan acá con
+// 1-2 oraciones en el brief.
+function ClienteCreateModal({
+  open, onCancel, onCreated,
+}: {
+  open: boolean;
+  onCancel: () => void;
+  onCreated: () => void;
+}) {
+  const [label, setLabel] = useState('');
+  const [sector, setSector] = useState('');
+  const [description, setDescription] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      setLabel(''); setSector(''); setDescription('');
+      setBusy(false); setError(null);
+    }
+  }, [open]);
+
+  if (!open) return null;
+
+  const submit = async () => {
+    if (!label.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await createCliente({
+        label: label.trim(),
+        sector: sector.trim() || undefined,
+        description: description.trim() || undefined,
+      });
+      onCreated();
+    } catch (err) {
+      setError((err as Error).message);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6">
+      <div className="bg-cl2-bg border border-white/10 rounded-md w-full max-w-md overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-white/5">
+          <h3 className="font-display text-lg flex items-center gap-2">
+            <Users className="w-4 h-4 text-cl2-burgundy" />
+            Agregar cliente
+          </h3>
+          <button onClick={onCancel} className="text-cl2-ink/60 hover:text-cl2-ink">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <div>
+            <label className="block text-[11px] uppercase tracking-wider text-cl2-ink/50 mb-1.5">
+              Nombre del cliente
+            </label>
+            <input
+              type="text"
+              autoFocus
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              placeholder="Acme S.A. · Cámara de Hoteleros · Garnier & Asociados…"
+              className="w-full px-3 py-2 bg-white/[0.03] border border-white/10 rounded-md text-[13px] text-cl2-ink focus:outline-none focus:border-cl2-burgundy/50 focus:bg-white/[0.05]"
+            />
+          </div>
+          <div>
+            <label className="block text-[11px] uppercase tracking-wider text-cl2-ink/50 mb-1.5">
+              Sector (opcional)
+            </label>
+            <input
+              type="text"
+              value={sector}
+              onChange={(e) => setSector(e.target.value)}
+              placeholder="Fintech · Infraestructura · Turismo · Salud…"
+              className="w-full px-3 py-2 bg-white/[0.03] border border-white/10 rounded-md text-[13px] text-cl2-ink focus:outline-none focus:border-cl2-burgundy/50"
+            />
+          </div>
+          <div>
+            <label className="block text-[11px] uppercase tracking-wider text-cl2-ink/50 mb-1.5">
+              Brief (opcional)
+            </label>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={4}
+              placeholder="Qué hacen, qué les importa, qué expedientes típicamente les interesan…"
+              className="w-full px-3 py-2 bg-white/[0.03] border border-white/10 rounded-md text-[12.5px] text-cl2-ink placeholder:text-cl2-ink/30 resize-none focus:outline-none focus:border-cl2-burgundy/50"
+            />
+          </div>
+          {error && (
+            <div className="text-[11.5px] text-cl2-burgundy/90 bg-cl2-burgundy/8 border border-cl2-burgundy/20 rounded-md p-2">
+              {error}
+            </div>
+          )}
+        </div>
+        <div className="flex justify-end gap-2 px-5 py-3 border-t border-white/5 bg-white/[0.01]">
+          <button
+            onClick={onCancel}
+            className="px-3 py-1.5 text-[12px] rounded-md text-cl2-ink/70 hover:text-cl2-ink hover:bg-white/5 transition-colors"
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={submit}
+            disabled={!label.trim() || busy}
+            className="flex items-center gap-1.5 px-4 py-1.5 text-[12px] rounded-md bg-cl2-burgundy text-white disabled:opacity-40 hover:bg-cl2-burgundy/90 transition-colors"
+          >
+            {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+            Crear cliente
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

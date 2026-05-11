@@ -11,60 +11,75 @@
 import { useEffect, useState } from 'react';
 import { matchAdminSection, matchTranscriptDetailId, navigate, useRoute, type AdminSection } from '@/lib/router';
 import { AdminShell } from './AdminShell';
+import { useAccess, canAccessAdmin } from '@/components/access/AccessContext';
+import { AdminDeniedScreen } from './AdminDeniedScreen';
 import { ToastProvider } from './Toast';
 import { OverviewSection } from './sections/OverviewSection';
-import { TranscripcionesSection } from './sections/TranscripcionesSection';
 import { TranscriptsSection } from './sections/TranscriptsSection';
 import { TranscriptDetailSection } from './sections/TranscriptDetailSection';
 import { AgentesSection } from './sections/AgentesSection';
-import { PuntoMedioSection } from './sections/PuntoMedioSection';
 import { SesionesSection } from './sections/SesionesSection';
 import { ExpedientesSection } from './sections/ExpedientesSection';
 import { PodcastsSection } from './sections/PodcastsSection';
 import { UsuariosSection } from './sections/UsuariosSection';
 import { AuditoriaSection } from './sections/AuditoriaSection';
-import { ConfigSection } from './sections/ConfigSection';
-import { fetchTranscripciones } from '@/services/adminApi';
-import { fetchPending } from '@/services/puntoMedioApi';
+import { FeedbackSection } from './sections/FeedbackSection';
+// Eliminados (post-audit 2026-05-10): TranscripcionesSection (duplica),
+// PuntoMedioSection (Cerebro 404), ConfigSection (decoración).
+// Si llega un usuario a /admin/transcripciones, /admin/curaduria, /admin/config,
+// los redirigimos a /admin/overview en lugar de mostrar 404.
 import { listTranscriptSessions } from '@/services/transcriptsAdminApi';
 
 interface AdminAppProps {
   section: AdminSection;
 }
 
+// Secciones eliminadas del rail tras audit 2026-05-10. Si alguien llega
+// por URL directa, los redirigimos a /admin/overview.
+const REMOVED_SECTIONS: ReadonlyArray<AdminSection> = ['transcripciones', 'curaduria', 'config'];
+
 export function AdminApp({ section }: AdminAppProps): React.ReactElement {
   const [badges, setBadges] = useState<Partial<Record<AdminSection, number>>>({});
   const path = useRoute();
+  const access = useAccess();
+
+  // ── Role gate ──────────────────────────────────────────────────────
+  // Solo admin + operador acceden al panel. Lectores y editores aprobados
+  // entran a la app principal pero NO ven el admin. Esto evita que el
+  // equipo del cliente (aprobados como 'lector') puedan aprobar a otros,
+  // ver auditoría o tocar configuración. El gate real vive en el backend
+  // (admin.ts middleware); esto es la capa de UX para que no aparezca un
+  // menú que igual les iba a tirar 403.
+  if (!canAccessAdmin(access.role)) {
+    return <AdminDeniedScreen role={access.role} />;
+  }
+
+  // Redirect away from removed sections — la migración suave evita 404
+  // para usuarios con bookmarks o URLs pegados de antes de la limpieza.
+  useEffect(() => {
+    if (REMOVED_SECTIONS.includes(section)) {
+      navigate('/admin/overview', { replace: true });
+    }
+  }, [section]);
 
   // Determine if we're drilling into a specific transcript session
   const transcriptDetailId = section === 'transcripts' ? matchTranscriptDetailId(path) : null;
 
-  // Lightweight badge loader so the sidebar shows fresh counts on every
-  // section change. These calls are dirt cheap (json fetch, ~150ms each)
-  // and the data is the same the OverviewSection would have fetched
-  // anyway — duplicate but worth the redundancy for the always-visible
-  // sidebar signal.
+  // Badge loader — solo para la sección que sí existe (transcripts).
+  // Antes había badges para `transcripciones` y `curaduria` también, pero
+  // esas secciones quedaron eliminadas del rail.
   useEffect(() => {
     let alive = true;
-    Promise.allSettled([fetchTranscripciones(), fetchPending(), listTranscriptSessions({ limit: 200 })])
-      .then(([trans, punto, transcripts]) => {
+    listTranscriptSessions({ limit: 200 })
+      .then((transcripts) => {
         if (!alive) return;
-        const next: Partial<Record<AdminSection, number>> = {};
-        if (trans.status === 'fulfilled') {
-          next.transcripciones = trans.value.data.counts.pending;
-        }
-        if (punto.status === 'fulfilled') {
-          next['curaduria'] =
-            punto.value.pending_consolidations_count + punto.value.pending_patterns_count;
-        }
-        if (transcripts.status === 'fulfilled') {
-          // Badge = sessions with at least one pending correction
-          const pendingSessions = transcripts.value.sessions.filter(
-            (s) => s.corrections_pending > 0,
-          ).length;
-          if (pendingSessions > 0) next['transcripts'] = pendingSessions;
-        }
-        setBadges(next);
+        const pendingSessions = transcripts.sessions.filter(
+          (s) => s.corrections_pending > 0,
+        ).length;
+        setBadges(pendingSessions > 0 ? { transcripts: pendingSessions } : {});
+      })
+      .catch(() => {
+        if (alive) setBadges({});
       });
     return () => {
       alive = false;
@@ -75,19 +90,17 @@ export function AdminApp({ section }: AdminAppProps): React.ReactElement {
     <ToastProvider>
       <AdminShell active={section} badges={badges}>
         {section === 'overview' && <OverviewSection />}
-        {section === 'transcripciones' && <TranscripcionesSection />}
         {section === 'transcripts' && !transcriptDetailId && <TranscriptsSection />}
         {section === 'transcripts' && transcriptDetailId && (
           <TranscriptDetailSection sessionId={transcriptDetailId} />
         )}
         {section === 'agentes' && <AgentesSection />}
-        {section === 'curaduria' && <PuntoMedioSection />}
         {section === 'sesiones' && <SesionesSection />}
         {section === 'expedientes' && <ExpedientesSection />}
         {section === 'podcasts' && <PodcastsSection />}
         {section === 'usuarios' && <UsuariosSection />}
         {section === 'auditoria' && <AuditoriaSection />}
-        {section === 'config' && <ConfigSection />}
+        {section === 'feedback' && <FeedbackSection />}
       </AdminShell>
     </ToastProvider>
   );
