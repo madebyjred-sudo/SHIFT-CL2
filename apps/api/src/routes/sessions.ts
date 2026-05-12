@@ -16,6 +16,7 @@
  * iterations on a phone.
  */
 import { Router, type Request, type Response } from 'express';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { getUserIdFromRequest } from '../services/auth.js';
 import {
   listTranscripciones,
@@ -26,6 +27,36 @@ import {
 } from '../services/legacyCl2Client.js';
 
 export const sessionsRouter = Router();
+
+// Supabase singleton (lazy). Las sesiones nuevas del pipeline YouTube viven
+// en la tabla `sessions` de Supabase; las viejas (pre-mayo 2026) en MariaDB
+// legacy via legacyCl2Client. Este endpoint mergea ambas fuentes para que
+// el operador y el equipo vean todo en /sesiones y /admin/sesiones.
+let _supa: SupabaseClient | null = null;
+function supa(): SupabaseClient {
+  if (_supa) return _supa;
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) throw new Error('supabase env missing for sessions router');
+  _supa = createClient(url, key, { auth: { persistSession: false } });
+  return _supa;
+}
+
+// ── Status → estado int mapping ───────────────────────────────────────────
+// El frontend legacy usa estado:int (0=cola, 1=procesando, 2=indexada,
+// 3=archivada, 4=sensible). Las sesiones nuevas usan status:text. Esta
+// función traduce. Mantener sync con ESTADO_MAP en SesionesSection.tsx.
+function statusToEstado(status: string): number {
+  switch (status) {
+    case 'indexed':         return 2; // visible al equipo
+    case 'pending_review':  return 1; // procesando (cola operador)
+    case 'processing':      return 1;
+    case 'pending':         return 0; // en cola
+    case 'transcript_not_ready': return 0;
+    case 'error':           return 4; // sensible
+    default:                return 0;
+  }
+}
 
 async function requireUser(req: Request, res: Response): Promise<string | null> {
   const userId = await getUserIdFromRequest(req);
@@ -122,29 +153,187 @@ sessionsRouter.get('/', async (req, res) => {
   const limit = Math.min(Number(req.query.limit ?? 200) || 200, 500);
   const offset = Math.max(Number(req.query.offset ?? 0) || 0, 0);
 
+  // ── Filtros opcionales ───────────────────────────────────────────────
+  // type=plenario        → solo plenarias/comisiones largas (≥30min de transcript)
+  //                        Excluye clips de prensa, entrevistas y shorts.
+  // include_pending=true → incluye sesiones en pending_review (default: solo
+  //                        las visibles al equipo, status=indexed). El admin
+  //                        usa esto si quiere ver TODO; el feed público nunca.
+  // Default sin params: solo indexed + sin filtro de duración (backward compat
+  // para los call-sites legacy que no conocen estos params).
+  const filterType = (req.query.type as string | undefined) ?? null;
+  const includePending = req.query.include_pending === 'true';
+  const MIN_PLENARIO_SECONDS = 1800; // 30 min — corta entrevistas/clips/shorts
+
   if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
     res.status(400).json({ ok: false, error: 'bad_date_range' });
     return;
   }
 
   try {
-    const rows = await listTranscripciones({ fecha_inicio: from, fecha_fin: to, limit, offset });
-    res.json({ ok: true, sessions: rows.map(shapeListItem) });
+    // 1) Legacy MariaDB rows (sesiones pre-mayo 2026 + cualquier upload manual).
+    //    Si falla la query legacy seguimos con las nuevas — no bloqueamos el
+    //    feed completo por un timeout del sistema viejo.
+    let legacyShape: ReturnType<typeof shapeListItem>[] = [];
+    try {
+      const legacyRows = await listTranscripciones({ fecha_inicio: from, fecha_fin: to, limit, offset });
+      legacyShape = legacyRows.map(shapeListItem);
+    } catch (err) {
+      req.log.warn('sessions_legacy_query_failed_continuing', {
+        error: (err as Error).message,
+        from,
+        to,
+      });
+    }
+
+    // 2) Supabase sessions nuevas (pipeline YouTube post-mayo 2026).
+    //    Por default solo 'indexed' (ya aprobadas por el operador, visibles
+    //    al equipo). Con include_pending=true el admin ve también las que
+    //    están en cola de revisión. La cola pura vive en /admin/transcripts,
+    //    así que este endpoint queda enfocado en lo PUBLICADO.
+    const statusesToQuery = includePending
+      ? ['indexed', 'pending_review', 'processing', 'pending', 'transcript_not_ready']
+      : ['indexed'];
+
+    const { data: supaRows, error: supaErr } = await supa()
+      .from('sessions')
+      .select('id, youtube_video_id, fecha, status, metadata, created_at')
+      .gte('fecha', from)
+      .lte('fecha', to)
+      .in('status', statusesToQuery)
+      .order('fecha', { ascending: false, nullsFirst: false })
+      .limit(500);
+
+    if (supaErr) {
+      req.log.warn('sessions_supabase_query_failed_continuing', { error: supaErr.message });
+    }
+
+    type SupaSessionRow = {
+      id: string;
+      youtube_video_id: string | null;
+      fecha: string | null;
+      status: string;
+      metadata: Record<string, unknown> | null;
+      created_at: string;
+    };
+
+    const newShape = ((supaRows ?? []) as SupaSessionRow[]).map((s) => {
+      const meta = (s.metadata ?? {}) as { raw_title?: string; sesion_label?: string; duration_seconds?: number };
+      const title = meta.raw_title || meta.sesion_label || `Sesión ${s.youtube_video_id ?? s.id.slice(0, 8)}`;
+      return {
+        id: s.id, // uuid string — el frontend lo trata como id genérico
+        titulo: title,
+        youtube_url: s.youtube_video_id ? `https://www.youtube.com/watch?v=${s.youtube_video_id}` : null,
+        youtube_id: s.youtube_video_id,
+        fecha: s.fecha ?? s.created_at.slice(0, 10),
+        duration_s: typeof meta.duration_seconds === 'number' ? meta.duration_seconds : 0,
+        estado: statusToEstado(s.status),
+        has_resumen: false, // las sesiones nuevas aún no tienen resumen estructurado
+      };
+    });
+
+    // 3) Dedupe: si una sesión está tanto en legacy como en Supabase nueva,
+    //    privilegiamos la nueva (más fresca, con metadata correcta).
+    const legacyYtIds = new Set(legacyShape.map((r) => r.youtube_id).filter(Boolean));
+    const dedupedLegacy = legacyShape.filter((r) => !r.youtube_id || !newShape.some((n) => n.youtube_id === r.youtube_id));
+    void legacyYtIds; // referencia retenida si quisiéramos invertir prioridad
+
+    // 4) Merge + sort por fecha desc (las sin fecha al final).
+    let merged = [...dedupedLegacy, ...newShape].sort((a, b) => {
+      const af = a.fecha ?? '';
+      const bf = b.fecha ?? '';
+      if (af === bf) return 0;
+      return af < bf ? 1 : -1; // desc
+    });
+
+    // 5) Aplicar filtro de tipo si se pidió. type=plenario filtra por
+    //    duración mínima (≥30min) — corta clips de prensa, entrevistas y
+    //    shorts que el canal de la Asamblea publica además de las sesiones.
+    //    El operador puede toggleear "ver todo" desde el client si quiere
+    //    revisar el queue completo.
+    if (filterType === 'plenario') {
+      merged = merged.filter((r) => (r.duration_s ?? 0) >= MIN_PLENARIO_SECONDS);
+    }
+
+    res.json({ ok: true, sessions: merged });
   } catch (err) {
     req.log.error('sessions_list_failed', { error: (err as Error).message, from, to });
     res.status(502).json({ ok: false, error: 'upstream_unavailable', request_id: req.requestId });
   }
 });
 
+// Detect UUID v4 format (8-4-4-4-12 hex chars). Si el id es uuid, viene del
+// sistema nuevo (Supabase); si es int positivo, del legacy MariaDB.
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
  * GET /api/sessions/:id
  * Returns metadata + structured resumen. No transcript blob (separate route).
+ *
+ * Acepta dos formatos de id:
+ *  - int positivo → legacy MariaDB
+ *  - UUID → Supabase sessions (pipeline nuevo)
  */
 sessionsRouter.get('/:id', async (req, res) => {
   const userId = await requireUser(req, res);
   if (!userId) return;
 
-  const id = Number(req.params.id);
+  const rawId = String(req.params.id);
+
+  // ── Path A: UUID → Supabase ────────────────────────────────────────────
+  if (UUID_REGEX.test(rawId)) {
+    try {
+      const { data: s, error: sErr } = await supa()
+        .from('sessions')
+        .select('id, youtube_video_id, fecha, status, metadata, created_at')
+        .eq('id', rawId)
+        .maybeSingle();
+      if (sErr) throw new Error(sErr.message);
+      if (!s) {
+        res.status(404).json({ ok: false, error: 'not_found' });
+        return;
+      }
+      const meta = (s.metadata ?? {}) as {
+        raw_title?: string;
+        sesion_label?: string;
+        duration_seconds?: number;
+        resumen?: { ejecutivo?: string | null; puntos_clave?: string | null; acuerdos?: string | null; raw?: string };
+      };
+      const title = meta.raw_title || meta.sesion_label || `Sesión ${s.youtube_video_id ?? s.id.slice(0, 8)}`;
+      // El resumen estructurado lo genera el job de LLM (scripts/local-generate-summaries.ts
+      // o el endpoint POST /api/admin/sessions/:id/summary cuando exista) y
+      // se guarda en metadata.resumen. Si no existe aún, devolvemos los 4
+      // campos en null — el frontend pinta el placeholder "Sin contenido".
+      const r = meta.resumen ?? {};
+      res.json({
+        ok: true,
+        session: {
+          id: s.id,
+          titulo: title,
+          youtube_url: s.youtube_video_id ? `https://www.youtube.com/watch?v=${s.youtube_video_id}` : null,
+          youtube_id: s.youtube_video_id,
+          fecha: s.fecha ?? s.created_at.slice(0, 10),
+          duration_s: typeof meta.duration_seconds === 'number' ? meta.duration_seconds : 0,
+          estado: statusToEstado(s.status),
+          transcript_url: null,
+          resumen: {
+            ejecutivo: r.ejecutivo ?? null,
+            puntos_clave: r.puntos_clave ?? null,
+            acuerdos: r.acuerdos ?? null,
+            raw: r.raw ?? '',
+          },
+        },
+      });
+      return;
+    } catch (err) {
+      req.log.error('session_detail_supabase_failed', { error: (err as Error).message, id: rawId });
+      res.status(502).json({ ok: false, error: 'upstream_unavailable', request_id: req.requestId });
+      return;
+    }
+  }
+
+  // ── Path B: int legacy ─────────────────────────────────────────────────
+  const id = Number(rawId);
   if (!Number.isFinite(id) || id <= 0) {
     res.status(400).json({ ok: false, error: 'bad_id' });
     return;
@@ -166,12 +355,100 @@ sessionsRouter.get('/:id', async (req, res) => {
 /**
  * GET /api/sessions/:id/transcript
  * Returns segmented transcript. Heavy — cached server-side via LRU in client.
+ *
+ * Acepta dos formatos de id:
+ *  - UUID → Supabase transcript_segments (pipeline nuevo)
+ *  - int positivo → legacy MariaDB (ElevenLabs words JSON via GCS)
  */
 sessionsRouter.get('/:id/transcript', async (req, res) => {
   const userId = await requireUser(req, res);
   if (!userId) return;
 
-  const id = Number(req.params.id);
+  const rawId = String(req.params.id);
+
+  // ── Path A: UUID → Supabase transcript_segments ────────────────────────
+  if (UUID_REGEX.test(rawId)) {
+    try {
+      // Validar que la sesión existe + traer duration_s del metadata.
+      const { data: s, error: sErr } = await supa()
+        .from('sessions')
+        .select('id, metadata')
+        .eq('id', rawId)
+        .maybeSingle();
+      if (sErr) throw new Error(sErr.message);
+      if (!s) {
+        res.status(404).json({ ok: false, error: 'not_found' });
+        return;
+      }
+      // PostgREST tiene un cap server-side de 1000 rows por query —
+      // hardcap, no se levanta con range() explícito. Para plenarias largas
+      // (Sesión 11 mayo 2026 #07 tiene 7,934 segments, 6 h 7 min) sin
+      // paginar el endpoint devolvía solo los primeros 50 min de transcript
+      // y la UI mostraba "video cortado". Bug 2026-05-12.
+      // Fix: paginar en ventanas de 1000 hasta agotar.
+      const segs: Array<{ segment_idx: number; start_seconds: number; end_seconds: number; text: string }> = [];
+      const PAGE_SIZE = 1000;
+      const HARD_LIMIT = 50_000; // 50k segments = ~25 h de transcript, suficiente para cualquier sesión legislativa
+      for (let offset = 0; offset < HARD_LIMIT; offset += PAGE_SIZE) {
+        const { data: page, error: pageErr } = await supa()
+          .from('transcript_segments')
+          .select('segment_idx, start_seconds, end_seconds, text')
+          .eq('session_id', rawId)
+          .order('segment_idx', { ascending: true })
+          .range(offset, offset + PAGE_SIZE - 1);
+        if (pageErr) throw new Error(pageErr.message);
+        if (!page || page.length === 0) break;
+        segs.push(...(page as Array<{ segment_idx: number; start_seconds: number; end_seconds: number; text: string }>));
+        if (page.length < PAGE_SIZE) break;
+      }
+      // Shape: el frontend espera { index, start, end, text, word_count }
+      // (definido en sessionsApi.ts TranscriptSegment). Las versiones previas
+      // de este endpoint devolvían start_s/end_s y rompían el cronómetro
+      // del player con "NaN:NaN" en cada cue.
+      const segments = (segs ?? []).map((seg, i) => {
+        const text: string = seg.text ?? '';
+        return {
+          index: typeof seg.segment_idx === 'number' ? seg.segment_idx : i,
+          start: Number(seg.start_seconds),
+          end: Number(seg.end_seconds),
+          text,
+          word_count: text.trim() ? text.trim().split(/\s+/).length : 0,
+        };
+      });
+      if (segments.length === 0) {
+        res.status(409).json({ ok: false, error: 'transcript_pending' });
+        return;
+      }
+      const meta = (s.metadata ?? {}) as { duration_seconds?: number };
+      const totalWords = segments.reduce((acc, sg) => acc + sg.word_count, 0);
+      res.json({
+        ok: true,
+        transcript: {
+          id: s.id,
+          language: 'es',
+          // Si metadata no tiene duración, derivamos del último cue (mismo
+          // criterio que el backfill SQL que hicimos para las plenarias).
+          duration_s:
+            typeof meta.duration_seconds === 'number'
+              ? meta.duration_seconds
+              : segments.length > 0
+                ? segments[segments.length - 1]!.end
+                : null,
+          segment_count: segments.length,
+          word_count: totalWords,
+          segments,
+        },
+      });
+      return;
+    } catch (err) {
+      req.log.error('transcript_supabase_failed', { error: (err as Error).message, id: rawId });
+      res.status(502).json({ ok: false, error: 'upstream_unavailable', request_id: req.requestId });
+      return;
+    }
+  }
+
+  // ── Path B: int legacy ─────────────────────────────────────────────────
+  const id = Number(rawId);
   if (!Number.isFinite(id) || id <= 0) {
     res.status(400).json({ ok: false, error: 'bad_id' });
     return;
