@@ -203,10 +203,13 @@ app.use(
   voiceRouter,
 );
 app.use(
-  // Transcript admin sync — manual trigger from the admin UI.
-  // Low cap: operator action, not polling. 10/min is generous.
+  // Transcript admin — manual trigger desde la UI admin.
+  // Subido a 120/min porque la UI hace polling (status + details) y un
+  // operador navegando entre sesiones golpea fácil 10 requests/min al
+  // abrir cada item. 2026-05-12: con 10/min Carlos veía rate_limit al
+  // refrescar la cola de revisión.
   '/api/admin/transcripts',
-  rateLimit({ bucket: 'transcripts_admin', max: 10, windowMs: 60_000 }),
+  rateLimit({ bucket: 'transcripts_admin', max: 120, windowMs: 60_000 }),
   transcriptsAdminRouter,
 );
 app.use(
