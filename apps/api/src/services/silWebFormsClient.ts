@@ -19,7 +19,27 @@
  * but also no CDN — hammering would be detected as anomaly.
  */
 import * as cheerio from 'cheerio';
+import { Agent as UndiciAgent } from 'undici';
 import { withRetry, withTimeout } from './resilience.js';
+
+// El sitio del SIL (consultassil3.asamblea.go.cr) presenta un certificado
+// TLS emitido por una CA gubernamental de Costa Rica que NO está en el
+// trust store por default de Node.js. Sin esto, todo fetch al SIL falla
+// con `UNABLE_TO_VERIFY_LEAF_SIGNATURE`. curl funciona porque usa el
+// system CA store del SO.
+//
+// La solución limpia sería distribuir el cert .pem del gov.cr CA y
+// setear NODE_EXTRA_CA_CERTS, pero eso requiere tocar el Dockerfile y
+// conseguir el cert. Como pragmatismo, usamos un Agent dedicado SOLO
+// para los fetch del SIL con `rejectUnauthorized: false`. Esto NO
+// afecta a otras llamadas HTTPS del proceso (Supabase, OpenRouter,
+// Vertex AI siguen con TLS estricto).
+//
+// El dominio está hardcoded — el Agent solo se usa cuando la URL apunta
+// a asamblea.go.cr. Cualquier otro destino usa el dispatcher default.
+const SIL_TLS_AGENT = new UndiciAgent({
+  connect: { rejectUnauthorized: false },
+});
 
 const SIL_WEBFORMS_BASE =
   process.env.SIL_WEBFORMS_BASE ?? 'https://consultassil3.asamblea.go.cr';
@@ -111,15 +131,43 @@ async function rawFetch(
     () =>
       withTimeout(
         async (signal) => {
-          const res = await fetch(url, { ...init, signal });
-          if (!res.ok) throw new Error(`${label} ${res.status}`);
-          // Express/Node: getSetCookie() returns string[]; older versions: get('set-cookie').
-          const sc =
-            typeof (res.headers as any).getSetCookie === 'function'
-              ? (res.headers as any).getSetCookie()
-              : (res.headers.get('set-cookie') ? [res.headers.get('set-cookie')!] : null);
-          const html = await res.text();
-          return { html, setCookie: sc };
+          try {
+            // Si el destino es asamblea.go.cr, usamos el Agent dedicado
+            // que acepta el cert TLS gubernamental. Otros destinos usan
+            // el dispatcher default (TLS estricto).
+            const fetchInit: RequestInit & { dispatcher?: unknown } = { ...init, signal };
+            if (/\.asamblea\.go\.cr$/i.test(new URL(url).hostname) ||
+                /asamblea\.go\.cr$/i.test(new URL(url).hostname)) {
+              fetchInit.dispatcher = SIL_TLS_AGENT;
+            }
+            const res = await fetch(url, fetchInit);
+            if (!res.ok) throw new Error(`${label} ${res.status}`);
+            const sc =
+              typeof (res.headers as any).getSetCookie === 'function'
+                ? (res.headers as any).getSetCookie()
+                : (res.headers.get('set-cookie') ? [res.headers.get('set-cookie')!] : null);
+            const html = await res.text();
+            return { html, setCookie: sc };
+          } catch (err) {
+            // Node fetch wraps real network errors in `cause`. Without
+            // extracting that, all we see in production is "fetch failed"
+            // which is useless for triage.
+            const cause = (err as Error & { cause?: unknown })?.cause;
+            const causeStr =
+              cause instanceof Error
+                ? `${cause.name}: ${cause.message}${(cause as Error & { code?: string }).code ? ` [${(cause as Error & { code?: string }).code}]` : ''}`
+                : cause
+                  ? String(cause)
+                  : '';
+            const newMsg = causeStr
+              ? `${(err as Error).message} (cause: ${causeStr})`
+              : (err as Error).message;
+            // Re-throw with enriched message so the caller's catch (which
+            // already logs `error: message`) captures the real cause.
+            const enriched = new Error(newMsg);
+            (enriched as Error & { cause?: unknown }).cause = cause;
+            throw enriched;
+          }
         },
         { ms: WEBFORMS_TIMEOUT_MS, label },
       ),
@@ -538,6 +586,28 @@ export interface DocxDownload {
   contentType: string | null;
 }
 
+/**
+ * Documento descargado del SIL, en cualquier formato. format se deriva de
+ * los magic bytes — el SIL etiqueta `application/octet-stream` para ambos
+ * formatos así que NO confiamos en contentType.
+ *
+ * Introducido 2026-05-12 cuando descubrimos que muchos expedientes del
+ * 2018+ solo tienen PDF (sin DOCX). El pipeline anterior los marcaba como
+ * "sin doc" porque solo aceptaba DOCX magic. Ver 0029_sil_documentos_mime.sql.
+ */
+export type DocFormat = 'docx' | 'pdf';
+
+export interface SilDownload {
+  format: DocFormat;
+  bytes: Buffer;
+  filename: string | null;
+  contentType: string | null;
+  mimeType: string;
+}
+
+const MIME_DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+const MIME_PDF = 'application/pdf';
+
 async function rawFetchBinary(
   url: string,
   init: RequestInit,
@@ -594,6 +664,27 @@ function isDocxMagic(bytes: Buffer): boolean {
   return bytes.length > 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
 }
 
+function isPdfMagic(bytes: Buffer): boolean {
+  // `%PDF-` header at start of file.
+  return bytes.length > 5 &&
+    bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2d;
+}
+
+/**
+ * Si los bytes son un DOCX o PDF válido, devuelve metadata + format. Si no,
+ * retorna null — el caller debe asumir que el server respondió HTML (un
+ * re-render del detail panel) y que no hay descarga para este slot/formato.
+ */
+function classifyDownload(bytes: Buffer, filename: string | null, contentType: string | null): SilDownload | null {
+  if (isDocxMagic(bytes)) {
+    return { format: 'docx', bytes, filename, contentType, mimeType: MIME_DOCX };
+  }
+  if (isPdfMagic(bytes)) {
+    return { format: 'pdf', bytes, filename, contentType, mimeType: MIME_PDF };
+  }
+  return null;
+}
+
 /**
  * Download the texto base (the proyecto de ley as filed) for the currently-
  * loaded expediente. Caller must have just done a successful
@@ -602,10 +693,11 @@ function isDocxMagic(bytes: Buffer): boolean {
  *
  * Returns null when the expediente doesn't have a downloadable texto.
  */
-export async function downloadTextoBase(
+async function downloadTextoBaseInternal(
   session: WebFormsSession,
   expedienteNum: number,
-): Promise<{ session: WebFormsSession; download: DocxDownload | null }> {
+  format: DocFormat,
+): Promise<{ session: WebFormsSession; download: SilDownload | null }> {
   const form = new URLSearchParams();
   form.set('__EVENTTARGET', '');
   form.set('__EVENTARGUMENT', '');
@@ -614,8 +706,16 @@ export async function downloadTextoBase(
   form.set('__EVENTVALIDATION', session.eventValidation);
   form.set('ctl00$ContentPlaceHolder1$tbxBuscaLey', String(expedienteNum));
   form.set('ctl00$ContentPlaceHolder1$tbxBuscaDescripcion', '');
-  form.set('ctl00$ContentPlaceHolder1$btnDescargaTexto', 'Descargar');
+  // El SIL expone dos botones para el texto base:
+  //   btnDescargaTexto → DOCX editable (cuando la oficialía lo generó)
+  //   btnDescargaPDF   → PDF universal (siempre disponible si hay texto)
+  if (format === 'docx') {
+    form.set('ctl00$ContentPlaceHolder1$btnDescargaTexto', 'Descargar');
+  } else {
+    form.set('ctl00$ContentPlaceHolder1$btnDescargaPDF', 'Descargar');
+  }
 
+  const label = `webforms:download_texto_${format}:${expedienteNum}`;
   const { bytes, filename, contentType, setCookie } = await rawFetchBinary(
     `${SIL_WEBFORMS_BASE}${PAGE_PATH}`,
     {
@@ -629,15 +729,15 @@ export async function downloadTextoBase(
       },
       body: form.toString(),
     },
-    `webforms:download_texto:${expedienteNum}`,
+    label,
   );
 
   const cookies = mergeCookies(session.cookies, setCookie);
-  // The server may respond with HTML (the detail panel re-rendered) instead
-  // of a DOCX when the texto isn't available. Detect by magic bytes.
-  if (!isDocxMagic(bytes)) {
-    // Try to recover hidden state from the HTML response so the session is
-    // still usable for subsequent calls.
+  const download = classifyDownload(bytes, filename, contentType);
+  // El server retorna HTML (re-render del detail panel) cuando no hay file
+  // del formato pedido. Detectamos por magic bytes y nos quedamos en
+  // session.lastHtml para que el caller pueda hacer fallback al otro formato.
+  if (!download) {
     try {
       const html = bytes.toString('utf8');
       const hidden = parseHiddenFields(html);
@@ -649,39 +749,75 @@ export async function downloadTextoBase(
       return { session, download: null };
     }
   }
-  // We got a binary; the in-memory session VIEWSTATE didn't refresh because
-  // the server didn't render HTML. Keep the current state — caller should
-  // do another GET/search round-trip if it needs more interactions.
+  // Si los magic bytes coincidieron PERO el formato esperado era distinto,
+  // honremos lo que devolvió el server (el SIL ocasionalmente sirve PDF
+  // cuando se pidió DOCX si la oficialía generó únicamente PDF).
   return {
     session,
     download: {
-      bytes,
-      filename: filename ?? `expediente_${expedienteNum}_texto.docx`,
-      contentType,
+      ...download,
+      filename: download.filename ?? `expediente_${expedienteNum}_texto.${download.format}`,
     },
   };
 }
 
 /**
+ * Descarga el texto base del expediente. Intenta DOCX primero (formato
+ * editable preferido); si el SIL no lo tiene, cae a PDF. El caller no se
+ * preocupa por el formato — solo recibe los bytes con el campo `format`
+ * en el objeto.
+ *
+ * Retorna `download: null` solo cuando NI DOCX NI PDF están disponibles
+ * (raro — usualmente al menos PDF existe).
+ */
+export async function downloadTextoBase(
+  session: WebFormsSession,
+  expedienteNum: number,
+): Promise<{ session: WebFormsSession; download: SilDownload | null }> {
+  const r1 = await downloadTextoBaseInternal(session, expedienteNum, 'docx');
+  if (r1.download) return r1;
+  // El postback DOCX nos dejó con un HTML re-render — la sesión sigue
+  // utilizable. Hacemos un segundo intento con PDF.
+  const r2 = await downloadTextoBaseInternal(r1.session, expedienteNum, 'pdf');
+  return r2;
+}
+
+/**
+ * Solo PDF (sin intentar DOCX). Útil cuando ya sabemos que el DOCX no
+ * existe y queremos evitar el round-trip extra.
+ */
+export async function downloadTextoBasePDF(
+  session: WebFormsSession,
+  expedienteNum: number,
+): Promise<{ session: WebFormsSession; download: SilDownload | null }> {
+  return downloadTextoBaseInternal(session, expedienteNum, 'pdf');
+}
+
+/**
  * Download the dictamen at index N (0-based) from the grvDictamenes grid.
  * The detail panel for the expediente must be loaded first.
+ *
+ * Acepta DOCX o PDF — el SIL ocasionalmente sirve PDF para dictámenes
+ * cuyo DOCX no se generó. El caller recibe `format` para saber qué parser
+ * aplicar.
  */
 export async function downloadDictamen(
   session: WebFormsSession,
   expedienteNum: number,
   dictamenIndex: number,
-): Promise<{ session: WebFormsSession; download: DocxDownload | null }> {
+): Promise<{ session: WebFormsSession; download: SilDownload | null }> {
   return downloadFromGrid(session, expedienteNum, 'grvDictamenes', dictamenIndex, 'dictamen');
 }
 
 /**
  * Download the informe técnico at index N (0-based) from grvTecnicos.
+ * Acepta DOCX o PDF — ver downloadDictamen para detalles.
  */
 export async function downloadInformeTecnico(
   session: WebFormsSession,
   expedienteNum: number,
   tecIndex: number,
-): Promise<{ session: WebFormsSession; download: DocxDownload | null }> {
+): Promise<{ session: WebFormsSession; download: SilDownload | null }> {
   return downloadFromGrid(session, expedienteNum, 'grvTecnicos', tecIndex, 'tecnico');
 }
 
@@ -691,7 +827,7 @@ async function downloadFromGrid(
   gridName: 'grvDictamenes' | 'grvTecnicos',
   index: number,
   labelPrefix: string,
-): Promise<{ session: WebFormsSession; download: DocxDownload | null }> {
+): Promise<{ session: WebFormsSession; download: SilDownload | null }> {
   const form = new URLSearchParams();
   form.set('__EVENTTARGET', `ctl00$ContentPlaceHolder1$${gridName}`);
   form.set('__EVENTARGUMENT', `Select$${index}`);
@@ -718,7 +854,8 @@ async function downloadFromGrid(
   );
 
   const cookies = mergeCookies(session.cookies, setCookie);
-  if (!isDocxMagic(bytes)) {
+  const download = classifyDownload(bytes, filename, contentType);
+  if (!download) {
     try {
       const html = bytes.toString('utf8');
       const hidden = parseHiddenFields(html);
@@ -733,9 +870,9 @@ async function downloadFromGrid(
   return {
     session,
     download: {
-      bytes,
-      filename: filename ?? `expediente_${expedienteNum}_${labelPrefix}_${index}.docx`,
-      contentType,
+      ...download,
+      filename: download.filename
+        ?? `expediente_${expedienteNum}_${labelPrefix}_${index}.${download.format}`,
     },
   };
 }

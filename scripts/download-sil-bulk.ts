@@ -49,9 +49,10 @@ import {
   downloadTextoBase,
   downloadDictamen,
   downloadInformeTecnico,
+  type SilDownload,
   countGridRows,
   type WebFormsSession,
-  type DocxDownload,
+  type DocxDownload, // legacy — DocSlot ahora usa SilDownload
 } from '../apps/api/src/services/silWebFormsClient.js';
 
 // ─── Config ───────────────────────────────────────────────────────────
@@ -83,6 +84,15 @@ const SESSION_REFRESH_EVERY = 50; // refresh more aggressively — heavier per-e
 const FORCE = (process.env.FORCE ?? '0') === '1';
 const CHUNK_CHARS = 1500;
 const VERTEX_CONCURRENCY = 4;
+// STOP_BEFORE: detener el walk cuando bajamos por debajo de este id.
+// Útil con NEWEST_FIRST=1: arranca en START_FROM (más alto) y para cuando
+// llega a este piso. Por ejemplo NEWEST_FIRST=1 START_FROM=25700 STOP_BEFORE=20000
+// procesa solo la legislatura activa (post-2020) sin tocar el histórico.
+const STOP_BEFORE = process.env.STOP_BEFORE ? Number(process.env.STOP_BEFORE) : null;
+// ENABLE_OCR: si true, hace fallback a Cloud Vision Document Text Detection
+// cuando el PDF descargado no tiene capa de texto (PDFs escaneados del SIL).
+// Costo: ~$1.50 / 1000 páginas. Default true.
+const ENABLE_OCR = (process.env.ENABLE_OCR ?? '1') === '1';
 
 const GCP_LOCATION = process.env.GCP_LOCATION ?? 'us-central1';
 const EMBED_MODEL = process.env.VERTEX_EMBEDDING_MODEL ?? 'gemini-embedding-001';
@@ -92,15 +102,51 @@ const VERTEX_ENDPOINT = `projects/${GCP_PROJECT}/locations/${GCP_LOCATION}/publi
 
 // ─── Helpers ──────────────────────────────────────────────────────────
 
+// `DocxDownload` referenced para mantener compat con código viejo —
+// el nuevo flow usa SilDownload (que incluye format).
+void DocxDownload;
+
 interface DocSlot {
   tipo: 'texto_base' | 'dictamen' | 'tecnico';
   index: number;            // 0 for texto_base, N for dictamen/tecnico
-  download: DocxDownload;
+  download: SilDownload;
 }
 
 async function docxToText(bytes: Buffer): Promise<string> {
   const result = await mammoth.extractRawText({ buffer: bytes });
   return (result.value ?? '').replace(/\r\n/g, '\n').replace(/[ \t]+\n/g, '\n').trim();
+}
+
+/**
+ * Extrae texto de un documento según su formato:
+ *   - DOCX  → mammoth (rápido, gratis, nativo)
+ *   - PDF   → pdfjs primero; si está vacío (PDF escaneado) y OCR está
+ *             habilitado, fallback a Cloud Vision Document Text Detection.
+ *
+ * Devuelve `{ text, ocrUsed }` — ocrUsed se loggea en stats y en
+ * sil_documentos.metadata para auditoría de costo.
+ */
+async function extractTextFromDownload(
+  download: SilDownload,
+  label: string,
+): Promise<{ text: string; ocrUsed: boolean }> {
+  if (download.format === 'docx') {
+    return { text: await docxToText(download.bytes), ocrUsed: false };
+  }
+  // PDF — try pdfjs (nativo, gratis) first
+  const { pdfToText } = await import('../apps/api/src/services/pdfExtractor.js');
+  const nativeText = await pdfToText(download.bytes);
+  if (nativeText.length >= 200) {
+    // Tiene texto nativo razonable — listo.
+    return { text: nativeText, ocrUsed: false };
+  }
+  if (!ENABLE_OCR) {
+    return { text: nativeText, ocrUsed: false }; // dejamos lo que haya
+  }
+  // PDF escaneado — fallback a OCR.
+  const { pdfToTextOCR } = await import('../apps/api/src/services/ocrExtractor.js');
+  const ocrText = await pdfToTextOCR(download.bytes, { sourceLabel: label });
+  return { text: ocrText, ocrUsed: true };
 }
 
 function chunkText(text: string, maxChars: number): Array<{ text: string; index: number }> {
@@ -196,6 +242,12 @@ async function fetchTargets(): Promise<ExpRow[]> {
     if (START_FROM > 0) {
       q = NEWEST_FIRST ? q.lte('id', START_FROM) : q.gte('id', START_FROM);
     }
+    // STOP_BEFORE: piso para el rango. Con NEWEST_FIRST=1 vamos bajando
+    // ids y queremos detenernos cuando crucemos por debajo de este valor.
+    // Con orden ascendente, queremos detenernos cuando subamos por encima.
+    if (STOP_BEFORE != null) {
+      q = NEWEST_FIRST ? q.gte('id', STOP_BEFORE) : q.lte('id', STOP_BEFORE);
+    }
     const { data, error } = await q;
     if (error) throw new Error(`fetchTargets: ${error.message}`);
     if (!data || data.length === 0) break;
@@ -223,6 +275,7 @@ interface Stats {
   total_chunks: number;
   errors: number;
   skipped: number;
+  ocr_used: number;
 }
 
 async function processExpediente(exp: ExpRow, stats: Stats): Promise<void> {
@@ -291,16 +344,25 @@ async function processExpediente(exp: ExpRow, stats: Stats): Promise<void> {
 
     if (slots.length === 0) { stats.expedientes_processed += 1; return; }
 
-    // Persist each slot: GCS upload → DOCX→text → embed → legislative_chunks → sil_documentos.
+    // Persist each slot: GCS upload → text extraction (DOCX/PDF/OCR) →
+    // embed → legislative_chunks → sil_documentos.
     const docRows: Array<Record<string, unknown>> = [];
     const chunkRowsBatch: Array<Record<string, unknown>> = [];
     for (const slot of slots) {
-      const filename = slot.download.filename ?? `expediente_${exp.id}_${slot.tipo}_${slot.index}.docx`;
+      const ext = slot.download.format === 'docx' ? 'docx' : 'pdf';
+      const fallbackName = `expediente_${exp.id}_${slot.tipo}_${slot.index}.${ext}`;
+      // Si el filename del server termina en .docx pero el formato real es PDF
+      // (el SIL etiqueta mal), normalizamos a la extensión correcta para evitar
+      // confusión downstream.
+      const rawName = slot.download.filename ?? fallbackName;
+      const filename = rawName.endsWith(`.${ext}`)
+        ? rawName
+        : `${rawName.replace(/\.(docx?|pdf)$/i, '')}.${ext}`;
       const safeName = filename.replace(/[^\w.\-]+/g, '_');
       const gcsPath = `expedientes/${exp.id}/${slot.tipo}_${slot.index}_${safeName}`;
       try {
         await storage.bucket(GCS_BUCKET).file(gcsPath).save(slot.download.bytes, {
-          contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          contentType: slot.download.mimeType,
           metadata: { metadata: { sil_expediente_id: String(exp.id), sil_doc_kind: slot.tipo, sil_doc_index: String(slot.index), original_filename: filename } },
         });
         stats.docs_downloaded += 1;
@@ -312,9 +374,14 @@ async function processExpediente(exp: ExpRow, stats: Stats): Promise<void> {
       }
 
       let text = '';
-      try { text = await docxToText(slot.download.bytes); }
-      catch (err) {
-        console.warn(`[exp ${exp.numero}] docx parse failed: ${(err as Error).message}`);
+      let ocrUsed = false;
+      try {
+        const extracted = await extractTextFromDownload(slot.download, `${exp.numero}:${slot.tipo}`);
+        text = extracted.text;
+        ocrUsed = extracted.ocrUsed;
+        if (ocrUsed) stats.ocr_used += 1;
+      } catch (err) {
+        console.warn(`[exp ${exp.numero}] ${slot.download.format} text extraction failed: ${(err as Error).message}`);
         stats.errors += 1;
       }
 
@@ -328,9 +395,11 @@ async function processExpediente(exp: ExpRow, stats: Stats): Promise<void> {
         fecha: null,
         source_url: `${exp.url_detalle}#${slot.tipo}-${slot.index}`,
         gcs_path: `gs://${GCS_BUCKET}/${gcsPath}`,
+        mime_type: slot.download.mimeType,
         text_extracted: text.slice(0, 500_000),
         text_chars: text.length,
         status: text.length >= 50 ? 'embedded' : 'parsed',
+        metadata: ocrUsed ? { ocr: 'cloud_vision_documents' } : null,
       };
       docRows.push(docRow);
 
@@ -423,6 +492,7 @@ async function main() {
     total_chunks: 0,
     errors: 0,
     skipped: 0,
+    ocr_used: 0,
   };
 
   const queue = [...targets];
