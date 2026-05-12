@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import { TopDock } from '@/components/top-dock';
 import { HojaNode } from '@/components/hoja/HojaNode';
+import { SrtNode } from '@/components/hoja/SrtNode';
 import { AssetNode } from '@/components/hoja/AssetNode';
 import { GeneratedAssetNode } from '@/components/hoja/GeneratedAssetNode';
 import {
@@ -66,6 +67,7 @@ import { supabase } from '@/lib/supabase';
 //                            asset_slides instead of a TipTap document.
 const NODE_TYPES = {
   hoja: HojaNode,
+  srt: SrtNode,
   image: AssetNode,
   audio: AssetNode,
   document: AssetNode,
@@ -112,9 +114,11 @@ function toRFNode(n: WorkspaceNode, workspaceId: string, callbacks: {
   // inconsistent casing.
   const t = (n.type ?? 'hoja').toLowerCase();
   let rfType:
-    | 'hoja' | 'image' | 'audio' | 'document'
+    | 'hoja' | 'srt' | 'image' | 'audio' | 'document'
     | 'carousel' | 'pptx_asset' | 'docx_asset' | 'podcast_asset' = 'hoja';
-  if (t === 'image' || t === 'audio' || t === 'document') {
+  if (t === 'srt') {
+    rfType = 'srt';
+  } else if (t === 'image' || t === 'audio' || t === 'document') {
     rfType = t;
   } else if (isGeneratedAssetKind(t)) {
     rfType = t as GeneratedAssetKind;
@@ -311,6 +315,22 @@ function CanvasInner({
   // wait. On success, materialize the new node on the canvas (unless
   // sendToCanvas=false) and auto-select it so the detail panel opens.
   const handleSharePick = useCallback((m: ShareAsKindMeta) => {
+    // Routing por kind — distintos formatos tienen flows distintos:
+    //   • pptx_asset    → Gamma legacy (PptxOptionsModal + generatePptx)
+    //                     Es el path que YA funciona, devuelve gammaUrl
+    //                     editable + .pptx descargable.
+    //   • podcast_asset → PodcastModal (ElevenLabs Scribe)
+    //   • carousel / docx_asset → asset pipeline nuevo (HTML→PDF render)
+    //                     Hoy estos dos están comingSoon=true en
+    //                     ShareAsButton, pero el routing queda listo.
+    if (m.kind === 'pptx_asset') {
+      setPptxOptionsOpen(true);
+      return;
+    }
+    if (m.kind === 'podcast_asset') {
+      setPodcastOpen(true);
+      return;
+    }
     setShareAsKind(m);
     setShareAsModalOpen(true);
   }, []);
@@ -927,6 +947,11 @@ function CanvasInner({
           maxZoom={2}
           panOnScroll
           selectionOnDrag
+          // Multi-select: cualquiera de Shift/Cmd/Ctrl funciona para sumar
+          // o quitar nodos de la selección (Mac y Windows-friendly).
+          // Por default ReactFlow usa solo 'Meta' (Cmd) en Mac — sumamos
+          // 'Shift' que es lo que la gente espera de la mayoría de apps.
+          multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
           className="bg-gray-50 dark:bg-[#111] [&_.react-flow__background]:opacity-40"
         >
           {/* Dot grid background — CL2 style */}
@@ -975,8 +1000,10 @@ function CanvasInner({
             </div>
           </Panel>
 
-          {/* Toolbar — Audio del board strip / Audio del board btn /
-              Voz / Nueva hoja */}
+          {/* Toolbar — Audio strip (cuando hay) + Compartir como + Nueva hoja.
+              Removidos 2026-05-11: "Audio del board" y "Presentación" como
+              botones standalone — eran redundantes con "Compartir como" que ya
+              incluye Carrusel · PPT · Word · Podcast en su dropdown. */}
           <Panel position="top-right" className="m-3">
             <div className="flex items-center gap-2 max-w-[min(70vw,560px)]">
               {/* Audio strip (renders only when a podcast exists for this board) */}
@@ -987,25 +1014,6 @@ function CanvasInner({
                   onRequestRegenerate={() => setPodcastOpen(true)}
                 />
               </div>
-
-              {/* "Audio del board" button — only visible when no strip showing */}
-              <BoardAudioCTA workspaceId={workspaceId} onClick={() => setPodcastOpen(true)} />
-
-              {/* "Presentación" — opens the options panel first so the
-                  user can tell Gamma the tono / audiencia / propósito /
-                  marca. Submitting the options panel kicks the actual
-                  generation (which then surfaces in PptxResultModal). */}
-              <button
-                onClick={() => setPptxOptionsOpen(true)}
-                disabled={pptxModal?.state === 'loading'}
-                title="Generar presentación con Gamma"
-                className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white dark:bg-[#1c1c1c] border border-cl2-burgundy/20 dark:border-cl2-burgundy/30 shadow-sm text-[13px] font-medium text-cl2-burgundy dark:text-cl2-burgundy/90 hover:bg-cl2-burgundy/[0.04] dark:hover:bg-cl2-burgundy/[0.10] transition-colors disabled:opacity-60 disabled:cursor-wait"
-              >
-                <Presentation className="w-4 h-4" />
-                <span className="hidden md:inline">
-                  {pptxModal?.state === 'loading' ? 'Generando…' : 'Presentación'}
-                </span>
-              </button>
 
               {/* "Compartir como" — 4-format export flow. Opens a
                   dropdown of {carrusel · pptx · docx · podcast}; the

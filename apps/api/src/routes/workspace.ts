@@ -1408,14 +1408,25 @@ function paragraphize(s: string): string {
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * Construye un payload secundario con la transcripción en formato SRT
- * (timecodes [HH:MM:SS] inline). Devuelve null si la sesión no es UUID
- * o no tiene transcript_segments. Pedido por Jred 2026-05-12: el usuario
- * quiere arrastrar el SRT al workspace junto con el resumen editorial.
+ * Construye el payload para un nodo workspace de tipo='srt' que referencia
+ * una sesión plenaria. El content guardado es solo metadata; los segments
+ * los fetcha el frontend al montarse el componente desde
+ * /api/sessions/:id/transcript. Esto evita jsonb gigantes (plenarios de
+ * 6h tienen ~8k segments).
+ *
+ * Pedido por Jred 2026-05-12: nodo dedicado con lista fija + scroll
+ * interno + selección multi (Alt+click) + copy + "preguntar a Lexa".
+ *
+ * Devuelve null si la sesión no es UUID o no tiene transcript_segments.
  */
 async function buildSesionSrtPayload(
   rawId: string | number,
-): Promise<{ title: string; subtitle: string; html: string; sourceLabel: string } | null> {
+): Promise<{
+  title: string;
+  subtitle: string;
+  content: Record<string, unknown>;
+  sourceLabel: string;
+} | null> {
   const rawStr = String(rawId);
   if (!UUID_REGEX.test(rawStr)) return null; // solo sesiones nuevas (Supabase)
 
@@ -1426,73 +1437,33 @@ async function buildSesionSrtPayload(
     .maybeSingle();
   if (!s) return null;
 
-  const meta = (s.metadata ?? {}) as { raw_title?: string; sesion_label?: string };
+  const meta = (s.metadata ?? {}) as { raw_title?: string; sesion_label?: string; duration_seconds?: number };
   const title = meta.raw_title || meta.sesion_label || `Sesión ${s.youtube_video_id ?? rawStr.slice(0, 8)}`;
   const fechaFmt = s.fecha
     ? new Date(s.fecha).toLocaleDateString('es-CR', { year: 'numeric', month: 'long', day: 'numeric' })
     : '';
 
-  // Paginar segments (cap PostgREST 1000)
-  const segs: Array<{ start_seconds: number; end_seconds: number; text: string }> = [];
-  for (let off = 0; off < 50_000; off += 1000) {
-    const { data: page } = await supa()
-      .from('transcript_segments')
-      .select('start_seconds, end_seconds, text')
-      .eq('session_id', rawStr)
-      .order('segment_idx', { ascending: true })
-      .range(off, off + 999);
-    if (!page || page.length === 0) break;
-    segs.push(...(page as Array<{ start_seconds: number; end_seconds: number; text: string }>));
-    if (page.length < 1000) break;
-  }
-  if (segs.length === 0) return null;
-
-  // Agrupar segments consecutivos en bloques de ~30s para que la SRT sea
-  // legible. Sin esto cada línea es una palabra suelta — buena para
-  // subtítulos pero malo para lectura. 30s es el grano que usa Lexa
-  // cuando lee el transcript en el system prompt.
-  const fmtTs = (sec: number): string => {
-    const h = Math.floor(sec / 3600);
-    const m = Math.floor((sec % 3600) / 60);
-    const s2 = Math.floor(sec % 60);
-    return h > 0
-      ? `${h}:${String(m).padStart(2, '0')}:${String(s2).padStart(2, '0')}`
-      : `${m}:${String(s2).padStart(2, '0')}`;
-  };
-  type Block = { start: number; end: number; texts: string[] };
-  const blocks: Block[] = [];
-  for (const seg of segs) {
-    const last = blocks[blocks.length - 1];
-    if (!last || seg.start_seconds - last.start >= 30) {
-      blocks.push({ start: seg.start_seconds, end: seg.end_seconds, texts: [(seg.text ?? '').trim()] });
-    } else {
-      last.end = seg.end_seconds;
-      last.texts.push((seg.text ?? '').trim());
-    }
-  }
-
-  const html: string[] = [];
-  html.push(`<h2>SRT — ${escapeHtml(title)}</h2>`);
-  if (fechaFmt) html.push(`<p><em>${escapeHtml(fechaFmt)} · ${segs.length} segmentos · ${blocks.length} bloques</em></p>`);
-  html.push('<p><em>Transcripción cronológica con timecodes. Útil para referenciar momentos exactos en presentaciones, informes o citas.</em></p>');
-  html.push('<hr>');
-  // Capamos a 60k chars para no romper el editor. Plenarias de 6h+ caben
-  // si los bloques son densos.
-  let charsUsed = 0;
-  for (const b of blocks) {
-    const line = `[${fmtTs(b.start)}] ${b.texts.filter(Boolean).join(' ').trim()}`;
-    if (charsUsed + line.length > SESION_TRANSCRIPT_CAP) {
-      html.push(`<p><em>… transcripción truncada en ${fmtTs(b.start)} (cap ${SESION_TRANSCRIPT_CAP} chars). Para descarga completa usá el botón "Descargar" en la sesión.</em></p>`);
-      break;
-    }
-    html.push(`<p>${escapeHtml(line)}</p>`);
-    charsUsed += line.length;
-  }
+  // Verificamos que hay segments antes de crear el nodo. Sin esto no hay
+  // razón de existir.
+  const { count: segCount } = await supa()
+    .from('transcript_segments')
+    .select('id', { count: 'exact', head: true })
+    .eq('session_id', rawStr);
+  if (!segCount || segCount === 0) return null;
 
   return {
-    title: `SRT — ${title}`.slice(0, 200),
-    subtitle: fechaFmt ? `Transcripción · ${fechaFmt}` : 'Transcripción con timecodes',
-    html: html.join(''),
+    title: `Transcripción — ${title}`.slice(0, 200),
+    subtitle: fechaFmt ? `${fechaFmt} · ${segCount} segmentos` : `${segCount} segmentos`,
+    content: {
+      // El frontend usa session_id para fetchear /api/sessions/:id/transcript
+      // y renderizar la lista fija. Los segments NO se embeben acá.
+      session_id: rawStr,
+      session_title: title,
+      session_fecha: s.fecha,
+      youtube_id: s.youtube_video_id,
+      session_duration_s: meta.duration_seconds ?? null,
+      segment_count: segCount,
+    },
     sourceLabel: `srt-${rawStr.slice(0, 8)}`,
   };
 }
@@ -1882,12 +1853,16 @@ workspaceRouter.post('/:id/import-sources', async (req, res) => {
       }
       created.push(node);
 
-      // Si la fuente es una sesión UUID, agregar un nodo SECUNDARIO con la
-      // transcripción en formato SRT (timecodes inline). Pedido por Jred
-      // 2026-05-12: el operador trabaja sobre la sesión y necesita
-      // referenciar momentos exactos por timecode en su narrativa.
-      // El nodo SRT queda al lado del editorial — color 'sage' para
-      // diferenciar visualmente.
+      // Si la fuente es una sesión UUID, agregar un nodo dedicado tipo='srt'
+      // con metadata referenciando la sesión. Pedido por Jred 2026-05-12:
+      // el frontend renderiza una lista fija con scroll interno donde el
+      // operador puede ver toda la transcripción, seleccionar segmentos
+      // (Alt+click para multi-select), copiar al clipboard, o mandar la
+      // selección como contexto a Lexa.
+      //
+      // Los segments NO se embeben en content — el frontend los fetcha
+      // desde /api/sessions/:id/transcript al montarse. Esto evita jsonb
+      // gigantes (plenarios de 6h tienen ~8k segments).
       if (item.type === 'sesion') {
         try {
           const srtPayload = await buildSesionSrtPayload(item.id!);
@@ -1897,22 +1872,29 @@ workspaceRouter.post('/:id/import-sources', async (req, res) => {
             const srtRow = Math.floor(srtSlot / SOURCE_GRID_COLS);
             const srtX = srtCol * (SOURCE_NODE_W + SOURCE_NODE_GAP) + 80;
             const srtY = srtRow * (SOURCE_NODE_H + SOURCE_NODE_GAP) + 80;
-            const { data: srtNode } = await supa()
+            const { data: srtNode, error: srtErr } = await supa()
               .from('workspace_nodes')
               .insert({
                 workspace_id: workspaceId,
-                type: 'hoja',
+                type: 'srt',
                 x: srtX, y: srtY,
                 width: SOURCE_NODE_W,
                 height: SOURCE_NODE_H,
                 title: srtPayload.title,
                 subtitle: srtPayload.subtitle,
-                content: { md: srtPayload.html, source_label: srtPayload.sourceLabel },
+                content: srtPayload.content,
                 color: 'sage', // diferenciable del nodo editorial 'ink'
               })
               .select('*')
               .single();
-            if (srtNode) created.push(srtNode);
+            if (srtErr) {
+              req.log.warn('workspace_import_srt_insert_failed', {
+                sesion_id: item.id,
+                error: srtErr.message,
+              });
+            } else if (srtNode) {
+              created.push(srtNode);
+            }
           }
         } catch (err) {
           // No es fatal — la hoja editorial ya se creó. El SRT extra es
