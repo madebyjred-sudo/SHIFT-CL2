@@ -1530,14 +1530,19 @@ async function buildSesionPayload(
       html.push(paragraphize(meta.resumen.acuerdos));
     }
 
-    if (transcriptText.trim()) {
-      html.push('<h3>Transcripción</h3>');
-      html.push(paragraphize(transcriptText));
-    } else if (s.youtube_video_id) {
+    // Cuando es sesión UUID, el nodo SRT acompañante (creado en
+    // importSources) ya provee la transcripción completa con timecodes
+    // + selección + scroll interno. Duplicarla acá como texto plano
+    // sería ruido. Solo dejamos un puntero al nodo hermano.
+    // Bug reportado por Jred 2026-05-12: doble transcripción en workspace.
+    if (s.youtube_video_id) {
       html.push('<h3>Transcripción</h3>');
       const ytUrl = `https://www.youtube.com/watch?v=${s.youtube_video_id}`;
-      html.push(`<p><em>Transcripción aún no disponible. Fuente: <a href="${escapeHtml(ytUrl)}">YouTube</a>.</em></p>`);
+      html.push(`<p><em>La transcripción completa con timecodes vive en el nodo SRT adjunto (color verde). Fuente original: <a href="${escapeHtml(ytUrl)}">YouTube</a>.</em></p>`);
     }
+    // Marcador silencioso para que el frontend (y consumers como podcast)
+    // sepan que esta hoja referencia una sesión cuyo transcript vive aparte.
+    void transcriptText;
 
     html.push('<hr>');
     html.push(

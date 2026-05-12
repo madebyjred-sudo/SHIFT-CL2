@@ -31,7 +31,7 @@ import {
 } from '../services/elevenlabsClient.js';
 import { generatePodcastScript, enhancePodcastPrompt, type PodcastScript } from '../services/podcastScript.js';
 import { uploadPodcastAudio, signPodcastAudio } from '../services/podcastStorage.js';
-import { getTranscripcionById } from '../services/legacyCl2Client.js';
+import { getTranscripcionById, fetchTranscriptJson } from '../services/legacyCl2Client.js';
 import { getExpedienteById } from '../services/silClient.js';
 import { logger } from '../services/logger.js';
 
@@ -602,11 +602,110 @@ function estimateDurationSeconds(script: PodcastScript): number {
 // generator can chew on. Keep extracts conservative — generator caps to
 // 12k chars internally, but we want the most relevant slice on top.
 
+// Cap subido 2026-05-12: el cap previo de 12k era para mantener bajo el
+// costo del LLM script. Sonnet 4.6 acepta 200k tokens, y un podcast
+// informativo merece contexto rico, no truncado al 30%. 80k chars ≈ 20k
+// tokens deja headroom para system prompt + history + output.
+// Plenarios de 6h+ siguen truncándose al final pero el material
+// suficiente para 8-10 min de podcast siempre cabe en los primeros 80k.
+const PODCAST_SOURCE_CAP = 80_000;
+
+/**
+ * Formatea segments de transcript_segments con timecodes para que el
+ * generador de podcast pueda citar momentos exactos. Agrupa en bloques
+ * de ~30s (mismo grano que usa Lexa al leer el transcript inline).
+ */
+function formatSegmentsWithTimecodes(
+  segs: Array<{ start_seconds: number; text: string }>,
+  capChars: number,
+): string {
+  const fmt = (s: number) => {
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = Math.floor(s % 60);
+    return h > 0
+      ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+      : `${m}:${String(sec).padStart(2, '0')}`;
+  };
+  const blocks: Array<{ ts: number; texts: string[] }> = [];
+  for (const seg of segs) {
+    const last = blocks[blocks.length - 1];
+    if (!last || seg.start_seconds - last.ts >= 30) {
+      blocks.push({ ts: seg.start_seconds, texts: [(seg.text ?? '').trim()] });
+    } else {
+      last.texts.push((seg.text ?? '').trim());
+    }
+  }
+  let out = '';
+  for (const b of blocks) {
+    const line = `[${fmt(b.ts)}] ${b.texts.filter(Boolean).join(' ')}\n`;
+    if (out.length + line.length > capChars) break;
+    out += line;
+  }
+  return out;
+}
+
+/** Carga el transcript completo de una sesión UUID, paginando. */
+async function loadSessionTranscript(uuid: string): Promise<Array<{ start_seconds: number; text: string }>> {
+  const all: Array<{ start_seconds: number; text: string }> = [];
+  const PAGE = 1000;
+  for (let off = 0; off < 50_000; off += PAGE) {
+    const { data: page, error } = await supa()
+      .from('transcript_segments')
+      .select('start_seconds, text')
+      .eq('session_id', uuid)
+      .order('segment_idx', { ascending: true })
+      .range(off, off + PAGE - 1);
+    if (error) throw new Error(`segments fetch: ${error.message}`);
+    if (!page || page.length === 0) break;
+    all.push(...(page as typeof all));
+    if (page.length < PAGE) break;
+  }
+  return all;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 async function loadSource(
   type: 'sesion' | 'expediente' | 'chat' | 'hoja_workspace' | 'hoja_node',
   id: string,
 ): Promise<{ source_text: string; source_label: string }> {
   if (type === 'sesion') {
+    // Path A: UUID → sesión Supabase (post-mayo 2026) con transcript completo
+    if (UUID_RE.test(id)) {
+      const { data: s, error } = await supa()
+        .from('sessions')
+        .select('id, fecha, metadata, comision, tipo')
+        .eq('id', id)
+        .maybeSingle();
+      if (error || !s) throw new Error('sesion_not_found');
+      const meta = (s.metadata ?? {}) as {
+        raw_title?: string;
+        sesion_label?: string;
+        duration_seconds?: number;
+        resumen?: { ejecutivo?: string };
+      };
+      const title = meta.raw_title || meta.sesion_label || `Sesión ${id.slice(0, 8)}`;
+      const segs = await loadSessionTranscript(id);
+      const parts: string[] = [];
+      parts.push(`Sesión: ${title}`);
+      if (s.fecha) parts.push(`Fecha: ${s.fecha}`);
+      if (s.comision) parts.push(`Comisión: ${s.comision}`);
+      if (meta.resumen?.ejecutivo) {
+        parts.push('\nResumen ejecutivo:');
+        parts.push(meta.resumen.ejecutivo);
+      }
+      if (segs.length > 0) {
+        parts.push(`\nTranscripción cronológica (${segs.length} segmentos, formato [HH:MM:SS] texto):`);
+        const transcriptBudget = PODCAST_SOURCE_CAP - parts.join('\n').length - 200;
+        parts.push(formatSegmentsWithTimecodes(segs, Math.max(transcriptBudget, 10_000)));
+      }
+      return {
+        source_text: parts.join('\n').slice(0, PODCAST_SOURCE_CAP),
+        source_label: `sesión plenaria ${title}`,
+      };
+    }
+    // Path B: int → sesión legacy MariaDB
     const numId = Number(id);
     if (!Number.isFinite(numId)) throw new Error('bad_sesion_id');
     const sess = await getTranscripcionById(numId);
@@ -615,8 +714,19 @@ async function loadSource(
     if (sess.titulo) parts.push(`Sesión: ${sess.titulo}`);
     if (sess.fecha) parts.push(`Fecha: ${sess.fecha}`);
     if (sess.resumen) parts.push(`\nResumen ejecutivo:\n${sess.resumen}`);
+    // Legacy también carga transcript si está disponible (vía
+    // legacyCl2Client). Es texto plano sin timecodes nativos pero
+    // mejor que solo resumen.
+    if (sess.transcripcion) {
+      try {
+        const blob = await fetchTranscriptJson(sess.transcripcion);
+        if (blob?.text) {
+          parts.push(`\nTranscripción completa:\n${blob.text}`);
+        }
+      } catch { /* swallow — al menos tenemos el resumen */ }
+    }
     return {
-      source_text: parts.join('\n').slice(0, 12_000),
+      source_text: parts.join('\n').slice(0, PODCAST_SOURCE_CAP),
       source_label: `sesión plenaria ${sess.titulo ?? numId}`,
     };
   }
@@ -638,7 +748,7 @@ async function loadSource(
       }
     }
     return {
-      source_text: parts.join('\n').slice(0, 12_000),
+      source_text: parts.join('\n').slice(0, PODCAST_SOURCE_CAP),
       source_label: `expediente ${exp.numero}`,
     };
   }
@@ -647,6 +757,10 @@ async function loadSource(
   // y/x for top-down + left-right reading order, concat title + body.
   // Prefix with a first-person framing override so the script feels
   // like the despacho's OWN briefing, not Lexa-as-research-assistant.
+  //
+  // Refactor 2026-05-12: cuando hay nodos type='srt', expandirlos a la
+  // transcripción completa con timecodes. Antes los descartábamos porque
+  // su content.md es null — el podcast no veía la sesión real referenciada.
   if (type === 'hoja_workspace') {
     const ws = await supa()
       .from('workspaces')
@@ -664,9 +778,10 @@ async function loadSource(
       .order('x', { ascending: true });
     if (nodeErr) throw new Error(`hoja_load: ${nodeErr.message}`);
     const nodes = (nodeRows ?? []) as Array<{
+      type: string;
       title: string;
       subtitle: string;
-      content: { md?: string } | null;
+      content: { md?: string; session_id?: string; session_title?: string } | null;
     }>;
     const parts: string[] = [];
     parts.push(
@@ -678,36 +793,93 @@ async function loadSource(
     parts.push(`Board: ${wsRow.title}`);
     if (wsRow.description) parts.push(`Descripción: ${wsRow.description}`);
     parts.push('');
+
+    // Budget compartido entre todos los nodos. Cada SRT puede ser pesado,
+    // entonces distribuimos proporcionalmente.
+    const headerSize = parts.join('\n').length;
+    const remainingBudget = PODCAST_SOURCE_CAP - headerSize - 1000;
+    const srtNodes = nodes.filter((n) => n.type === 'srt' && n.content?.session_id);
+    const perSrtBudget = srtNodes.length > 0
+      ? Math.floor(remainingBudget / (srtNodes.length + 1)) // +1 reserva para hojas editoriales
+      : 0;
+
     for (const n of nodes) {
       if (n.title) parts.push(`## ${n.title}`);
       if (n.subtitle) parts.push(`*${n.subtitle}*`);
-      const md = n.content?.md ?? '';
-      if (md.trim()) parts.push(md.trim());
+      if (n.type === 'srt' && n.content?.session_id) {
+        // Expandir el SRT a transcripción completa con timecodes.
+        try {
+          const segs = await loadSessionTranscript(n.content.session_id);
+          if (segs.length > 0) {
+            parts.push('\nTranscripción de la sesión [HH:MM:SS] texto:');
+            parts.push(formatSegmentsWithTimecodes(segs, Math.max(perSrtBudget, 8_000)));
+          }
+        } catch {
+          parts.push('*[transcripción no pudo cargarse]*');
+        }
+      } else {
+        const md = n.content?.md ?? '';
+        if (md.trim()) parts.push(md.trim());
+      }
       parts.push('');
     }
     return {
-      source_text: parts.join('\n').slice(0, 12_000),
+      source_text: parts.join('\n').slice(0, PODCAST_SOURCE_CAP),
       source_label: `board "${wsRow.title}"`,
     };
   }
 
-  // hoja_node: single node body. Useful for "explicame esta hoja"
-  // standalone listening.
+  // hoja_node: single node body. Para nodos type='srt' carga la
+  // transcripción completa de la sesión asociada (content.session_id).
+  // Sin esto, el podcast solo recibía title+subtitle del nodo y pedía
+  // "más información". Bug reportado por Jred 2026-05-12.
   if (type === 'hoja_node') {
     const { data, error } = await supa()
       .from('workspace_nodes')
-      .select('title, subtitle, content')
+      .select('id, type, title, subtitle, content')
       .eq('id', id)
       .single();
     if (error || !data) throw new Error('node_not_found');
-    const n = data as { title: string; subtitle: string; content: { md?: string } | null };
+    const n = data as {
+      id: string;
+      type: string;
+      title: string;
+      subtitle: string;
+      content: {
+        md?: string;
+        session_id?: string;
+        session_title?: string;
+        session_fecha?: string;
+      } | null;
+    };
     const parts: string[] = [];
     if (n.title) parts.push(`Título: ${n.title}`);
     if (n.subtitle) parts.push(`Subtítulo: ${n.subtitle}`);
-    if (n.content?.md) parts.push(`\n${n.content.md}`);
+
+    if (n.type === 'srt' && n.content?.session_id) {
+      // Nodo SRT: el content guardado es solo metadata. Cargamos la
+      // transcripción completa de la sesión.
+      try {
+        const segs = await loadSessionTranscript(n.content.session_id);
+        if (segs.length > 0) {
+          parts.push(`\nTranscripción completa (${segs.length} segmentos, formato [HH:MM:SS] texto):`);
+          parts.push(formatSegmentsWithTimecodes(segs, PODCAST_SOURCE_CAP - parts.join('\n').length - 500));
+        } else {
+          parts.push('\n[Transcripción aún no procesada para esta sesión.]');
+        }
+      } catch (err) {
+        parts.push(`\n[Error cargando transcripción: ${(err as Error).message}]`);
+      }
+    } else if (n.content?.md) {
+      // Hoja editorial: el body es HTML/markdown editable.
+      parts.push(`\n${n.content.md}`);
+    }
+
     return {
-      source_text: parts.join('\n').slice(0, 12_000),
-      source_label: `nota "${n.title || 'sin título'}"`,
+      source_text: parts.join('\n').slice(0, PODCAST_SOURCE_CAP),
+      source_label: n.type === 'srt'
+        ? `transcripción "${n.content?.session_title ?? n.title}"`
+        : `nota "${n.title || 'sin título'}"`,
     };
   }
 
@@ -722,7 +894,7 @@ async function loadSource(
       .limit(40);
     if (error) throw new Error(`chat_load: ${error.message}`);
     const rows = (data ?? []) as Array<{ role: string; content: string }>;
-    const text = rows.map((r) => `[${r.role}] ${r.content}`).join('\n\n').slice(0, 12_000);
+    const text = rows.map((r) => `[${r.role}] ${r.content}`).join('\n\n').slice(0, PODCAST_SOURCE_CAP);
     return { source_text: text, source_label: `conversación ${id.slice(0, 8)}` };
   }
 
