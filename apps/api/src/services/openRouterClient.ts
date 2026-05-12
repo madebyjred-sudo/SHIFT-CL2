@@ -2063,14 +2063,31 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   //       tool_choice='none'. Si el content sigue vacío, último recurso:
   //       sintetizar respuesta determinística desde los tool results que
   //       ya capturamos en `messages`.
+  // Pass2 messages: añadimos un nudge user message al final para forzar
+  // al modelo a responder. Sin esto, Anthropic a veces decide
+  // finish_reason='stop' con content vacío después de procesar tool results
+  // (especialmente con sonnet-4.6 + tool_choice='none' + tools array).
+  // Diagnóstico 2026-05-12: pass2 devolvía exactamente "" con stop natural.
+  const messagesForPass2 = [
+    ...messages,
+    {
+      role: 'user' as const,
+      content:
+        'Ahora respondé al usuario usando los extractos que devolvió la tool. ' +
+        'Citá [N] inline después de cada afirmación. Si los extractos no son suficientes, ' +
+        'decilo explícitamente pero igual respondé con lo que tenés.',
+    },
+  ];
+
   let pass2Text = '';
   try {
     const pass2Res = await orFetch(
       {
         model,
-        messages,
-        tools,
-        tool_choice: 'none',
+        messages: messagesForPass2,
+        // NO incluimos `tools` ni `tool_choice` — el modelo ya ejecutó la tool
+        // en pass1. Tener tools registradas + tool_choice='none' confunde a
+        // sonnet-4.6 (devuelve stop con content vacío).
         max_tokens: 2048,
         temperature: 0.2,
         ...cerebroExtras,
