@@ -16,10 +16,13 @@ import { withTimeout, withRetry, ResilienceError } from './resilience.js';
 
 // Pass-1 (non-stream) is short and idempotent → retry safely.
 // Stream requests are NOT retried mid-flight (would duplicate tokens).
-const OR_PASS1_TIMEOUT_MS = 30_000;
+// Timeouts subidos 2026-05-12 tras refactor de pasar transcript completo en
+// system prompt. Sonnet con 30-60k input tokens + output narrativo de 1-2k
+// tokens tarda 20-50s. El timeout previo de 30s fallaba en sesiones largas.
+const OR_PASS1_TIMEOUT_MS = 90_000;
 const OR_PASS1_RETRY_ATTEMPTS = 2;
 const OR_PASS1_RETRY_BASE_MS = 600;
-const OR_STREAM_OPEN_TIMEOUT_MS = 30_000;
+const OR_STREAM_OPEN_TIMEOUT_MS = 60_000;
 
 interface StreamArgs {
   agent_id: AgentId;
@@ -724,9 +727,21 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   if (hasSearchTranscriptsTool(agent.tools)) tools.push(SEARCH_TRANSCRIPTS_TOOL);
   const scopeId = args.scope_legacy_session_id ?? null;
   const scopeUuid = args.scope_session_uuid ?? null;
-  // Registrar la tool si CUALQUIERA de los dos paths está presente. El handler
-  // de la tool más abajo elige internamente cuál implementación llamar.
-  if (scopeId !== null || scopeUuid !== null) tools.push(SEARCH_SESSION_TRANSCRIPT_TOOL);
+  // search_session_transcript se registra SOLO cuando NO tenemos el
+  // transcript completo en el system prompt. Si scope_system_prompt
+  // contiene "=== TRANSCRIPCIÓN COMPLETA ===" (sessions UUID con
+  // transcript inline tras el refactor 2026-05-12), no hace falta la
+  // tool — el modelo lee el transcript directo. Registrarla en ese
+  // caso solo agrega input tokens innecesarios y tienta al modelo a
+  // hacer una llamada que termina en pass2 vacío.
+  // El path legacy (scope_legacy_session_id) NO incluye transcript en
+  // el prompt todavía, entonces sigue necesitando la tool.
+  const transcriptInPrompt =
+    typeof args.scope_system_prompt === 'string' &&
+    args.scope_system_prompt.includes('=== TRANSCRIPCIÓN COMPLETA ===');
+  if ((scopeId !== null || scopeUuid !== null) && !transcriptInPrompt) {
+    tools.push(SEARCH_SESSION_TRANSCRIPT_TOOL);
+  }
   // DEBUG: traza de tools registradas — quitar tras confirmar el flow.
   console.log('[chat] tools registered:', {
     agent_id: agent.id,
