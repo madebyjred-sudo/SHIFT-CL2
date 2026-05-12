@@ -36,6 +36,17 @@ import {
 } from 'youtube-transcript';
 import { withTimeout, withRetry, ResilienceError } from './resilience.js';
 import { logger } from './logger.js';
+// Fallback fetcher used when the npm lib reports `no_transcript_available`
+// for a video that the YouTube Data API confirms has an ASR track. yt-dlp
+// goes through Innertube + JS-challenge solving and reliably extracts
+// auto-captions for long-form plenarios. See ytDlpTranscript.ts.
+import { fetchTranscriptViaYtDlp, YtDlpError } from './ytDlpTranscript.js';
+// Primary fetcher (mayo 2026): Gemini 2.5 Flash con YouTube URI directo.
+// YouTube bloquea las IPs de Cloud Run para captions (lib + yt-dlp), pero
+// Gemini accede al video desde infra de Google internamente sin bloqueo.
+// Mantenemos lib + yt-dlp como fallback para dev local sin ADC o si Vertex
+// AI tiene un outage. Ver geminiVideoTranscript.ts.
+import { fetchTranscriptViaGemini, fetchTranscriptViaGeminiChunked, GeminiTranscriptError } from './geminiVideoTranscript.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -272,13 +283,73 @@ export async function fetchTranscript(
     preferredLanguage?: string;
     timeoutMs?: number;
     signal?: AbortSignal;
+    /** Duración en segundos (de YouTube Data API). Si está disponible,
+     *  Gemini chunkea por ventanas de 10min para evitar truncation. */
+    durationS?: number;
   },
 ): Promise<TranscriptSegment[]> {
   const lang = opts?.preferredLanguage ?? DEFAULT_LANGUAGE;
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const label = `youtube:transcript:${videoId}`;
 
-  // Single attempt: timeout-wrapped lib call + error mapping
+  // Path primario (mayo 2026): Gemini 2.5 Flash. Si el env GEMINI_TRANSCRIPT_ENABLED
+  // está activo, intentamos Gemini primero. Si falla por cualquier razón,
+  // caemos al path legacy (lib → yt-dlp) que sigue siendo útil para dev local.
+  if (process.env.GEMINI_TRANSCRIPT_ENABLED === 'true') {
+    try {
+      // Decisión chunked vs single-call:
+      //   - Si tenemos durationS > 600 → chunked (mejor calidad, evita
+      //     truncation en plenarias largas).
+      //   - Si durationS está ausente o es 0 → chunked con UPPER BOUND
+      //     (4 h = 14400s). Bug 2026-05-12: cuando YouTube Data API no
+      //     devolvía duración, caíamos a single-call y Gemini Flash
+      //     truncaba en ~59 min (MAX_TOKENS). Plenarios completos quedaban
+      //     cortados. Asumir 4 h y chunkear; los chunks que excedan el
+      //     fin real del video devuelven vacío y se descartan sin costo.
+      //   - Si durationS <= 600 (clip corto) → single-call (más rápido,
+      //     no hay riesgo de truncation).
+      const effectiveDuration =
+        typeof opts?.durationS === 'number' && opts.durationS > 0
+          ? opts.durationS
+          : 14_400; // fallback upper bound = 4 h
+      const segs =
+        effectiveDuration > 600
+          ? await fetchTranscriptViaGeminiChunked(videoId, effectiveDuration, {
+              signal: opts?.signal,
+            })
+          : await fetchTranscriptViaGemini(videoId, { signal: opts?.signal });
+      const normalized: TranscriptSegment[] = segs.map((s) => ({
+        start_seconds: s.start_seconds,
+        end_seconds: s.end_seconds,
+        text: s.text,
+        language: lang,
+      }));
+      if (normalized.length > 0) {
+        logger.info('youtube_transcript_fetched', {
+          videoId,
+          lang,
+          segmentCount: normalized.length,
+          source: 'gemini',
+        });
+        return normalized;
+      }
+      logger.warn('gemini_transcript_empty_falling_back', { videoId });
+    } catch (err) {
+      // Cualquier error de Gemini → log + fallback al path legacy.
+      logger.warn('gemini_transcript_failed_falling_back', {
+        videoId,
+        code: err instanceof GeminiTranscriptError ? err.code : 'unknown',
+        message: (err as Error)?.message?.slice(0, 200),
+      });
+    }
+  }
+
+  // Single attempt: timeout-wrapped lib call + error mapping.
+  // If the npm lib reports `no_transcript_available` for a video that
+  // YouTube actually serves an ASR track for (common with the Asamblea
+  // plenarios since Google's 2025 timed-text endpoint changes), we fall
+  // through to yt-dlp before giving up. yt-dlp is slower (~5-15s per video
+  // because it spawns a subprocess + solves JS challenges) but reliable.
   async function attempt(): Promise<TranscriptSegment[]> {
     try {
       const raw = await withTimeout(
@@ -290,17 +361,83 @@ export async function fetchTranscript(
         { ms: timeoutMs, label, signal: opts?.signal },
       );
       const segments = normalizeSegments(raw);
-      logger.info('youtube_transcript_fetched', {
-        videoId,
-        lang,
-        segmentCount: segments.length,
-      });
-      return segments;
+      if (segments.length > 0) {
+        logger.info('youtube_transcript_fetched', {
+          videoId,
+          lang,
+          segmentCount: segments.length,
+          source: 'lib',
+        });
+        return segments;
+      }
+      // Lib returned 0 segments — treat as "not available" and try yt-dlp.
+      logger.info('youtube_transcript_lib_empty_trying_ytdlp', { videoId });
+      return await tryYtDlpFallback(videoId, lang, timeoutMs, opts?.signal);
     } catch (err) {
+      const mapped = mapLibError(err, videoId);
+      // Only fall through to yt-dlp for the "no transcript available" code.
+      // Other failures (network, rate-limited, video-not-found) shouldn't try
+      // a second fetcher — the issue is upstream, not lib-specific.
+      if (mapped.code === 'no_transcript_available') {
+        try {
+          return await tryYtDlpFallback(videoId, lang, timeoutMs, opts?.signal);
+        } catch (ytErr) {
+          // yt-dlp also failed — surface the original lib error so the caller
+          // sees the more meaningful error (the lib's diagnostic, not yt-dlp's).
+          logger.warn('youtube_transcript_ytdlp_fallback_failed', {
+            videoId,
+            ytDlpError: (ytErr as Error)?.message?.slice(0, 200),
+          });
+          throw mapped;
+        }
+      }
       // Map to our typed error so shouldRetryTranscript can inspect the code.
-      throw mapLibError(err, videoId);
+      throw mapped;
     }
   }
+
+  /**
+   * Try yt-dlp as fallback. Returns segments on success, throws on failure.
+   * The thrown error is intentionally generic — caller decides how to handle.
+   */
+  async function tryYtDlpFallback(
+    vid: string,
+    language: string,
+    timeoutMsLocal: number,
+    signal?: AbortSignal,
+  ): Promise<TranscriptSegment[]> {
+    const ytSegs = await fetchTranscriptViaYtDlp(vid, {
+      language,
+      // Plenarios are long videos; yt-dlp scrape is fast but bumping the
+      // timeout to 90s gives generous slack for slow networks / busy CI.
+      timeoutMs: Math.max(timeoutMsLocal, 90_000),
+      signal,
+    });
+    const segments: TranscriptSegment[] = ytSegs.map((s) => ({
+      start_seconds: s.start_seconds,
+      end_seconds: s.end_seconds,
+      text: s.text,
+      language,
+    }));
+    logger.info('youtube_transcript_fetched', {
+      videoId: vid,
+      lang: language,
+      segmentCount: segments.length,
+      source: 'yt-dlp',
+    });
+    if (segments.length === 0) {
+      // yt-dlp ran but returned 0 segments — same end-state as lib emptiness.
+      throw new YoutubeTranscriptError(
+        `yt-dlp returned 0 segments for ${vid}`,
+        'no_transcript_available',
+        vid,
+      );
+    }
+    return segments;
+  }
+  // Suppress unused-import warning for YtDlpError when this module compiles
+  // standalone — the import is meaningful for typed re-export by callers.
+  void YtDlpError;
 
   return withRetry(attempt, {
     attempts: MAX_ATTEMPTS,
