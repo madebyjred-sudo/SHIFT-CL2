@@ -52,7 +52,7 @@ import {
   type SilDownload,
   countGridRows,
   type WebFormsSession,
-  type DocxDownload, // legacy — DocSlot ahora usa SilDownload
+  // DocxDownload (type legacy) ya no se usa — DocSlot wraps SilDownload
 } from '../apps/api/src/services/silWebFormsClient.js';
 
 // ─── Config ───────────────────────────────────────────────────────────
@@ -93,6 +93,18 @@ const STOP_BEFORE = process.env.STOP_BEFORE ? Number(process.env.STOP_BEFORE) : 
 // cuando el PDF descargado no tiene capa de texto (PDFs escaneados del SIL).
 // Costo: ~$1.50 / 1000 páginas. Default true.
 const ENABLE_OCR = (process.env.ENABLE_OCR ?? '1') === '1';
+// Cap defensivo de tamaño de doc — PDFs muy grandes (escaneados de alta
+// resolución, p. ej. 25.591 de 22 MB) consumen heap masivo en pdfjs y
+// hacen OOM. Saltamos esos y los registramos en metadata para hacer un
+// pass dedicado después con un script más conservador.
+const MAX_DOC_BYTES = Number(process.env.MAX_DOC_BYTES ?? 15 * 1024 * 1024);
+// Forzar GC entre expedientes para combatir leaks de pdfjs/buffers retenidos.
+// Requiere arrancar Node con --expose-gc; si no, no-op.
+function forceGc(): void {
+  if (typeof global.gc === 'function') {
+    try { global.gc(); } catch { /* swallow */ }
+  }
+}
 
 const GCP_LOCATION = process.env.GCP_LOCATION ?? 'us-central1';
 const EMBED_MODEL = process.env.VERTEX_EMBEDDING_MODEL ?? 'gemini-embedding-001';
@@ -101,10 +113,6 @@ const vertex = new PredictionServiceClient({ apiEndpoint: `${GCP_LOCATION}-aipla
 const VERTEX_ENDPOINT = `projects/${GCP_PROJECT}/locations/${GCP_LOCATION}/publishers/google/models/${EMBED_MODEL}`;
 
 // ─── Helpers ──────────────────────────────────────────────────────────
-
-// `DocxDownload` referenced para mantener compat con código viejo —
-// el nuevo flow usa SilDownload (que incluye format).
-void DocxDownload;
 
 interface DocSlot {
   tipo: 'texto_base' | 'dictamen' | 'tecnico';
@@ -281,6 +289,11 @@ interface Stats {
 async function processExpediente(exp: ExpRow, stats: Stats): Promise<void> {
   if (!FORCE && (await alreadyHasDocs(exp.id))) {
     stats.skipped += 1;
+    // Heartbeat de skip cada 100 — confirma que el loop no está stuck en
+    // skips silenciosos. No afecta perf (solo loggea).
+    if (stats.skipped % 100 === 0) {
+      console.log(`[bulk] skipped=${stats.skipped} (sample: ${exp.numero} ya tiene docs)`);
+    }
     return;
   }
 
@@ -360,10 +373,18 @@ async function processExpediente(exp: ExpRow, stats: Stats): Promise<void> {
         : `${rawName.replace(/\.(docx?|pdf)$/i, '')}.${ext}`;
       const safeName = filename.replace(/[^\w.\-]+/g, '_');
       const gcsPath = `expedientes/${exp.id}/${slot.tipo}_${slot.index}_${safeName}`;
+
+      // GUARD: PDFs muy grandes matan el heap durante el parse/OCR.
+      // Subimos a GCS para conservar el archivo (signed URL sigue
+      // siendo descargable desde la UI), pero saltamos el parse + chunks
+      // + embeddings. Quedan en sil_documentos con status='parsed' y
+      // metadata.oversized=true para un pass dedicado posterior.
+      const oversized = slot.download.bytes.length > MAX_DOC_BYTES;
+
       try {
         await storage.bucket(GCS_BUCKET).file(gcsPath).save(slot.download.bytes, {
           contentType: slot.download.mimeType,
-          metadata: { metadata: { sil_expediente_id: String(exp.id), sil_doc_kind: slot.tipo, sil_doc_index: String(slot.index), original_filename: filename } },
+          metadata: { metadata: { sil_expediente_id: String(exp.id), sil_doc_kind: slot.tipo, sil_doc_index: String(slot.index), original_filename: filename, oversized: oversized ? 'true' : 'false' } },
         });
         stats.docs_downloaded += 1;
         stats.bytes_in += slot.download.bytes.length;
@@ -375,15 +396,24 @@ async function processExpediente(exp: ExpRow, stats: Stats): Promise<void> {
 
       let text = '';
       let ocrUsed = false;
-      try {
-        const extracted = await extractTextFromDownload(slot.download, `${exp.numero}:${slot.tipo}`);
-        text = extracted.text;
-        ocrUsed = extracted.ocrUsed;
-        if (ocrUsed) stats.ocr_used += 1;
-      } catch (err) {
-        console.warn(`[exp ${exp.numero}] ${slot.download.format} text extraction failed: ${(err as Error).message}`);
-        stats.errors += 1;
+      if (oversized) {
+        console.warn(`[exp ${exp.numero}] slot ${slot.tipo}[${slot.index}] OVERSIZED ${(slot.download.bytes.length / 1024 / 1024).toFixed(1)} MB — skip parse/embed`);
+      } else {
+        try {
+          const extracted = await extractTextFromDownload(slot.download, `${exp.numero}:${slot.tipo}`);
+          text = extracted.text;
+          ocrUsed = extracted.ocrUsed;
+          if (ocrUsed) stats.ocr_used += 1;
+        } catch (err) {
+          console.warn(`[exp ${exp.numero}] ${slot.download.format} text extraction failed: ${(err as Error).message}`);
+          stats.errors += 1;
+        }
       }
+
+      // ASAP: liberar los bytes raw del PDF/DOCX. El upload + extract ya
+      // terminaron. Sin esto los buffers se retienen hasta que el GC
+      // pasa, y con PDFs de 5-22 MB × varios slots se acumula rápido.
+      (slot as { download: { bytes: Buffer | null } }).download.bytes = null as unknown as Buffer;
 
       // Insert sil_documentos row first (so we have an id for back-reference).
       const docRow = {
@@ -399,7 +429,10 @@ async function processExpediente(exp: ExpRow, stats: Stats): Promise<void> {
         text_extracted: text.slice(0, 500_000),
         text_chars: text.length,
         status: text.length >= 50 ? 'embedded' : 'parsed',
-        metadata: ocrUsed ? { ocr: 'cloud_vision_documents' } : null,
+        metadata: {
+          ...(ocrUsed ? { ocr: 'cloud_vision_documents' } : {}),
+          ...(oversized ? { oversized: true } : {}),
+        },
       };
       docRows.push(docRow);
 
@@ -457,9 +490,13 @@ async function processExpediente(exp: ExpRow, stats: Stats): Promise<void> {
     }
 
     stats.expedientes_processed += 1;
-    if (stats.expedientes_processed % 25 === 0) {
-      console.log(`[bulk] ${stats.expedientes_processed} exp · ${stats.docs_downloaded} docs · ${stats.total_chunks} chunks · ${Math.round(stats.bytes_in / 1024 / 1024)}MB · ${stats.errors} errs`);
+    if (stats.expedientes_processed % 10 === 0) {
+      const heapMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+      console.log(`[bulk] ${stats.expedientes_processed} exp · ${stats.docs_downloaded} docs · ${stats.total_chunks} chunks · ${Math.round(stats.bytes_in / 1024 / 1024)}MB io · heap=${heapMB}MB · ${stats.errors} errs · skipped=${stats.skipped}`);
     }
+    // Forzar GC cada N expedientes para combatir leaks de pdfjs/buffers
+    // retenidos en cierres. Sin esto el heap crece linealmente hasta OOM.
+    if (stats.expedientes_processed % 10 === 0) forceGc();
   } catch (err) {
     stats.errors += 1;
     console.warn(`[exp ${exp.numero}] fatal: ${(err as Error).message}`);
