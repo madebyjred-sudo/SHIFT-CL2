@@ -831,6 +831,17 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   const choice = pass1.choices?.[0];
   const toolCalls = choice?.message?.tool_calls ?? [];
 
+  // DEBUG: traza del pass1 — quitar tras diagnosticar el flow UUID.
+  console.log('[chat] pass1 result:', {
+    model,
+    finish_reason: choice?.finish_reason,
+    tool_calls_count: toolCalls.length,
+    tool_names: toolCalls.map((t) => t.function?.name).join(','),
+    content_length: (choice?.message?.content ?? '').length,
+    content_preview: (choice?.message?.content ?? '').slice(0, 200),
+    tools_registered: tools.map((t: Record<string, unknown>) => (t.function as { name?: string } | undefined)?.name ?? 'unknown').join(','),
+  });
+
   if (toolCalls.length === 0) {
     // No tool call — stream the assistant's direct response token-by-token.
     // We already have it as full text; emit as single token chunk.
