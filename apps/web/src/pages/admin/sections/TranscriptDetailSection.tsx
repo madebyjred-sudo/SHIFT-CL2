@@ -339,7 +339,7 @@ export function TranscriptDetailSection({
     }
   };
 
-  const handleReview = async (action: 'approve' | 'reject') => {
+  const handleSessionReview = async (action: 'approve' | 'reject') => {
     if (!detailData) return;
     setReviewBusy(true);
     try {
@@ -532,7 +532,7 @@ export function TranscriptDetailSection({
                 <ActionButton
                   variant="reject"
                   icon={XCircle}
-                  onClick={() => void handleReview('reject')}
+                  onClick={() => void handleSessionReview('reject')}
                   disabled={reprocessBusy || reviewBusy}
                   title="Rechazar la sesión: no se publica en /sesiones"
                 >
@@ -541,7 +541,7 @@ export function TranscriptDetailSection({
                 <ActionButton
                   variant="approve"
                   icon={CheckCircle2}
-                  onClick={() => void handleReview('approve')}
+                  onClick={() => void handleSessionReview('approve')}
                   disabled={reprocessBusy || reviewBusy}
                   title="Aprobar la sesión: queda visible en /sesiones para todos"
                 >
