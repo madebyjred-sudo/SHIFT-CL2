@@ -233,6 +233,7 @@ chatRouter.post('/stream', async (req, res) => {
       dynamic_rag_prompt: dynamicRagPrompt,
       scope_system_prompt: scopeSystemPrompt,
       scope_legacy_session_id: scopeLegacySessionId,
+      scope_session_uuid: scopeSessionUuid,
       scope_workspace_id: scopeWorkspaceId,
       user_id: userId ?? null,
       // Cerebro neuron lookup key. Email is the canonical user_id across

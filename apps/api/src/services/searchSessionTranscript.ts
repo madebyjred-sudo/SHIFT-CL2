@@ -129,3 +129,90 @@ export async function searchSessionTranscript(
     hits: scored,
   };
 }
+
+/**
+ * Versión Supabase de searchSessionTranscript — para sesiones nuevas con
+ * UUID (no legacy int). Bug 2026-05-12: el tool search_session_transcript
+ * solo soportaba sesiones legacy, entonces al preguntar "qué pasa en esta
+ * sesión" en una sesión UUID Lexa respondía "no encontré nada en el corpus"
+ * porque no tenía ninguna tool para leer el transcript.
+ *
+ * Lee directo de `transcript_segments` (paginado para superar el cap de
+ * 1000 de PostgREST) y aplica el mismo algoritmo de keyword scoring.
+ */
+export async function searchSessionTranscriptByUuid(
+  sessionUuid: string,
+  query: string,
+  topK = 6,
+): Promise<SessionTranscriptResult | null> {
+  const { createClient } = await import('@supabase/supabase-js');
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) throw new Error('supabase env missing for searchSessionTranscriptByUuid');
+  const sb = createClient(url, key);
+
+  // 1) Metadata de la sesión (título, fecha, yt_id)
+  const { data: sess, error: sessErr } = await sb
+    .from('sessions')
+    .select('id, youtube_video_id, fecha, metadata')
+    .eq('id', sessionUuid)
+    .maybeSingle();
+  if (sessErr || !sess) return null;
+
+  const meta = (sess.metadata ?? {}) as { raw_title?: string; sesion_label?: string; duration_seconds?: number };
+  const titulo = meta.raw_title || meta.sesion_label || `Sesión ${sessionUuid.slice(0, 8)}`;
+
+  // 2) Paginar segments hasta agotar (cap PostgREST = 1000 por request)
+  type Seg = { segment_idx: number; start_seconds: number; end_seconds: number; text: string };
+  const all: Seg[] = [];
+  const PAGE = 1000;
+  for (let off = 0; off < 50_000; off += PAGE) {
+    const { data: page, error } = await sb
+      .from('transcript_segments')
+      .select('segment_idx, start_seconds, end_seconds, text')
+      .eq('session_id', sessionUuid)
+      .order('segment_idx', { ascending: true })
+      .range(off, off + PAGE - 1);
+    if (error) throw new Error(`segments fetch: ${error.message}`);
+    if (!page || page.length === 0) break;
+    all.push(...(page as Seg[]));
+    if (page.length < PAGE) break;
+  }
+
+  if (all.length === 0) {
+    return {
+      session_id: 0,
+      titulo,
+      fecha: sess.fecha ?? '',
+      youtube_id: sess.youtube_video_id,
+      duration_s: typeof meta.duration_seconds === 'number' ? meta.duration_seconds : 0,
+      total_segments: 0,
+      hits: [],
+    };
+  }
+
+  const queryTokens = Array.from(new Set(tokenize(query)));
+  const scored: SessionTranscriptHit[] = all
+    .map((s) => ({
+      index: s.segment_idx,
+      start: Number(s.start_seconds),
+      end: Number(s.end_seconds),
+      text: s.text ?? '',
+      score: scoreSegment(s.text ?? '', queryTokens),
+    }))
+    .filter((h) => h.score > 0)
+    .sort((a, b) => (b.score - a.score) || (a.start - b.start))
+    .slice(0, Math.max(1, Math.min(topK, 10)));
+
+  scored.sort((a, b) => a.start - b.start);
+
+  return {
+    session_id: 0, // UUID-backed, los callers usan el sessionUuid aparte
+    titulo,
+    fecha: sess.fecha ?? '',
+    youtube_id: sess.youtube_video_id,
+    duration_s: typeof meta.duration_seconds === 'number' ? meta.duration_seconds : 0,
+    total_segments: all.length,
+    hits: scored,
+  };
+}

@@ -1,7 +1,7 @@
 import type { CerebroStreamChunk, AgentId } from '@shift-cl2/shared-types';
 import { getAgent, buildAgentSystemPrompt } from './agentLoader.js';
 import { searchTranscripts, type ChunkHit } from './searchTranscripts.js';
-import { searchSessionTranscript } from './searchSessionTranscript.js';
+import { searchSessionTranscript, searchSessionTranscriptByUuid } from './searchSessionTranscript.js';
 import {
   searchExpedientes,
   getExpedienteById,
@@ -40,9 +40,15 @@ interface StreamArgs {
   scope_system_prompt?: string;
   // When set, enables the `search_session_transcript` tool for THIS turn.
   // The tool searches only the transcript of the scoped plenaria — keyword
-  // match over ElevenLabs segments, with timecodes returned for citation.
-  // Pragmatic stand-in for full RAG (Phase 3 of docs/issues/001).
+  // match over segments, with timecodes returned for citation. Pragmatic
+  // stand-in for full RAG (Phase 3 of docs/issues/001).
+  //
+  // Hay dos formas de scope-de-sesión (mutuamente exclusivas):
+  //   - scope_legacy_session_id: int legacy (MariaDB) — sesiones pre-2026-05
+  //   - scope_session_uuid:      UUID (Supabase)      — sesiones nuevas
+  // El handler de la tool elige el path según cuál esté presente.
   scope_legacy_session_id?: number | null;
+  scope_session_uuid?: string | null;
   // When set, enables `generate_presentation` for Atlas. The tool composes
   // every hoja in this workspace into a Gamma deck and emits a `pptx_ready`
   // chunk to the client. Without this scope, Atlas can't generate decks
@@ -717,7 +723,10 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   const tools: Array<Record<string, unknown>> = [];
   if (hasSearchTranscriptsTool(agent.tools)) tools.push(SEARCH_TRANSCRIPTS_TOOL);
   const scopeId = args.scope_legacy_session_id ?? null;
-  if (scopeId !== null) tools.push(SEARCH_SESSION_TRANSCRIPT_TOOL);
+  const scopeUuid = args.scope_session_uuid ?? null;
+  // Registrar la tool si CUALQUIERA de los dos paths está presente. El handler
+  // de la tool más abajo elige internamente cuál implementación llamar.
+  if (scopeId !== null || scopeUuid !== null) tools.push(SEARCH_SESSION_TRANSCRIPT_TOOL);
   // SIL tools: only registered when the agent YAML opts in. Letting every
   // agent see all three would balloon the system prompt and confuse the
   // model about when to use search_transcripts (plenarias) vs search_sil_*
@@ -924,11 +933,10 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     }
 
     if (tc.function.name === 'search_session_transcript') {
-      // Defensive: only valid when this turn has a scope. The tool isn't
-      // even registered without one, so reaching here without scopeId means
-      // the model hallucinated the call — return an explicit error string
-      // so it reformulates rather than silently dropping.
-      if (scopeId === null) {
+      // Defensive: only valid when this turn has a scope (legacy id O UUID).
+      // The tool isn't even registered sin scope, así que llegar acá significa
+      // que el modelo alucinó la call.
+      if (scopeId === null && scopeUuid === null) {
         messages.push({
           role: 'tool',
           tool_call_id: tc.id,
@@ -953,7 +961,11 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
 
       let result: Awaited<ReturnType<typeof searchSessionTranscript>> = null;
       try {
-        result = await searchSessionTranscript(scopeId, parsedArgs.query, parsedArgs.top_k);
+        // Sesiones nuevas (UUID) van por Supabase; legacy por MariaDB.
+        // Solo uno de los dos puede estar seteado en una request real.
+        result = scopeUuid !== null
+          ? await searchSessionTranscriptByUuid(scopeUuid, parsedArgs.query, parsedArgs.top_k)
+          : await searchSessionTranscript(scopeId!, parsedArgs.query, parsedArgs.top_k);
       } catch (err) {
         messages.push({
           role: 'tool',
