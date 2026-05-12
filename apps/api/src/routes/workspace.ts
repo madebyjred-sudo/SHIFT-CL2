@@ -1405,11 +1405,185 @@ function paragraphize(s: string): string {
     .join('');
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Construye un payload secundario con la transcripción en formato SRT
+ * (timecodes [HH:MM:SS] inline). Devuelve null si la sesión no es UUID
+ * o no tiene transcript_segments. Pedido por Jred 2026-05-12: el usuario
+ * quiere arrastrar el SRT al workspace junto con el resumen editorial.
+ */
+async function buildSesionSrtPayload(
+  rawId: string | number,
+): Promise<{ title: string; subtitle: string; html: string; sourceLabel: string } | null> {
+  const rawStr = String(rawId);
+  if (!UUID_REGEX.test(rawStr)) return null; // solo sesiones nuevas (Supabase)
+
+  const { data: s } = await supa()
+    .from('sessions')
+    .select('id, youtube_video_id, fecha, metadata')
+    .eq('id', rawStr)
+    .maybeSingle();
+  if (!s) return null;
+
+  const meta = (s.metadata ?? {}) as { raw_title?: string; sesion_label?: string };
+  const title = meta.raw_title || meta.sesion_label || `Sesión ${s.youtube_video_id ?? rawStr.slice(0, 8)}`;
+  const fechaFmt = s.fecha
+    ? new Date(s.fecha).toLocaleDateString('es-CR', { year: 'numeric', month: 'long', day: 'numeric' })
+    : '';
+
+  // Paginar segments (cap PostgREST 1000)
+  const segs: Array<{ start_seconds: number; end_seconds: number; text: string }> = [];
+  for (let off = 0; off < 50_000; off += 1000) {
+    const { data: page } = await supa()
+      .from('transcript_segments')
+      .select('start_seconds, end_seconds, text')
+      .eq('session_id', rawStr)
+      .order('segment_idx', { ascending: true })
+      .range(off, off + 999);
+    if (!page || page.length === 0) break;
+    segs.push(...(page as Array<{ start_seconds: number; end_seconds: number; text: string }>));
+    if (page.length < 1000) break;
+  }
+  if (segs.length === 0) return null;
+
+  // Agrupar segments consecutivos en bloques de ~30s para que la SRT sea
+  // legible. Sin esto cada línea es una palabra suelta — buena para
+  // subtítulos pero malo para lectura. 30s es el grano que usa Lexa
+  // cuando lee el transcript en el system prompt.
+  const fmtTs = (sec: number): string => {
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s2 = Math.floor(sec % 60);
+    return h > 0
+      ? `${h}:${String(m).padStart(2, '0')}:${String(s2).padStart(2, '0')}`
+      : `${m}:${String(s2).padStart(2, '0')}`;
+  };
+  type Block = { start: number; end: number; texts: string[] };
+  const blocks: Block[] = [];
+  for (const seg of segs) {
+    const last = blocks[blocks.length - 1];
+    if (!last || seg.start_seconds - last.start >= 30) {
+      blocks.push({ start: seg.start_seconds, end: seg.end_seconds, texts: [(seg.text ?? '').trim()] });
+    } else {
+      last.end = seg.end_seconds;
+      last.texts.push((seg.text ?? '').trim());
+    }
+  }
+
+  const html: string[] = [];
+  html.push(`<h2>SRT — ${escapeHtml(title)}</h2>`);
+  if (fechaFmt) html.push(`<p><em>${escapeHtml(fechaFmt)} · ${segs.length} segmentos · ${blocks.length} bloques</em></p>`);
+  html.push('<p><em>Transcripción cronológica con timecodes. Útil para referenciar momentos exactos en presentaciones, informes o citas.</em></p>');
+  html.push('<hr>');
+  // Capamos a 60k chars para no romper el editor. Plenarias de 6h+ caben
+  // si los bloques son densos.
+  let charsUsed = 0;
+  for (const b of blocks) {
+    const line = `[${fmtTs(b.start)}] ${b.texts.filter(Boolean).join(' ').trim()}`;
+    if (charsUsed + line.length > SESION_TRANSCRIPT_CAP) {
+      html.push(`<p><em>… transcripción truncada en ${fmtTs(b.start)} (cap ${SESION_TRANSCRIPT_CAP} chars). Para descarga completa usá el botón "Descargar" en la sesión.</em></p>`);
+      break;
+    }
+    html.push(`<p>${escapeHtml(line)}</p>`);
+    charsUsed += line.length;
+  }
+
+  return {
+    title: `SRT — ${title}`.slice(0, 200),
+    subtitle: fechaFmt ? `Transcripción · ${fechaFmt}` : 'Transcripción con timecodes',
+    html: html.join(''),
+    sourceLabel: `srt-${rawStr.slice(0, 8)}`,
+  };
+}
+
 async function buildSesionPayload(
   rawId: string | number,
 ): Promise<{ title: string; subtitle: string; html: string; sourceLabel: string } | null> {
-  const numId = Number(rawId);
-  if (!Number.isFinite(numId)) return null;
+  const rawStr = String(rawId);
+
+  // ── Path A: UUID → sesión nueva en Supabase ──────────────────────────
+  // Las sesiones del pipeline YouTube post-mayo 2026 viven en `sessions`
+  // (Supabase). Las viejas viven en MariaDB legacy. Detectamos por shape
+  // del id y resolvemos en la fuente correcta.
+  if (UUID_REGEX.test(rawStr)) {
+    const { data: s, error: sErr } = await supa()
+      .from('sessions')
+      .select('id, youtube_video_id, fecha, status, metadata, created_at')
+      .eq('id', rawStr)
+      .maybeSingle();
+    if (sErr || !s) return null;
+
+    const meta = (s.metadata ?? {}) as {
+      raw_title?: string;
+      sesion_label?: string;
+      duration_seconds?: number;
+      resumen?: { ejecutivo?: string; puntos_clave?: string; acuerdos?: string };
+    };
+    const title = meta.raw_title || meta.sesion_label || `Sesión ${s.youtube_video_id ?? rawStr.slice(0, 8)}`;
+    const fechaFmt = s.fecha
+      ? new Date(s.fecha).toLocaleDateString('es-CR', { year: 'numeric', month: 'long', day: 'numeric' })
+      : '';
+
+    // Transcript: lo armamos a partir de transcript_segments. Cap suficiente
+    // para una plenaria (~30K palabras < 60K chars).
+    let transcriptText = '';
+    try {
+      const { data: segs } = await supa()
+        .from('transcript_segments')
+        .select('text')
+        .eq('session_id', rawStr)
+        .order('segment_idx', { ascending: true });
+      if (segs && segs.length) {
+        transcriptText = segs.map((row) => (row as { text: string }).text).join(' ').slice(0, SESION_TRANSCRIPT_CAP);
+      }
+    } catch {
+      transcriptText = '';
+    }
+
+    const html: string[] = [];
+    html.push(`<h2>${escapeHtml(title)}</h2>`);
+    if (fechaFmt) html.push(`<p><em>${escapeHtml(fechaFmt)}</em></p>`);
+
+    // Resumen estructurado del LLM (3 cards) si está disponible.
+    if (meta.resumen?.ejecutivo) {
+      html.push('<h3>Resumen ejecutivo</h3>');
+      html.push(paragraphize(meta.resumen.ejecutivo));
+    }
+    if (meta.resumen?.puntos_clave) {
+      html.push('<h3>Puntos clave</h3>');
+      html.push(paragraphize(meta.resumen.puntos_clave));
+    }
+    if (meta.resumen?.acuerdos) {
+      html.push('<h3>Acuerdos y mociones</h3>');
+      html.push(paragraphize(meta.resumen.acuerdos));
+    }
+
+    if (transcriptText.trim()) {
+      html.push('<h3>Transcripción</h3>');
+      html.push(paragraphize(transcriptText));
+    } else if (s.youtube_video_id) {
+      html.push('<h3>Transcripción</h3>');
+      const ytUrl = `https://www.youtube.com/watch?v=${s.youtube_video_id}`;
+      html.push(`<p><em>Transcripción aún no disponible. Fuente: <a href="${escapeHtml(ytUrl)}">YouTube</a>.</em></p>`);
+    }
+
+    html.push('<hr>');
+    html.push(
+      `<p><em>Importado desde la sesión ${escapeHtml(title)} de la Asamblea. Esta hoja es una copia editable — los cambios no afectan la fuente original.</em></p>`,
+    );
+
+    return {
+      title: title.slice(0, 200),
+      subtitle: fechaFmt || 'Sesión Plenaria',
+      html: html.join(''),
+      sourceLabel: `sesión-${rawStr.slice(0, 8)}`,
+    };
+  }
+
+  // ── Path B: int → sesión legacy en MariaDB ──────────────────────────
+  const numId = Number(rawStr);
+  if (!Number.isFinite(numId) || numId <= 0) return null;
   const sess = await getTranscripcionById(numId);
   if (!sess) return null;
 
@@ -1707,6 +1881,48 @@ workspaceRouter.post('/:id/import-sources', async (req, res) => {
         continue;
       }
       created.push(node);
+
+      // Si la fuente es una sesión UUID, agregar un nodo SECUNDARIO con la
+      // transcripción en formato SRT (timecodes inline). Pedido por Jred
+      // 2026-05-12: el operador trabaja sobre la sesión y necesita
+      // referenciar momentos exactos por timecode en su narrativa.
+      // El nodo SRT queda al lado del editorial — color 'sage' para
+      // diferenciar visualmente.
+      if (item.type === 'sesion') {
+        try {
+          const srtPayload = await buildSesionSrtPayload(item.id!);
+          if (srtPayload) {
+            const srtSlot = startIndex + i + sources.length; // posicionar después del bloque editorial
+            const srtCol = srtSlot % SOURCE_GRID_COLS;
+            const srtRow = Math.floor(srtSlot / SOURCE_GRID_COLS);
+            const srtX = srtCol * (SOURCE_NODE_W + SOURCE_NODE_GAP) + 80;
+            const srtY = srtRow * (SOURCE_NODE_H + SOURCE_NODE_GAP) + 80;
+            const { data: srtNode } = await supa()
+              .from('workspace_nodes')
+              .insert({
+                workspace_id: workspaceId,
+                type: 'hoja',
+                x: srtX, y: srtY,
+                width: SOURCE_NODE_W,
+                height: SOURCE_NODE_H,
+                title: srtPayload.title,
+                subtitle: srtPayload.subtitle,
+                content: { md: srtPayload.html, source_label: srtPayload.sourceLabel },
+                color: 'sage', // diferenciable del nodo editorial 'ink'
+              })
+              .select('*')
+              .single();
+            if (srtNode) created.push(srtNode);
+          }
+        } catch (err) {
+          // No es fatal — la hoja editorial ya se creó. El SRT extra es
+          // bonus, no crítico para el workflow del operador.
+          req.log.warn('workspace_import_srt_failed_continuing', {
+            sesion_id: item.id,
+            error: (err as Error).message,
+          });
+        }
+      }
     } catch (err) {
       errors.push({ source: item, error: (err as Error).message });
     }
@@ -2893,9 +3109,25 @@ workspaceRouter.post('/:id/export-asset', async (req, res) => {
   if (!await ownedWorkspace(userId, id, res)) return;
 
   const body = (req.body ?? {}) as ExportAssetBody;
-  const kind = body.kind;
-  if (!kind || !['carousel', 'pptx', 'document'].includes(kind)) {
-    res.status(400).json({ ok: false, error: 'invalid_kind', hint: 'carousel|pptx|document' });
+  // Aceptamos tanto los nombres nuevos del frontend ('pptx_asset',
+  // 'docx_asset') como los originales del backend ('pptx', 'document').
+  // Mapeo a la forma canónica que el resto del handler usa internamente.
+  const rawKind = body.kind as string | undefined;
+  const KIND_ALIASES: Record<string, 'carousel' | 'pptx' | 'document'> = {
+    carousel: 'carousel',
+    pptx: 'pptx',
+    pptx_asset: 'pptx',
+    document: 'document',
+    docx: 'document',
+    docx_asset: 'document',
+  };
+  const kind = rawKind ? KIND_ALIASES[rawKind] : undefined;
+  if (!kind) {
+    res.status(400).json({
+      ok: false,
+      error: 'invalid_kind',
+      hint: 'carousel|pptx|document (recibido: ' + (rawKind ?? 'undefined') + ')',
+    });
     return;
   }
   const sendToCanvas = body.sendToCanvas !== false; // default true
