@@ -2048,8 +2048,26 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // Pass 2: stream final answer with tool results in context. Low temperature
   // because retrieval-grounded answers should not be creative — they should
   // restate evidence with citations, not synthesize.
+  //
+  // tool_choice='none' FORZADO. Antes (default 'auto') el modelo a veces
+  // pedía un round adicional de tool_calls (e.g., search_transcripts para
+  // complementar) y streamCompletion los ignoraba — assistantText quedaba
+  // vacío y se disparaba empty_completion_fallback. Bug observado
+  // 2026-05-12 con sesiones UUID + Lexa: tool ejecutaba bien (citations
+  // emitidas al cliente) pero el texto final no aparecía.
+  // Con 'none', el modelo está obligado a responder texto con los tool
+  // results que ya tiene. Si necesita más data, se acabó este turno.
+  // Trade-off aceptable — el costo de un turno extra es < UX rota.
   await streamCompletion(
-    { model, messages, max_tokens: 2048, temperature: 0.2, ...cerebroExtras },
+    {
+      model,
+      messages,
+      tools, // se mantienen registradas para que el modelo entienda el contexto
+      tool_choice: 'none',
+      max_tokens: 2048,
+      temperature: 0.2,
+      ...cerebroExtras,
+    },
     orKey,
     (t) => args.onChunk({ type: 'token', payload: t }),
   );
