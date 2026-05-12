@@ -182,3 +182,20 @@ export async function triggerSync(opts: SyncOptions = {}): Promise<{
     opts,
   );
 }
+
+/**
+ * Aprobar o rechazar una sesión completa desde el editor de transcripción.
+ * approve → la sesión pasa a `indexed` y queda visible en /sesiones para todos.
+ * reject  → la sesión pasa a `rejected` y no se publica.
+ */
+export async function reviewTranscriptSession(
+  id: string,
+  action: 'approve' | 'reject',
+  note?: string,
+): Promise<{ ok: true; session_id: string; status: string; action: string }> {
+  return apiFetch<{ ok: true; session_id: string; status: string; action: string }>(
+    'POST',
+    `/sessions/${encodeURIComponent(id)}/review`,
+    { action, note },
+  );
+}

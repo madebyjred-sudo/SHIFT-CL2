@@ -456,7 +456,7 @@ transcriptsAdminRouter.get('/sessions', async (req, res) => {
     let q = s
       .from('sessions')
       .select(
-        'id, titulo, youtube_video_id, status, source, fecha, comision, tipo, llm_reviewed_at, llm_review_model, metadata',
+        'id, youtube_video_id, status, source, fecha, comision, tipo, llm_reviewed_at, llm_review_model, metadata',
         { count: 'exact' },
       )
       .order('fecha', { ascending: false })
@@ -474,7 +474,6 @@ transcriptsAdminRouter.get('/sessions', async (req, res) => {
 
     const rows = (sessionRows ?? []) as Array<{
       id: string;
-      titulo: string | null;
       youtube_video_id: string | null;
       status: string;
       source: string | null;
@@ -526,7 +525,11 @@ transcriptsAdminRouter.get('/sessions', async (req, res) => {
 
     const sessions = rows.map((r) => ({
       id: r.id,
-      title: r.titulo ?? r.youtube_video_id ?? r.id,
+      // Bug-fix 2026-05-10: la columna sessions.titulo NO existe; el title
+      // del video se guarda en metadata.raw_title (lo guarda youtubeSync).
+      title: ((r.metadata ?? {}) as Record<string, unknown>).raw_title as string
+        ?? r.youtube_video_id
+        ?? r.id,
       youtube_video_id: r.youtube_video_id,
       source: r.source ?? 'unknown',
       status: r.status,
@@ -570,16 +573,32 @@ transcriptsAdminRouter.get('/sessions/:id', async (req, res) => {
       s
         .from('sessions')
         .select(
-          'id, titulo, youtube_video_id, status, source, fecha, comision, tipo, llm_reviewed_at, llm_review_model, metadata',
+          'id, youtube_video_id, status, source, fecha, comision, tipo, llm_reviewed_at, llm_review_model, metadata',
         )
         .eq('id', sessionId)
         .maybeSingle(),
-      s
-        .from('transcript_segments')
-        .select('id, session_id, segment_idx, start_seconds, end_seconds, text, source')
-        .eq('session_id', sessionId)
-        .order('segment_idx', { ascending: true })
-        .limit(200),
+      // Paginamos para superar el cap de PostgREST (1000 rows). Plenarias
+      // largas (~6 h) tienen ~7-8k segments. Bug 2026-05-12: con .limit(200)
+      // Carlos veía solo los primeros 200 segments del Plenario 11 may #07
+      // y el reproductor cortaba a ~10 min.
+      (async () => {
+        const all: Array<{ id: string; session_id: string; segment_idx: number; start_seconds: number; end_seconds: number; text: string; source: string }> = [];
+        const PAGE = 1000;
+        const HARD = 50_000;
+        for (let off = 0; off < HARD; off += PAGE) {
+          const { data, error } = await s
+            .from('transcript_segments')
+            .select('id, session_id, segment_idx, start_seconds, end_seconds, text, source')
+            .eq('session_id', sessionId)
+            .order('segment_idx', { ascending: true })
+            .range(off, off + PAGE - 1);
+          if (error) return { data: null, error };
+          if (!data || data.length === 0) break;
+          all.push(...(data as Array<{ id: string; session_id: string; segment_idx: number; start_seconds: number; end_seconds: number; text: string; source: string }>));
+          if (data.length < PAGE) break;
+        }
+        return { data: all, error: null };
+      })(),
       s
         .from('transcript_corrections')
         .select(
@@ -600,7 +619,6 @@ transcriptsAdminRouter.get('/sessions/:id', async (req, res) => {
 
     const session = sessionRes.data as {
       id: string;
-      titulo: string | null;
       youtube_video_id: string | null;
       status: string;
       source: string | null;
@@ -641,7 +659,10 @@ transcriptsAdminRouter.get('/sessions/:id', async (req, res) => {
       ok: true,
       session: {
         id: session.id,
-        title: session.titulo ?? session.youtube_video_id ?? session.id,
+        // Bug-fix 2026-05-10: ver comentario en línea ~530 del list endpoint.
+        title: ((session.metadata ?? {}) as Record<string, unknown>).raw_title as string
+          ?? session.youtube_video_id
+          ?? session.id,
         youtube_video_id: session.youtube_video_id,
         source: session.source ?? 'unknown',
         status: session.status,
@@ -710,6 +731,79 @@ transcriptsAdminRouter.patch('/corrections/:id', async (req, res) => {
   } catch (err) {
     const message = (err as Error)?.message ?? String(err);
     req.log?.error('admin_transcripts_patch_correction_failed', { correctionId, error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/admin/transcripts/sessions/:id/review
+//
+// Aprobar o rechazar UNA SESIÓN COMPLETA. Esto es el botón "Aprobar Sesión"
+// del editor en /admin/transcripts/:id. La acción cambia el status de la
+// sesión y la deja visible (o no) para los usuarios en /sesiones.
+//
+// Body: { action: 'approve' | 'reject', note?: string }
+//   - approve → sessions.status = 'indexed' + insert/update transcripciones_review
+//   - reject  → sessions.status = 'rejected' + insert/update transcripciones_review
+//
+// Diseñado para que funcione AUTOMÁTICAMENTE para todas las sesiones futuras:
+// el botón aparece en cuanto la transcripción tiene segments (no requiere
+// configuración previa). Después de approve, la sesión aparece en /sesiones
+// para todos los usuarios; antes de approve, solo el admin la ve.
+// ─────────────────────────────────────────────────────────────────────────────
+transcriptsAdminRouter.post('/sessions/:id/review', async (req, res) => {
+  const user = await getUserFromRequest(req);
+  if (!user) {
+    res.status(401).json({ ok: false, error: 'auth_required' });
+    return;
+  }
+  const sessionId = req.params.id as string;
+  const action = req.body?.action as string | undefined;
+  const note = (req.body?.note as string | undefined) ?? null;
+
+  if (action !== 'approve' && action !== 'reject') {
+    res.status(400).json({ ok: false, error: 'action must be approve|reject' });
+    return;
+  }
+
+  try {
+    const s = supa();
+    const targetStatus = action === 'approve' ? 'indexed' : 'rejected';
+    const reviewStatus = action === 'approve' ? 'approved' : 'rejected';
+
+    // 1) Update session.status para que /sesiones lo refleje
+    const { error: updErr } = await s
+      .from('sessions')
+      .update({ status: targetStatus })
+      .eq('id', sessionId);
+    if (updErr) throw new Error(`session update: ${updErr.message}`);
+
+    // 2) Upsert transcripciones_review para auditoría — quién aprobó, cuándo
+    const { error: revErr } = await s
+      .from('transcripciones_review')
+      .upsert(
+        {
+          session_id: sessionId,
+          status: reviewStatus,
+          reviewer_note: note,
+          reviewed_by: user.id,
+          reviewed_at: new Date().toISOString(),
+        },
+        { onConflict: 'session_id' },
+      );
+    if (revErr) {
+      // No es fatal — la auditoría falla pero la decisión está tomada
+      req.log?.warn('admin_transcripts_review_audit_failed', {
+        sessionId,
+        action,
+        error: revErr.message,
+      });
+    }
+
+    res.json({ ok: true, session_id: sessionId, status: targetStatus, action });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('admin_transcripts_review_failed', { sessionId, action, error: message });
     res.status(500).json({ ok: false, error: message });
   }
 });

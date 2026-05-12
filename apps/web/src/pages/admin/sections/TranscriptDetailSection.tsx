@@ -28,6 +28,8 @@ import {
   AlertCircle,
   FileText,
   Cpu,
+  Youtube,
+  ExternalLink,
 } from 'lucide-react';
 import {
   ActionButton,
@@ -40,6 +42,7 @@ import {
 import {
   getTranscriptSession,
   patchCorrection,
+  reviewTranscriptSession,
   triggerSync,
   type TranscriptCorrection,
   type TranscriptSessionDetailResponse,
@@ -256,6 +259,7 @@ export function TranscriptDetailSection({
 
   const [segmentsShown, setSegmentsShown] = useState(50);
   const [reprocessBusy, setReprocessBusy] = useState(false);
+  const [reviewBusy, setReviewBusy] = useState(false);
 
   // ── Load session detail ────────────────────────────────────────────────
   const load = async () => {
@@ -324,7 +328,7 @@ export function TranscriptDetailSection({
       );
       notify({
         kind: 'success',
-        text: skipLlm ? 'Re-segmentado (sin LLM)' : 'Re-procesando con LLM…',
+        text: skipLlm ? 'Re-segmentado (sin revisión IA)' : 'Re-procesando con revisión IA…',
         detail: 'Los datos se actualizarán en unos momentos.',
       });
       void load();
@@ -332,6 +336,30 @@ export function TranscriptDetailSection({
       notify({ kind: 'error', text: 'No se pudo re-procesar', detail: (err as Error).message });
     } finally {
       setReprocessBusy(false);
+    }
+  };
+
+  const handleReview = async (action: 'approve' | 'reject') => {
+    if (!detailData) return;
+    setReviewBusy(true);
+    try {
+      await reviewTranscriptSession(sessionId, action);
+      notify({
+        kind: 'success',
+        text:
+          action === 'approve'
+            ? 'Sesión aprobada — visible en /sesiones para todos'
+            : 'Sesión rechazada — no se publicó',
+      });
+      void load();
+    } catch (err) {
+      notify({
+        kind: 'error',
+        text: action === 'approve' ? 'No se pudo aprobar' : 'No se pudo rechazar',
+        detail: (err as Error).message,
+      });
+    } finally {
+      setReviewBusy(false);
     }
   };
 
@@ -355,7 +383,7 @@ export function TranscriptDetailSection({
   if (loadError) {
     return (
       <>
-        <SectionHeader eyebrow="Transcripciones · Pipeline YouTube" />
+        <SectionHeader eyebrow="Transcripciones · Cola de revisión" />
         <button
           type="button"
           onClick={() => navigate('/admin/transcripts')}
@@ -410,7 +438,7 @@ export function TranscriptDetailSection({
 
   return (
     <>
-      <SectionHeader eyebrow="Transcripciones · Pipeline YouTube" />
+      <SectionHeader eyebrow="Transcripciones · Cola de revisión" />
 
       {/* Back + title row */}
       <div className="mb-4 flex items-center gap-3">
@@ -474,7 +502,7 @@ export function TranscriptDetailSection({
           </div>
           {session.llm_reviewed_at && (
             <span className="text-[11.5px] text-[#0e1745]/50 dark:text-white/50">
-              LLM: {formatRelative(session.llm_reviewed_at)}
+              Revisión IA: {formatRelative(session.llm_reviewed_at)}
             </span>
           )}
 
@@ -484,22 +512,89 @@ export function TranscriptDetailSection({
               variant="ghost"
               icon={reprocessBusy ? Loader2 : RefreshCw}
               onClick={() => void handleReprocess(false)}
-              disabled={reprocessBusy}
-              title="Re-corre el pipeline completo (segmentación + LLM)"
+              disabled={reprocessBusy || reviewBusy}
+              title="Procesar de nuevo: nueva transcripción + revisión automática"
             >
               Re-procesar
             </ActionButton>
             <ActionButton
               variant="quiet"
               onClick={() => void handleReprocess(true)}
-              disabled={reprocessBusy}
-              title="Re-segmenta sin pasar por el LLM de revisión"
+              disabled={reprocessBusy || reviewBusy}
+              title="Solo re-segmentar la transcripción, sin revisión automática"
             >
               Solo re-segmentar
             </ActionButton>
+            {/* Botones de decisión final — aparecen automáticamente para toda
+                sesión que aún no está 'indexed' o 'rejected'. */}
+            {session.status !== 'indexed' && session.status !== 'rejected' && (
+              <>
+                <ActionButton
+                  variant="reject"
+                  icon={XCircle}
+                  onClick={() => void handleReview('reject')}
+                  disabled={reprocessBusy || reviewBusy}
+                  title="Rechazar la sesión: no se publica en /sesiones"
+                >
+                  Rechazar
+                </ActionButton>
+                <ActionButton
+                  variant="approve"
+                  icon={CheckCircle2}
+                  onClick={() => void handleReview('approve')}
+                  disabled={reprocessBusy || reviewBusy}
+                  title="Aprobar la sesión: queda visible en /sesiones para todos"
+                >
+                  {reviewBusy ? 'Aprobando…' : 'Aprobar sesión'}
+                </ActionButton>
+              </>
+            )}
+            {session.status === 'indexed' && (
+              <span className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-emerald-700 dark:text-emerald-300">
+                <CheckCircle2 size={14} strokeWidth={2} /> Publicada en /sesiones
+              </span>
+            )}
+            {session.status === 'rejected' && (
+              <span className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-rose-700 dark:text-rose-300">
+                <XCircle size={14} strokeWidth={2} /> Rechazada
+              </span>
+            )}
           </div>
         </CardBody>
       </Card>
+
+      {/* ── YouTube embed ───────────────────────────────────────────────
+          El operador necesita ver el video original mientras revisa la
+          transcripción — para validar fechas, oradores, nombres mal
+          transcritos. Si la sesión no es de YouTube (legacy uploads),
+          no renderiza nada.
+       */}
+      {session.youtube_video_id && (
+        <Card className="mb-5 overflow-hidden">
+          <div className="relative w-full" style={{ paddingBottom: '56.25%' }}>
+            <iframe
+              src={`https://www.youtube.com/embed/${session.youtube_video_id}`}
+              title={session.title}
+              className="absolute inset-0 h-full w-full"
+              frameBorder={0}
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+              allowFullScreen
+            />
+          </div>
+          <CardBody className="flex items-center gap-2 py-2 text-[11.5px] text-[#0e1745]/55 dark:text-white/55">
+            <Youtube size={12} />
+            <span className="font-mono">{session.youtube_video_id}</span>
+            <a
+              href={`https://www.youtube.com/watch?v=${session.youtube_video_id}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="ml-auto inline-flex items-center gap-1 hover:text-[#0e1745] dark:hover:text-white"
+            >
+              Abrir en YouTube <ExternalLink size={11} />
+            </a>
+          </CardBody>
+        </Card>
+      )}
 
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_420px] gap-5">
         {/* ── Corrections ──────────────────────────────────────────────── */}
@@ -636,7 +731,7 @@ export function TranscriptDetailSection({
             )}
             {segments.length === 0 && (
               <div className="px-[18px] py-8 text-center text-[12.5px] text-[#0e1745]/50 dark:text-white/50">
-                Sin segmentos. Ejecutá "Re-procesar" para segmentar.
+                Sin transcripción aún. Tocá "Re-procesar" para generarla.
               </div>
             )}
           </Card>
