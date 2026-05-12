@@ -22,6 +22,15 @@ export interface SessionContext {
   estado: number;
   youtube_id: string | null;
   resumen_ejecutivo: string | null;
+  /**
+   * Transcripción completa formateada con timecodes ([HH:MM:SS] texto).
+   * Cuando está presente, el caller la inyecta DIRECTO en el system prompt
+   * y el modelo lee/cita la transcripción sin necesidad de tool de búsqueda.
+   * Solo poblada para sesiones UUID (Supabase) con transcript_segments
+   * razonablemente pequeño (< ~150k tokens). Para sesiones más grandes
+   * (>10h video) queda null y el caller cae al path de tool keyword search.
+   */
+  transcript_with_timecodes?: string | null;
 }
 
 const CACHE_MAX = 50;
@@ -115,6 +124,62 @@ const uuidCache = new Map<string, { ctx: SessionContext; expiresAt: number }>();
  * branchear más allá del fetch. `id` se setea como 0 (no aplica numérico)
  * y el title incluye la pista que necesita el modelo.
  */
+// Cap defensivo para el transcript inline. Sonnet 4.6 acepta 200k tokens;
+// reservamos ~150k para messages history + tools + agent persona. 600k chars
+// ≈ 150k tokens (regla 4 chars/token). Si el transcript excede, devolvemos
+// null y el caller cae al path de tool keyword search (sesiones de 10h+).
+const MAX_TRANSCRIPT_CHARS = 600_000;
+
+function formatTs(s: number): string {
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+/**
+ * Carga todos los transcript_segments de una sesión, paginado para superar
+ * el cap de 1000 de PostgREST, y devuelve un blob de texto con timecodes
+ * embebidos. Devuelve null si el blob excede MAX_TRANSCRIPT_CHARS.
+ */
+async function loadFullTranscript(sessionUuid: string): Promise<string | null> {
+  type Seg = { start_seconds: number; text: string };
+  const all: Seg[] = [];
+  const PAGE = 1000;
+  for (let off = 0; off < 50_000; off += PAGE) {
+    const { data, error } = await supa()
+      .from('transcript_segments')
+      .select('start_seconds, text')
+      .eq('session_id', sessionUuid)
+      .order('segment_idx', { ascending: true })
+      .range(off, off + PAGE - 1);
+    if (error) return null;
+    if (!data || data.length === 0) break;
+    all.push(...(data as Seg[]));
+    if (data.length < PAGE) break;
+  }
+  if (all.length === 0) return null;
+
+  // Agrupamos segments consecutivos en bloques de ~30s para reducir el
+  // ratio overhead/content. Sin esto cada línea es "[00:00:05] palabra"
+  // y la mitad del prompt son timecodes.
+  const blocks: Array<{ ts: number; texts: string[] }> = [];
+  for (const seg of all) {
+    const lastBlock = blocks[blocks.length - 1];
+    if (!lastBlock || seg.start_seconds - lastBlock.ts >= 30) {
+      blocks.push({ ts: seg.start_seconds, texts: [(seg.text ?? '').trim()] });
+    } else {
+      lastBlock.texts.push((seg.text ?? '').trim());
+    }
+  }
+  const text = blocks
+    .map((b) => `[${formatTs(b.ts)}] ${b.texts.filter(Boolean).join(' ')}`)
+    .join('\n');
+  if (text.length > MAX_TRANSCRIPT_CHARS) return null;
+  return text;
+}
+
 export async function loadSessionContextByUuid(uuid: string): Promise<SessionContext | null> {
   const now = Date.now();
   const hit = uuidCache.get(uuid);
@@ -139,6 +204,10 @@ export async function loadSessionContextByUuid(uuid: string): Promise<SessionCon
   };
   const title = meta.raw_title || meta.sesion_label || `Sesión ${uuid.slice(0, 8)}`;
 
+  // Cargar el transcript completo. Si falla o es muy grande, queda null y
+  // el caller cae al path de tool keyword (sesiones de 10h+).
+  const transcriptText = await loadFullTranscript(uuid);
+
   const ctx: SessionContext = {
     id: 0, // marker — UUID-backed; los callers que necesiten el uuid lo tienen aparte
     titulo: title,
@@ -148,6 +217,7 @@ export async function loadSessionContextByUuid(uuid: string): Promise<SessionCon
     estado: data.status === 'indexed' ? 1 : data.status === 'pending_review' ? 0 : 0,
     youtube_id: data.youtube_video_id,
     resumen_ejecutivo: meta.resumen?.ejecutivo ?? null,
+    transcript_with_timecodes: transcriptText,
   };
 
   if (uuidCache.size >= CACHE_MAX) {
@@ -177,12 +247,46 @@ export function buildSessionSystemPromptByUuid(uuid: string, ctx: SessionContext
   if (ctx.resumen_ejecutivo) {
     lines.push('', 'Resumen ejecutivo de la sesión:', ctx.resumen_ejecutivo);
   }
+
+  // Refactor 2026-05-12: incluir transcript completo en system prompt cuando
+  // cabe en context window. Antes obligamos al modelo a usar tool de
+  // keyword-search → devuelve 8 extractos sueltos → modelo no puede narrar
+  // y termina con stop+vacío. Pasándole el transcript completo, lee y
+  // responde directo, citando timecodes inline. Mismo patrón que tendría
+  // un humano: "tenés la transcripción ahí, leéla".
+  if (ctx.transcript_with_timecodes) {
+    lines.push(
+      '',
+      '=== TRANSCRIPCIÓN COMPLETA DE LA SESIÓN ===',
+      'Cada línea empieza con [HH:MM:SS] o [MM:SS] — usá esos timecodes para citar.',
+      '',
+      ctx.transcript_with_timecodes,
+      '',
+      '=== FIN DE TRANSCRIPCIÓN ===',
+    );
+  }
+
   lines.push(
     '',
-    `Cuando el usuario pregunte por "esta sesión", "la sesión actual" o algo similar sin nombrar otra, asumí que se refiere a la sesión "${ctx.titulo}" (ID interno: ${uuid.slice(0, 8)}…). No le repitas al usuario el resumen completo a menos que lo pida explícitamente.`,
-    '',
-    'IMPORTANTE: para responder preguntas sobre el CONTENIDO de esta sesión (qué se dijo, quién intervino, qué pasó en determinado momento, qué temas se trataron, etc.) usá la tool `search_session_transcript` con términos de búsqueda relevantes. Esa tool lee el transcript real de esta sesión y devuelve extractos con timecodes. No respondas "no encontré la información" sin haber llamado a la tool primero.',
+    `Cuando el usuario pregunte por "esta sesión", "la sesión actual" o algo similar sin nombrar otra, asumí que se refiere a la sesión "${ctx.titulo}" (ID interno: ${uuid.slice(0, 8)}…).`,
   );
+
+  if (ctx.transcript_with_timecodes) {
+    lines.push(
+      '',
+      'INSTRUCCIONES PARA RESPONDER:',
+      '1. La transcripción completa de esta sesión está ARRIBA en este mismo prompt. Léela y respondé directamente con base en ella — no digas "no tengo acceso a la transcripción".',
+      '2. Citá los timecodes entre paréntesis después de cada afirmación (ej: "La presidenta abrió la sesión a las 14:08 (0:00:30)").',
+      '3. Si el usuario pregunta "qué pasó en esta sesión", armá una narrativa breve (3-6 párrafos) que cubra lo principal: apertura, temas tratados, intervenciones clave, decisiones tomadas, cierre.',
+      '4. Si no encontrás algo específico en la transcripción, decilo: "no encontré referencia a X en esta sesión", no inventes.',
+    );
+  } else {
+    // Fallback path para sesiones grandes que no cabe el transcript completo.
+    lines.push(
+      '',
+      'IMPORTANTE: la transcripción de esta sesión es muy larga para incluir completa. Usá la tool `search_session_transcript` con términos de búsqueda relevantes para obtener extractos con timecodes.',
+    );
+  }
   return lines.join('\n');
 }
 
