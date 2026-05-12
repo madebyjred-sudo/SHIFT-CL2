@@ -206,13 +206,28 @@ const MONTH_MAP: Record<string, string> = {
  * We never throw from here — null signals "parse failed, store raw title".
  */
 function parseDateFromTitle(title: string): string | null {
-  // Pattern 1: "DD de Mes de YYYY" — case-insensitive
+  // Pattern 1: "DD de Mes de YYYY" — formato canónico de prensa CR
   const longDateRe = /(\d{1,2})\s+de\s+([a-záéíóúñ]+)\s+de\s+(\d{4})/i;
   const m1 = title.match(longDateRe);
   if (m1) {
     const day = m1[1].padStart(2, '0');
     const monthName = m1[2].toLowerCase();
     const year = m1[3];
+    const month = MONTH_MAP[monthName];
+    if (month) return `${year}-${month}-${day}`;
+  }
+
+  // Pattern 1b: "DD Mes YYYY" sin "de" — formato común en títulos de
+  // Asamblea Legislativa CR (ej: "Sesión Ordinaria #07, 11 mayo 2026").
+  // Agregado 2026-05-12 tras ver que el Plenario #07 quedaba con fecha=null.
+  // El (?:de\s+)? hace opcional un solo "de" entre día y mes para cubrir
+  // también "11 de mayo 2026" sin el segundo "de".
+  const shortDateRe = /(\d{1,2})\s+(?:de\s+)?([a-záéíóúñ]+)\s+(\d{4})/i;
+  const m1b = title.match(shortDateRe);
+  if (m1b) {
+    const day = m1b[1].padStart(2, '0');
+    const monthName = m1b[2].toLowerCase();
+    const year = m1b[3];
     const month = MONTH_MAP[monthName];
     if (month) return `${year}-${month}-${day}`;
   }
