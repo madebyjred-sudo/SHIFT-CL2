@@ -2045,30 +2045,88 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     });
   }
 
-  // Pass 2: stream final answer with tool results in context. Low temperature
-  // because retrieval-grounded answers should not be creative — they should
-  // restate evidence with citations, not synthesize.
+  // Pass 2 (REFACTORIZADO 2026-05-12): non-streaming + tool_choice='none' +
+  // fallback determinístico desde tool results.
   //
-  // tool_choice='none' FORZADO. Antes (default 'auto') el modelo a veces
-  // pedía un round adicional de tool_calls (e.g., search_transcripts para
-  // complementar) y streamCompletion los ignoraba — assistantText quedaba
-  // vacío y se disparaba empty_completion_fallback. Bug observado
-  // 2026-05-12 con sesiones UUID + Lexa: tool ejecutaba bien (citations
-  // emitidas al cliente) pero el texto final no aparecía.
-  // Con 'none', el modelo está obligado a responder texto con los tool
-  // results que ya tiene. Si necesita más data, se acabó este turno.
-  // Trade-off aceptable — el costo de un turno extra es < UX rota.
-  await streamCompletion(
-    {
-      model,
-      messages,
-      tools, // se mantienen registradas para que el modelo entienda el contexto
-      tool_choice: 'none',
-      max_tokens: 2048,
-      temperature: 0.2,
-      ...cerebroExtras,
-    },
-    orKey,
-    (t) => args.onChunk({ type: 'token', payload: t }),
-  );
+  // Historia del bug:
+  //   v1: pass2 streaming default 'auto' → modelo a veces emitía tool_calls
+  //       que streamCompletion ignoraba → assistantText vacío → fallback.
+  //   v2: pass2 streaming + tool_choice='none' → mejoró pero todavía falla
+  //       intermitente. Sospecha: streaming SSE de Cerebro no emite tokens
+  //       cuando el modelo "piensa" en hacer otra tool antes de decidir
+  //       responder. Las sesiones con resumen ejecutivo (pass1 → content
+  //       directo, sin tool) funcionaban; las sin resumen (pass1 → tool →
+  //       pass2) fallaban.
+  //   v3 (actual): pass2 NON-STREAMING. Capturamos message.content COMPLETO
+  //       igual que en pass1, lo emitimos como UN solo token chunk. No
+  //       depende del SSE de Cerebro que parece tener issue con
+  //       tool_choice='none'. Si el content sigue vacío, último recurso:
+  //       sintetizar respuesta determinística desde los tool results que
+  //       ya capturamos en `messages`.
+  let pass2Text = '';
+  try {
+    const pass2Res = await orFetch(
+      {
+        model,
+        messages,
+        tools,
+        tool_choice: 'none',
+        max_tokens: 2048,
+        temperature: 0.2,
+        ...cerebroExtras,
+      },
+      orKey,
+      { timeoutMs: OR_PASS1_TIMEOUT_MS, label: 'openrouter pass2' },
+    );
+    if (pass2Res.ok) {
+      const pass2Body = (await pass2Res.json()) as {
+        choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
+      };
+      pass2Text = pass2Body.choices?.[0]?.message?.content ?? '';
+      console.log('[chat] pass2 result:', {
+        finish_reason: pass2Body.choices?.[0]?.finish_reason,
+        content_length: pass2Text.length,
+        content_preview: pass2Text.slice(0, 200),
+      });
+    } else {
+      const errBody = await pass2Res.text();
+      console.warn('[chat] pass2 non-ok:', pass2Res.status, errBody.slice(0, 300));
+    }
+  } catch (err) {
+    console.warn('[chat] pass2 threw:', (err as Error).message);
+  }
+
+  if (pass2Text.length > 0) {
+    args.onChunk({ type: 'token', payload: pass2Text });
+    return;
+  }
+
+  // Fallback determinístico: sintetizar respuesta desde los tool results
+  // que ya capturamos en messages. No es perfecto pero EVITA texto vacío.
+  // Tomamos los últimos mensajes role='tool' y los formateamos como
+  // resumen. Esto pasa si Cerebro/Anthropic tiene un issue de generación
+  // en pass2 — es preferible mostrar la data cruda que un fallback genérico.
+  const toolResults = messages
+    .filter((m) => (m as { role?: string }).role === 'tool')
+    .map((m) => (m as { content?: string }).content ?? '')
+    .filter((c) => c.length > 0 && !c.startsWith('{"error"'));
+
+  if (toolResults.length > 0) {
+    // Solo el último tool result (el más reciente) — usualmente el de
+    // search_session_transcript. Limpiamos el preámbulo de "INSTRUCCIONES"
+    // que es para el LLM, no para el usuario.
+    const lastResult = toolResults[toolResults.length - 1]!;
+    const cleaned = lastResult
+      .split(/---\s*\n\s*INSTRUCCIONES:/i)[0]
+      ?.trim() ?? lastResult;
+    const synthetic = `Encontré los siguientes extractos relevantes en la transcripción de esta sesión:\n\n${cleaned}`;
+    args.onChunk({ type: 'token', payload: synthetic });
+    console.warn('[chat] pass2 fallback determinístico aplicado', {
+      tool_results_count: toolResults.length,
+      synthetic_length: synthetic.length,
+    });
+    return;
+  }
+  // Si llegamos aquí, NO hay tool results tampoco — dejamos vacío y el
+  // caller en chat.ts dispara su propio fallback genérico.
 }
