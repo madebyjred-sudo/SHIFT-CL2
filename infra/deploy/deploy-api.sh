@@ -13,7 +13,16 @@
 #          --repository-format=docker --location=us-central1
 #
 # Usage:
-#   bash infra/deploy/deploy-api.sh
+#   bash infra/deploy/deploy-api.sh                  # full deploy → 100% traffic
+#   bash infra/deploy/deploy-api.sh --preview        # deploy con 0% traffic
+#                                                     (preview/canary, no afecta prod)
+#
+# Modo --preview:
+#   - Crea una nueva revision sin enviarle tráfico
+#   - La tag-ea como `preview-<sha>` para que tenga una URL dedicada accesible
+#   - Imprime URL para smoke test
+#   - Tras validar manualmente, promover con:
+#       bash infra/deploy/promote-preview.sh preview-<sha>
 #
 # Required env (export before running, or source from infra/deploy/.env.production):
 #   PROJECT_ID, REGION, SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY,
@@ -21,6 +30,15 @@
 #   GOOGLE_APPLICATION_CREDENTIALS_JSON (the SA JSON for runtime — NOT same as deploy)
 
 set -euo pipefail
+
+# ─── Parse flags ──────────────────────────────────────────────────────
+PREVIEW_MODE=0
+for arg in "$@"; do
+  case "$arg" in
+    --preview) PREVIEW_MODE=1 ;;
+    *) echo "Unknown flag: $arg" >&2; exit 1 ;;
+  esac
+done
 
 # ─── Config (override via env) ────────────────────────────────────────
 PROJECT_ID="${PROJECT_ID:-sincere-burner-475520-g7}"
@@ -50,7 +68,15 @@ gcloud builds submit \
   "$(dirname "$0")/../.."
 
 # ─── 2. Deploy to Cloud Run ───────────────────────────────────────────
-echo "→ Deploying $SERVICE_NAME to Cloud Run"
+if [[ "$PREVIEW_MODE" == "1" ]]; then
+  PREVIEW_TAG="preview-${IMAGE_TAG}"
+  TRAFFIC_FLAGS=(--no-traffic --tag "$PREVIEW_TAG")
+  echo "→ Deploying $SERVICE_NAME (PREVIEW, 0% traffic, tag=$PREVIEW_TAG)"
+else
+  TRAFFIC_FLAGS=()
+  echo "→ Deploying $SERVICE_NAME to Cloud Run (FULL traffic)"
+fi
+
 gcloud run deploy "$SERVICE_NAME" \
   --project="$PROJECT_ID" \
   --region="$REGION" \
@@ -67,6 +93,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --timeout=600 \
   --execution-environment=gen2 \
   --no-cpu-throttling \
+  "${TRAFFIC_FLAGS[@]}" \
   --set-env-vars "API_PORT=8080" \
   --set-env-vars "NODE_ENV=production" \
   --set-env-vars "NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL" \
@@ -100,13 +127,40 @@ SERVICE_URL=$(gcloud run services describe "$SERVICE_NAME" \
   --project="$PROJECT_ID" --region="$REGION" \
   --format='value(status.url)')
 
-echo
-echo "✅ API deployed."
-echo "   Service URL: $SERVICE_URL"
-echo "   Image:       $IMAGE"
-echo
-echo "→ Smoke test:"
-echo "   curl $SERVICE_URL/health"
-echo
-echo "→ Next step:"
-echo "   API_BASE_URL=$SERVICE_URL bash infra/deploy/deploy-web.sh"
+if [[ "$PREVIEW_MODE" == "1" ]]; then
+  # En preview mode buscamos la URL del tag, no la principal
+  PREVIEW_URL=$(gcloud run services describe "$SERVICE_NAME" \
+    --project="$PROJECT_ID" --region="$REGION" \
+    --format="value(status.traffic[?tag='$PREVIEW_TAG'].url)" 2>/dev/null || true)
+  # Fallback: construir URL manualmente si el query anterior no funcionó
+  if [[ -z "$PREVIEW_URL" ]]; then
+    BASE_URL=$(echo "$SERVICE_URL" | sed -E 's|^https://([^.]+)\.|https://'"$PREVIEW_TAG"'---\1.|')
+    PREVIEW_URL="$BASE_URL"
+  fi
+  echo
+  echo "✅ PREVIEW deployed (0% traffic)."
+  echo "   Preview URL: $PREVIEW_URL"
+  echo "   Production:  $SERVICE_URL  (sin cambios)"
+  echo "   Image:       $IMAGE"
+  echo "   Tag:         $PREVIEW_TAG"
+  echo
+  echo "→ Smoke test (preview, no afecta prod):"
+  echo "   curl $PREVIEW_URL/health"
+  echo
+  echo "→ Promover a producción cuando esté validado:"
+  echo "   bash infra/deploy/promote-preview.sh $PREVIEW_TAG"
+  echo
+  echo "→ Descartar preview (si algo se ve mal):"
+  echo "   gcloud run revisions delete <revision-name> --region=$REGION"
+else
+  echo
+  echo "✅ API deployed."
+  echo "   Service URL: $SERVICE_URL"
+  echo "   Image:       $IMAGE"
+  echo
+  echo "→ Smoke test:"
+  echo "   curl $SERVICE_URL/health"
+  echo
+  echo "→ Next step:"
+  echo "   API_BASE_URL=$SERVICE_URL bash infra/deploy/deploy-web.sh"
+fi

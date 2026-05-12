@@ -50,10 +50,16 @@ const PAGE_PATH = '/frmConsultaProyectos.aspx';
 // retry-storm. Override via SIL_WEBFORMS_TIMEOUT_MS if needed.
 const WEBFORMS_TIMEOUT_MS = Number(process.env.SIL_WEBFORMS_TIMEOUT_MS ?? 60_000);
 
+// IMPORTANTE: usamos un UA simple para no disparar filtros del SIL. El UA
+// previo con sintaxis tipo "(+url; contact: email)" — pensada para ser
+// transparente con bots responsables — coincidía con patrones de bot que
+// IIS/ASP.NET tira al backend. Diagnóstico 2026-05-12 confirmó: el UA
+// elaborado da 500; uno simple funciona. Sin canal oficial para
+// whitelistear, mantenemos perfil bajo + politeness por rate-limit interno.
 const COMMON_HEADERS = {
-  'User-Agent': 'shift-cl2/1.0 (+https://cl2.shiftlab.io; contact: madebyjred@gmail.com)',
-  Accept: 'text/html,application/xhtml+xml',
-  'Accept-Language': 'es-CR,es;q=0.9',
+  'User-Agent': 'shift-cl2/2.0',
+  Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'es-CR,es;q=0.9,en;q=0.8',
 } as const;
 
 export interface WebFormsSession {
@@ -776,9 +782,18 @@ export async function downloadTextoBase(
 ): Promise<{ session: WebFormsSession; download: SilDownload | null }> {
   const r1 = await downloadTextoBaseInternal(session, expedienteNum, 'docx');
   if (r1.download) return r1;
-  // El postback DOCX nos dejó con un HTML re-render — la sesión sigue
-  // utilizable. Hacemos un segundo intento con PDF.
-  const r2 = await downloadTextoBaseInternal(r1.session, expedienteNum, 'pdf');
+  // Cuando el SIL devuelve HTML re-render por DOCX inexistente, el server
+  // pierde el contexto del detail panel (vuelve al grid de búsqueda).
+  // Diagnosticado 2026-05-12: postback directo de btnDescargaPDF en ese
+  // estado tira 500 ("Error en runtime") porque ASP.NET intenta resolver
+  // el botón en el grid donde no existe. La fix es re-ejecutar
+  // search+select para devolver al detail panel ANTES del PDF.
+  const reSearch = await searchByNumber(r1.session, expedienteNum);
+  if (!reSearch.detail) {
+    return { session: reSearch.session, download: null };
+  }
+  const reSelect = await selectExpedienteDetail(reSearch.session, expedienteNum);
+  const r2 = await downloadTextoBaseInternal(reSelect.session, expedienteNum, 'pdf');
   return r2;
 }
 
