@@ -13,6 +13,7 @@
  * (small, rounded, color secundario).
  */
 import { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { Download, FileText, FileAudio, Loader2 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 
@@ -27,18 +28,46 @@ export function TranscriptDownloadButton({ sesionId, variant = 'compact' }: Prop
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<null | 'txt' | 'srt'>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
-  // Cerrar dropdown al click afuera
+  // Calcular posición del menu basada en el bounding rect del botón.
+  // Necesario porque renderizamos via portal en document.body — el
+  // posicionamiento absoluto relativo al parent ya no aplica.
+  function computeMenuPos() {
+    if (!buttonRef.current) return;
+    const rect = buttonRef.current.getBoundingClientRect();
+    setMenuPos({
+      top: rect.bottom + 6, // 6px debajo del botón
+      right: window.innerWidth - rect.right, // alineado al borde derecho del botón
+    });
+  }
+
+  // Cerrar dropdown al click afuera del botón Y del menú (que vive en portal)
   useEffect(() => {
     if (!open) return;
     function onDocClick(e: MouseEvent) {
-      if (!containerRef.current?.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        !containerRef.current?.contains(target) &&
+        !menuRef.current?.contains(target)
+      ) {
         setOpen(false);
       }
     }
+    function onResize() {
+      computeMenuPos();
+    }
     document.addEventListener('mousedown', onDocClick);
-    return () => document.removeEventListener('mousedown', onDocClick);
+    window.addEventListener('resize', onResize);
+    window.addEventListener('scroll', onResize, true);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('scroll', onResize, true);
+    };
   }, [open]);
 
   async function downloadFormat(format: 'txt' | 'srt') {
@@ -82,11 +111,17 @@ export function TranscriptDownloadButton({ sesionId, variant = 'compact' }: Prop
     }
   }
 
+  function toggleOpen() {
+    if (!open) computeMenuPos();
+    setOpen((v) => !v);
+  }
+
   return (
     <div ref={containerRef} className="relative inline-block">
       <button
+        ref={buttonRef}
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={toggleOpen}
         title="Descargar transcripción (TXT o SRT)"
         disabled={busy !== null}
         className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-[#0e1745]/[0.06] text-[#0e1745]/75 dark:bg-white/[0.06] dark:text-white/75 hover:bg-[#0e1745]/[0.10] dark:hover:bg-white/[0.10] transition-colors disabled:opacity-50"
@@ -95,15 +130,21 @@ export function TranscriptDownloadButton({ sesionId, variant = 'compact' }: Prop
         {variant === 'icon-only' ? '' : busy ? 'Descargando…' : 'Descargar'}
       </button>
 
-      {errorMsg && (
-        <div className="absolute right-0 mt-1.5 w-56 rounded-lg border border-rose-300/60 dark:border-rose-400/40 bg-rose-50 dark:bg-rose-950/40 px-3 py-2 text-[11.5px] text-rose-700 dark:text-rose-300 shadow-md z-50">
+      {errorMsg && menuPos && createPortal(
+        <div
+          className="fixed w-56 rounded-lg border border-rose-300/60 dark:border-rose-400/40 bg-rose-50 dark:bg-rose-950/40 px-3 py-2 text-[11.5px] text-rose-700 dark:text-rose-300 shadow-md"
+          style={{ top: menuPos.top, right: menuPos.right, zIndex: 9999 }}
+        >
           {errorMsg}
-        </div>
+        </div>,
+        document.body,
       )}
 
-      {open && (
+      {open && menuPos && createPortal(
         <div
-          className="absolute right-0 mt-1.5 w-56 rounded-lg border border-[#0e1745]/[0.10] dark:border-white/[0.10] bg-white dark:bg-[#1a1f2e] shadow-lg z-50 overflow-hidden"
+          ref={menuRef}
+          className="fixed w-56 rounded-lg border border-[#0e1745]/[0.10] dark:border-white/[0.10] bg-white dark:bg-[#1a1f2e] shadow-lg overflow-hidden"
+          style={{ top: menuPos.top, right: menuPos.right, zIndex: 9999 }}
           role="menu"
         >
           <button
@@ -135,7 +176,8 @@ export function TranscriptDownloadButton({ sesionId, variant = 'compact' }: Prop
               </div>
             </div>
           </button>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
