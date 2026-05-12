@@ -47,6 +47,7 @@ import {
   type TranscriptCorrection,
   type TranscriptSessionDetailResponse,
 } from '@/services/transcriptsAdminApi';
+import { TranscriptDownloadButton } from '@/components/TranscriptDownloadButton';
 import { navigate } from '@/lib/router';
 import { useToast } from '../Toast';
 
@@ -510,6 +511,7 @@ export function TranscriptDetailSection({
 
           {/* Action buttons */}
           <div className="ml-auto flex items-center gap-2">
+            <TranscriptDownloadButton sesionId={sessionId} />
             <ActionButton
               variant="ghost"
               icon={reprocessBusy ? Loader2 : RefreshCw}

@@ -482,3 +482,104 @@ sessionsRouter.get('/:id/transcript', async (req, res) => {
     res.status(502).json({ ok: false, error: 'upstream_unavailable', request_id: req.requestId });
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/sessions/:id/transcript/download?format=txt|srt
+//
+// Devuelve la transcripción como archivo descargable. Dos formatos:
+//   txt → texto plano sin timecodes (legible, copy-paste a Word)
+//   srt → SubRip estándar con timecodes (compatible con VLC, YouTube, etc.)
+//
+// Solo soporta sesiones UUID (Supabase). Las legacy (int) usan el path viejo
+// de /transcript JSON y el usuario hace el formateo en el cliente.
+// ─────────────────────────────────────────────────────────────────────────────
+sessionsRouter.get('/:id/transcript/download', async (req, res) => {
+  const rawId = req.params.id as string;
+  const format = (req.query.format as string | undefined) === 'srt' ? 'srt' : 'txt';
+
+  // Solo UUID. Las sesiones legacy (int) son del path MariaDB viejo, no
+  // las exponemos en download — el dataset histórico es mejor verlo via
+  // /admin/transcripts donde sí hay editor con corrections.
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId);
+  if (!isUuid) {
+    res.status(400).json({ ok: false, error: 'session_id must be uuid' });
+    return;
+  }
+
+  try {
+    // Cargar metadata para el nombre del archivo
+    const { data: sess, error: sessErr } = await supa()
+      .from('sessions')
+      .select('id, fecha, metadata, comision, tipo')
+      .eq('id', rawId)
+      .maybeSingle();
+    if (sessErr) throw new Error(sessErr.message);
+    if (!sess) {
+      res.status(404).json({ ok: false, error: 'not_found' });
+      return;
+    }
+    const meta = (sess.metadata ?? {}) as { raw_title?: string; sesion_label?: string };
+    const title = meta.raw_title || meta.sesion_label || `sesion-${rawId.slice(0, 8)}`;
+
+    // Cargar todos los segments paginados (mismo patrón que /transcript)
+    const segs: Array<{ start_seconds: number; end_seconds: number; text: string }> = [];
+    const PAGE = 1000;
+    for (let off = 0; off < 50_000; off += PAGE) {
+      const { data: page, error } = await supa()
+        .from('transcript_segments')
+        .select('segment_idx, start_seconds, end_seconds, text')
+        .eq('session_id', rawId)
+        .order('segment_idx', { ascending: true })
+        .range(off, off + PAGE - 1);
+      if (error) throw new Error(error.message);
+      if (!page || page.length === 0) break;
+      segs.push(...(page as Array<{ start_seconds: number; end_seconds: number; text: string }>));
+      if (page.length < PAGE) break;
+    }
+    if (segs.length === 0) {
+      res.status(409).json({ ok: false, error: 'transcript_pending' });
+      return;
+    }
+
+    // Slug seguro para nombre de archivo (sin acentos ni espacios)
+    const slug = title
+      .toLowerCase()
+      .normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+      .slice(0, 80);
+
+    if (format === 'txt') {
+      // TXT plano: solo el texto, con un salto de línea cada segment.
+      // El operator puede pegarlo a Word/Docs sin lidiar con timecodes.
+      const body = segs.map((s) => (s.text ?? '').trim()).filter(Boolean).join('\n');
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${slug}.txt"`);
+      res.send(body);
+      return;
+    }
+
+    // SRT: estándar SubRip con timestamps HH:MM:SS,mmm.
+    // Compatible con VLC, YouTube, Premiere, Final Cut, etc.
+    const fmtSrtTs = (s: number): string => {
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const sec = Math.floor(s % 60);
+      const ms = Math.floor((s - Math.floor(s)) * 1000);
+      return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
+    };
+    const srt = segs
+      .map((s, i) => {
+        const text = (s.text ?? '').trim();
+        if (!text) return null;
+        return `${i + 1}\n${fmtSrtTs(s.start_seconds)} --> ${fmtSrtTs(s.end_seconds)}\n${text}\n`;
+      })
+      .filter(Boolean)
+      .join('\n');
+    res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${slug}.srt"`);
+    res.send(srt);
+  } catch (err) {
+    req.log.error('transcript_download_failed', { error: (err as Error).message, id: rawId, format });
+    res.status(502).json({ ok: false, error: 'upstream_unavailable', request_id: req.requestId });
+  }
+});

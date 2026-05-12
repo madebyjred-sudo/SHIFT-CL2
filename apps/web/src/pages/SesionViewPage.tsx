@@ -22,6 +22,7 @@ import { ArrowLeft, Calendar, Check as CheckIcon, Clock, Eye, EyeOff, FileSlider
 import { PodcastModal } from '@/components/podcasts/PodcastModal';
 import { SendToWorkspaceModal } from '@/components/SendToWorkspaceModal';
 import { PodcastStrip } from '@/components/podcasts/PodcastStrip';
+import { TranscriptDownloadButton } from '@/components/TranscriptDownloadButton';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -208,6 +209,9 @@ export function SesionViewPage({ sesionId }: Props) {
             <Headphones size={13} />
             Generar podcast
           </button>
+
+          {/* Descargar transcripción — dropdown con TXT / SRT */}
+          <TranscriptDownloadButton sesionId={String(sesionId)} />
         </div>
       </div>
       <SendToWorkspaceModal
@@ -270,11 +274,22 @@ export function SesionViewPage({ sesionId }: Props) {
               ) : (
                 <div className="h-full min-h-0">
                   <AnimatedAiInput
-                    scope={
-                      detail
-                        ? { kind: 'session', legacy_session_id: detail.id, label: `Sesión #${detail.id}` }
-                        : undefined
-                    }
+                    scope={(() => {
+                      // Detectar el tipo de id: las sesiones nuevas (Supabase) son UUIDs;
+                      // las legacy (MariaDB) son ints. Despachamos al scope correspondiente
+                      // para que el backend cargue contexto de la fuente correcta.
+                      if (!detail) return undefined;
+                      const idStr = String(detail.id);
+                      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idStr);
+                      const label = (detail as { titulo?: string }).titulo
+                        ? String((detail as { titulo?: string }).titulo).slice(0, 60)
+                        : isUuid
+                          ? 'Sesión'
+                          : `Sesión #${detail.id}`;
+                      return isUuid
+                        ? { kind: 'session_uuid' as const, session_uuid: idStr, label }
+                        : { kind: 'session' as const, legacy_session_id: Number(detail.id), label };
+                    })()}
                     placeholder={
                       detail
                         ? `Preguntá sobre la sesión #${detail.id}…`
