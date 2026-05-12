@@ -235,6 +235,16 @@ chatRouter.post('/stream', async (req, res) => {
       scope_legacy_session_id: scopeLegacySessionId,
       scope_session_uuid: scopeSessionUuid,
       scope_workspace_id: scopeWorkspaceId,
+      // DEBUG: log de scope propagation — quitar tras confirmar el flow
+      ...((): Record<string, never> => {
+        req.log.info('chat_scope_propagated', {
+          scope_legacy_session_id: scopeLegacySessionId,
+          scope_session_uuid: scopeSessionUuid,
+          scope_workspace_id: scopeWorkspaceId,
+          has_scope_system_prompt: scopeSystemPrompt !== undefined,
+        });
+        return {};
+      })(),
       user_id: userId ?? null,
       // Cerebro neuron lookup key. Email is the canonical user_id across
       // realms ("cl2" realm here) — openRouterStream uses it to fetch

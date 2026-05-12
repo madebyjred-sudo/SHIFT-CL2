@@ -727,6 +727,14 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // Registrar la tool si CUALQUIERA de los dos paths está presente. El handler
   // de la tool más abajo elige internamente cuál implementación llamar.
   if (scopeId !== null || scopeUuid !== null) tools.push(SEARCH_SESSION_TRANSCRIPT_TOOL);
+  // DEBUG: traza de tools registradas — quitar tras confirmar el flow.
+  console.log('[chat] tools registered:', {
+    agent_id: agent.id,
+    has_search_session_transcript: scopeId !== null || scopeUuid !== null,
+    scopeId,
+    scopeUuid: scopeUuid?.slice(0, 8),
+    has_scope_system_prompt: typeof args.scope_system_prompt === 'string' && args.scope_system_prompt.length > 0,
+  });
   // SIL tools: only registered when the agent YAML opts in. Letting every
   // agent see all three would balloon the system prompt and confuse the
   // model about when to use search_transcripts (plenarias) vs search_sil_*
