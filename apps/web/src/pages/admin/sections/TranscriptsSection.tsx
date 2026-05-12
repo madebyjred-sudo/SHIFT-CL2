@@ -85,18 +85,23 @@ function formatNumber(n: number): string {
 // ─── Status filter options ─────────────────────────────────────────────────
 
 const STATUS_OPTIONS = [
-  { id: 'all',        label: 'Todos' },
-  { id: 'indexed',    label: 'Indexados' },
-  { id: 'processing', label: 'Procesando' },
-  { id: 'pending',    label: 'Pendientes' },
-  { id: 'failed',     label: 'Error' },
+  { id: 'all',            label: 'Todos' },
+  { id: 'pending_review', label: 'Por aprobar' },
+  { id: 'indexed',        label: 'Publicadas' },
+  { id: 'processing',     label: 'Procesando' },
+  { id: 'pending',        label: 'En cola' },
+  { id: 'rejected',       label: 'Rechazadas' },
+  { id: 'failed',         label: 'Error' },
 ];
 
 // ─── Main component ────────────────────────────────────────────────────────
 
 export function TranscriptsSection(): React.ReactElement {
   const { notify } = useToast();
-  const [statusFilter, setStatusFilter] = useState<string>('all');
+  // Default abierto en "Por aprobar" — es el tab donde Carlos toma decisión.
+  // Antes era 'all', pero eso enterraba las pending_review en una lista de 250+
+  // sesiones legacy ya indexadas.
+  const [statusFilter, setStatusFilter] = useState<string>('pending_review');
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncVideoInput, setSyncVideoInput] = useState('');
 
@@ -159,7 +164,7 @@ export function TranscriptsSection(): React.ReactElement {
   return (
     <>
       <SectionHeader
-        eyebrow="Operación · Pipeline YouTube · Transcripciones"
+        eyebrow="Operación · Cola de revisión · Transcripciones"
         actions={
           <>
             <ActionButton
@@ -178,7 +183,7 @@ export function TranscriptsSection(): React.ReactElement {
               onClick={() => void handleSync()}
               disabled={syncBusy}
             >
-              {syncBusy ? 'Sincronizando…' : 'Sync ahora'}
+              {syncBusy ? 'Sincronizando…' : 'Sincronizar ahora'}
             </ActionButton>
           </>
         }
@@ -194,7 +199,7 @@ export function TranscriptsSection(): React.ReactElement {
             onKeyDown={(e) => {
               if (e.key === 'Enter') void handleSyncWithVideoIds();
             }}
-            placeholder="Sync videoIds: dQw4w9WgXcQ, ..."
+            placeholder="ID de video de YouTube: dQw4w9WgXcQ, ..."
             className="h-9 min-w-0 flex-1 rounded-lg border border-[#0e1745]/[0.10] dark:border-white/10 bg-white dark:bg-white/[0.05] px-3 font-mono text-[12px] text-[#0e1745] dark:text-white placeholder:text-[#0e1745]/40 dark:placeholder:text-white/40 outline-none focus:border-cl2-accent/40 focus:ring-2 focus:ring-cl2-accent/15"
           />
           <ActionButton
@@ -202,7 +207,7 @@ export function TranscriptsSection(): React.ReactElement {
             onClick={handleSyncWithVideoIds}
             disabled={syncBusy || !syncVideoInput.trim()}
           >
-            Sync IDs
+            Sincronizar IDs
           </ActionButton>
         </div>
 
@@ -272,7 +277,7 @@ export function TranscriptsSection(): React.ReactElement {
           <div className="max-w-md text-[12.5px] leading-relaxed text-[#0e1745]/60 dark:text-white/60">
             {statusFilter !== 'all'
               ? `No hay sesiones con estado "${statusFilter}". Probá con otro filtro.`
-              : 'No hay sesiones en el pipeline aún. Ejecutá "Sync ahora" para buscar videos nuevos.'}
+              : 'No hay sesiones en cola aún. Tocá "Sincronizar ahora" para buscar videos nuevos del canal.'}
           </div>
           <ActionButton
             variant="coral"
@@ -280,7 +285,7 @@ export function TranscriptsSection(): React.ReactElement {
             onClick={() => void handleSync()}
             disabled={syncBusy}
           >
-            Sync ahora
+            Sincronizar ahora
           </ActionButton>
         </div>
       )}
