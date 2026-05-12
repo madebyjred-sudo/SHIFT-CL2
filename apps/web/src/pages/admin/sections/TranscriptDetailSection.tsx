@@ -257,9 +257,11 @@ export function TranscriptDetailSection({
   >({});
   const [busyCorrections, setBusyCorrections] = useState<Set<string>>(new Set());
 
-  const [segmentsShown, setSegmentsShown] = useState(50);
   const [reprocessBusy, setReprocessBusy] = useState(false);
   const [reviewBusy, setReviewBusy] = useState(false);
+  // Búsqueda dentro del transcript — Cmd+F nativo no es ideal en listas largas
+  // (4000+ segments), un input dedicado filtra in-memory rápido.
+  const [segmentSearch, setSegmentSearch] = useState('');
 
   // ── Load session detail ────────────────────────────────────────────────
   const load = async () => {
@@ -689,46 +691,77 @@ export function TranscriptDetailSection({
           </Card>
         </div>
 
-        {/* ── Segments preview ─────────────────────────────────────────── */}
+        {/* ── Segments con visor fijo + scroll interno ─────────────────────
+            Bug previo: scroll infinito de página + botón "Cargar más" cada 50.
+            Para plenarios de 6 h (7900+ segments) era imposible navegar.
+            Ahora: panel con altura fija (calc(100vh - 240px)) + scroll interno
+            + búsqueda rápida en memoria. Muestra TODOS los segments. */}
         <div>
-          <Card>
+          <Card className="flex flex-col max-h-[calc(100vh-240px)] min-h-[420px]">
             <CardHeader
               title={
-                <span className="inline-flex items-center gap-1.5">
-                  <FileText size={13} /> Segmentos
+                <div className="flex items-center gap-2.5">
+                  <FileText size={13} />
+                  <span>Transcripción</span>
                   <span className="font-mono text-[10.5px] font-normal text-[#0e1745]/50 dark:text-white/50">
-                    (primeros {Math.min(segmentsShown, segments.length)}/{segments.length})
+                    {segmentSearch
+                      ? `(${segments.filter((s) => s.text.toLowerCase().includes(segmentSearch.toLowerCase())).length}/${segments.length})`
+                      : `${segments.length} segmentos`}
                   </span>
+                </div>
+              }
+              meta={
+                <span className="flex items-center">
+                  <input
+                    type="text"
+                    placeholder="Buscar en transcripción…"
+                    value={segmentSearch}
+                    onChange={(e) => setSegmentSearch(e.target.value)}
+                    className="w-56 rounded-md border border-[#0e1745]/15 dark:border-white/15 bg-white/60 dark:bg-white/[0.04] px-2.5 py-1 text-[11.5px] text-[#0e1745] dark:text-white placeholder-[#0e1745]/45 dark:placeholder-white/35 focus:outline-none focus:border-cl2-accent/60"
+                  />
+                  {segmentSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setSegmentSearch('')}
+                      className="ml-1.5 rounded p-1 text-[#0e1745]/40 hover:text-[#0e1745] dark:text-white/40 dark:hover:text-white"
+                      aria-label="Limpiar búsqueda"
+                    >
+                      <XCircle size={12} />
+                    </button>
+                  )}
                 </span>
               }
             />
-            <div className="divide-y divide-[#0e1745]/[0.05] dark:divide-white/[0.05]">
-              {segments.slice(0, segmentsShown).map((seg) => (
-                <div
-                  key={seg.id}
-                  className="flex gap-3 px-[18px] py-2.5 text-[12.5px]"
-                >
-                  <div className="shrink-0 pt-px">
-                    <span className="font-mono text-[10.5px] text-[#0e1745]/45 dark:text-white/45">
-                      {formatTs(seg.start_seconds)}
-                    </span>
+            <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-[#0e1745]/[0.05] dark:divide-white/[0.05]">
+              {(() => {
+                const q = segmentSearch.trim().toLowerCase();
+                const filtered = q
+                  ? segments.filter((s) => s.text.toLowerCase().includes(q))
+                  : segments;
+                if (filtered.length === 0 && segments.length > 0) {
+                  return (
+                    <div className="px-[18px] py-8 text-center text-[12.5px] text-[#0e1745]/50 dark:text-white/50">
+                      Sin resultados para "{segmentSearch}". Probá otro término o limpiá la búsqueda.
+                    </div>
+                  );
+                }
+                return filtered.map((seg) => (
+                  <div
+                    key={seg.id}
+                    className="flex gap-3 px-[18px] py-2.5 text-[12.5px]"
+                  >
+                    <div className="shrink-0 pt-px">
+                      <span className="font-mono text-[10.5px] text-[#0e1745]/45 dark:text-white/45">
+                        {formatTs(seg.start_seconds)}
+                      </span>
+                    </div>
+                    <div className="min-w-0 flex-1 text-[#0e1745] dark:text-white leading-relaxed">
+                      {seg.text}
+                    </div>
                   </div>
-                  <div className="min-w-0 flex-1 text-[#0e1745] dark:text-white leading-relaxed">
-                    {seg.text}
-                  </div>
-                </div>
-              ))}
+                ));
+              })()}
             </div>
-            {segmentsShown < segments.length && (
-              <div className="border-t border-[#0e1745]/[0.06] dark:border-white/[0.06] px-[18px] py-3">
-                <ActionButton
-                  variant="quiet"
-                  onClick={() => setSegmentsShown((n) => n + 50)}
-                >
-                  Cargar más ({segments.length - segmentsShown} restantes)
-                </ActionButton>
-              </div>
-            )}
             {segments.length === 0 && (
               <div className="px-[18px] py-8 text-center text-[12.5px] text-[#0e1745]/50 dark:text-white/50">
                 Sin transcripción aún. Tocá "Re-procesar" para generarla.
