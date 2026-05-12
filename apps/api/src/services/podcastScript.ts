@@ -212,6 +212,14 @@ function buildDialoguePrompt(minutes: number, charsBudget: number): string {
   ].join('\n');
 }
 
+// Cap del material fuente que llega al LLM. Subido 2026-05-12 de 12k a
+// 80k (~20k tokens) para que el podcast sobre una sesión de 6h reciba
+// contexto real, no truncado al 30%. Sonnet 4.6 acepta 200k tokens; el
+// resto del budget queda para system prompt + script output.
+// IMPORTANTE: este cap debe estar alineado con PODCAST_SOURCE_CAP en
+// routes/podcasts.ts. Si uno se cambia, el otro también.
+const SCRIPT_SOURCE_CAP = 80_000;
+
 function buildScriptUserPrompt(
   label: string,
   source: string,
@@ -221,7 +229,7 @@ function buildScriptUserPrompt(
   const lines: string[] = [
     `Material fuente — ${label}:`,
     '"""',
-    source.slice(0, 12_000),
+    source.slice(0, SCRIPT_SOURCE_CAP),
     '"""',
     '',
   ];
