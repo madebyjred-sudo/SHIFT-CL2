@@ -217,6 +217,17 @@ sessionsRouter.get('/', async (req, res) => {
       created_at: string;
     };
 
+    // Necesitamos el `tipo` de la sesión para el filtro inteligente de
+    // duración más abajo (sesiones con tipo='plenario' explícito siempre
+    // pasan el filtro, aunque duration sea 0).
+    const { data: supaTipos } = await supa()
+      .from('sessions')
+      .select('id, tipo')
+      .in('id', (supaRows ?? []).map((r: { id: string }) => r.id));
+    const tipoBySupaId = new Map<string, string | null>(
+      ((supaTipos ?? []) as { id: string; tipo: string | null }[]).map((r) => [r.id, r.tipo]),
+    );
+
     const newShape = ((supaRows ?? []) as SupaSessionRow[]).map((s) => {
       const meta = (s.metadata ?? {}) as { raw_title?: string; sesion_label?: string; duration_seconds?: number };
       const title = meta.raw_title || meta.sesion_label || `Sesión ${s.youtube_video_id ?? s.id.slice(0, 8)}`;
@@ -229,6 +240,8 @@ sessionsRouter.get('/', async (req, res) => {
         duration_s: typeof meta.duration_seconds === 'number' ? meta.duration_seconds : 0,
         estado: statusToEstado(s.status),
         has_resumen: false, // las sesiones nuevas aún no tienen resumen estructurado
+        // Internal — usado por el filtro `type=plenario` más abajo
+        _tipo: tipoBySupaId.get(s.id) ?? null,
       };
     });
 
@@ -246,14 +259,26 @@ sessionsRouter.get('/', async (req, res) => {
       return af < bf ? 1 : -1; // desc
     });
 
-    // 5) Aplicar filtro de tipo si se pidió. type=plenario filtra por
-    //    duración mínima (≥30min) — corta clips de prensa, entrevistas y
-    //    shorts que el canal de la Asamblea publica además de las sesiones.
-    //    El operador puede toggleear "ver todo" desde el client si quiere
-    //    revisar el queue completo.
+    // 5) Aplicar filtro de tipo si se pidió. type=plenario muestra:
+    //    (a) Toda sesión con tipo='plenario' explícito en DB — independiente
+    //        de la duración (puede ser 0 si el pipeline no la registró).
+    //    (b) Sesiones sin tipo explícito (legacy o pipeline incompleto) que
+    //        tengan duración ≥ 30min — heurística para descartar clips de
+    //        prensa, entrevistas y shorts.
+    // Bug previo: aplicábamos solo (b), entonces plenarios reales con
+    // duration_seconds=0 (raro pero ocurre en sesiones nuevas que no
+    // pasaron por el path de duración) quedaban invisibles. Reportado por
+    // Jred 2026-05-12 — el Plenario #07 11 may estaba indexed pero no
+    // aparecía en la pestaña admin.
     if (filterType === 'plenario') {
-      merged = merged.filter((r) => (r.duration_s ?? 0) >= MIN_PLENARIO_SECONDS);
+      merged = merged.filter((r) => {
+        const tipo = (r as { _tipo?: string | null })._tipo;
+        if (tipo === 'plenario' || tipo === 'comision') return true;
+        return (r.duration_s ?? 0) >= MIN_PLENARIO_SECONDS;
+      });
     }
+    // Strip helper field antes de mandar al cliente — interno solamente.
+    merged = merged.map(({ _tipo: _omit, ...rest }: Record<string, unknown>) => rest as typeof merged[0]);
 
     res.json({ ok: true, sessions: merged });
   } catch (err) {
