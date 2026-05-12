@@ -302,11 +302,17 @@ function mapSessionStatus(
   // queremos que vuelva a 'pending' por un retry del cron.
   if (reviewStatus === 'approved') return 'approved';
   if (reviewStatus === 'rejected') return 'rejected';
+  // `in_progress` significa "un revisor humano lo agarró activamente"
+  // (hay row en transcripciones_review con status='pending'). Sin row de
+  // revisor, el item debe estar disponible para ser tomado → 'pending',
+  // que es lo que la UI usa para mostrar botones Aprobar/Rechazar.
+  // Bug 2026-05-12: 'pending_review' (status post-transcripción automática)
+  // se mapeaba a 'in_progress', dejando 83+ items sin botones de acción.
   if (reviewStatus === 'pending') return 'in_progress';
   // Sin review row, derivamos del status de la sesión.
   switch (sessionStatus) {
     case 'pending_review':
-      return 'in_progress';
+      return 'pending';
     case 'indexed':
       // Sesiones legacy / pre-workflow review: se asumen aprobadas porque
       // ya viven en /sesiones y el equipo las usa. Cuando llegue su turno
