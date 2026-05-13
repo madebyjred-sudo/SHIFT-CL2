@@ -33,6 +33,7 @@ import {
 } from 'lucide-react';
 import { useTheme } from '@/lib/theme-context';
 import { cn } from '@/lib/utils';
+import { Cl2Mark } from '@/components/Cl2Mark';
 
 interface ShareInfo {
   url: string;        // signed GCS URL for the audio
@@ -113,9 +114,7 @@ export function PodcastSharePage({ token }: { token: string }) {
       <header className="relative z-10 px-4 sm:px-6 md:px-8 pt-4">
         <div className="mx-auto max-w-[1080px] flex items-center justify-between">
           <a href="/landing" className="flex items-center gap-2.5 min-w-0">
-            <div className="relative h-9 w-9 rounded-xl overflow-hidden shrink-0 cl2-mark">
-              <span className="font-heading font-extrabold text-xs tracking-tight">CL2</span>
-            </div>
+            <Cl2Mark size={36} className="rounded-xl shrink-0" />
             <div className="hidden sm:flex flex-col leading-tight">
               <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[#0e1745]/45 dark:text-white/45">
                 Inteligencia Legislativa

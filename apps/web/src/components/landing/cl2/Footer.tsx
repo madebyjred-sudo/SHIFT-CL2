@@ -3,6 +3,7 @@ import { motion, useReducedMotion } from "motion/react";
 import { Mail, LifeBuoy, Activity } from "lucide-react";
 import { Icon } from "./Icon";
 import { Eyebrow } from "./Primitives";
+import { Cl2Mark } from "@/components/Cl2Mark";
 
 interface FooterLink {
   title: string;
@@ -215,14 +216,17 @@ export const Footer = () => {
           <div className="grid w-full gap-10 xl:grid-cols-3 xl:gap-16">
             {/* Brand */}
             <AnimatedContainer className="space-y-5">
-              <div
-                className="serif text-[34px] leading-none"
-                style={{ color: "hsl(var(--cl2-paper))", fontWeight: 500, letterSpacing: "-0.02em" }}
-              >
-                cl
-                <em className="italic-serif" style={{ color: "hsl(var(--cl2-accent-soft))" }}>
-                  2
-                </em>
+              <div className="flex items-center gap-3">
+                <Cl2Mark size={44} className="rounded-xl shrink-0" />
+                <div
+                  className="serif text-[34px] leading-none"
+                  style={{ color: "hsl(var(--cl2-paper))", fontWeight: 500, letterSpacing: "-0.02em" }}
+                >
+                  cl
+                  <em className="italic-serif" style={{ color: "hsl(var(--cl2-accent-soft))" }}>
+                    2
+                  </em>
+                </div>
               </div>
               <p className="text-[13px] leading-[1.65] max-w-[340px]">
                 Inteligencia legislativa con memoria institucional para la Asamblea Legislativa

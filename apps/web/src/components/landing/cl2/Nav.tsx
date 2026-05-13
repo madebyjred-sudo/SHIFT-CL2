@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { Icon } from "./Icon";
+import { Cl2Mark } from "@/components/Cl2Mark";
 
 const links = [
   ["Producto", "producto"],
@@ -31,8 +32,8 @@ export const Nav = () => {
           }`}
           style={{ maxWidth: 1100 }}
         >
-        <a href="#" className="flex items-center gap-2 font-display text-[22px] text-cl2-ink" aria-label="cl2 — inicio">
-          <span className="dot dot-coral" />
+        <a href="#" className="flex items-center gap-2.5 font-display text-[22px] text-cl2-ink" aria-label="cl2 — inicio">
+          <Cl2Mark size={30} className="rounded-lg" />
           <span>
             cl<em className="italic-serif text-cl2-burgundy">2</em>
           </span>
