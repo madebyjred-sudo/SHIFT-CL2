@@ -12,6 +12,7 @@
  * NOT need an account. URL is the auth.
  */
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { Check, Copy, ExternalLink, Headphones, Link2, Loader2, Share2, Trash2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -123,7 +124,11 @@ export function PodcastShareModal({ open, onClose, podcastId, podcastTitle }: Pr
       })
     : null;
 
-  return (
+  // Portal a document.body para escapar stacking context del motion.li
+  // ancestro (que aplica transform y captura el position: fixed). Sin
+  // portal el modal queda atrapado dentro de la card del podcast.
+  // Bug reportado por Jred 2026-05-12.
+  return createPortal(
     <AnimatePresence>
       <motion.div
         key="share-bd"
@@ -319,6 +324,7 @@ export function PodcastShareModal({ open, onClose, podcastId, podcastTitle }: Pr
           )}
         </div>
       </motion.div>
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body,
   );
 }

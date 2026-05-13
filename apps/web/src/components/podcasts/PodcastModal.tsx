@@ -16,6 +16,7 @@
  *     focus halo, single play button, custom progress + speed.
  */
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { Download, Headphones, Loader2, Sparkles, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -185,7 +186,12 @@ export function PodcastModal({ open, onClose, source_type, source_id, source_tit
 
   if (!open) return null;
 
-  return (
+  // Portal a document.body para escapar stacking context. Defensivo —
+  // si el modal se monta dentro de un motion ancestro (cards animadas
+  // del workspace, ScrollAreas con transform, etc.), el position:fixed
+  // del backdrop queda atrapado en ese contexto. Misma fix que aplicada
+  // a PodcastShareModal y TranscriptDownloadButton.
+  return createPortal(
     <AnimatePresence>
       <motion.div
         key="backdrop"
@@ -408,7 +414,8 @@ export function PodcastModal({ open, onClose, source_type, source_id, source_tit
           )}
         </div>
       </motion.div>
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body,
   );
 }
 
