@@ -104,6 +104,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --set-env-vars "CEREBRO_BASE_URL=$CEREBRO_BASE_URL" \
   --set-env-vars "CEREBRO_TENANT=cl2" \
   --set-env-vars "ALLOWED_ORIGINS=$ALLOWED_ORIGINS" \
+  --set-env-vars "PUBLIC_WEB_URL=${PUBLIC_WEB_URL:-$ALLOWED_ORIGINS}" \
   --set-env-vars "GCS_BUCKET_SIL=shift-cl2-sil" \
   --set-env-vars "GCP_PROJECT_ID=$PROJECT_ID" \
   --set-env-vars "GCP_LOCATION=$REGION" \

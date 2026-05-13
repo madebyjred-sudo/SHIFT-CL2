@@ -429,14 +429,22 @@ podcastsRouter.post('/:id/share', async (req, res) => {
   // que devolvía el dominio del API (cl2-v2-api-…run.app) en lugar del
   // web. Los links compartidos abrían "Cannot GET /p/<token>" porque
   // /p/:token no existe en el backend, solo en el SPA.
+  //
+  // Bug 2 (reportado por Jred 2026-05-12 #2): tomar ALLOWED_ORIGINS[0]
+  // sigue rompiendo si ese dominio aún no resuelve en DNS. Por eso ahora
+  // priorizamos PUBLIC_WEB_URL (env explícita para "el dominio real
+  // donde corre el SPA"). ALLOWED_ORIGINS queda para CORS, no para
+  // generar links públicos.
+  const publicWebEnv = (process.env.PUBLIC_WEB_URL ?? '').trim();
   const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
-  const publicWebOrigin =
-    allowedOrigins[0] && allowedOrigins[0].startsWith('http')
+  const publicWebOrigin = publicWebEnv.startsWith('http')
+    ? publicWebEnv.replace(/\/$/, '')
+    : allowedOrigins[0] && allowedOrigins[0].startsWith('http')
       ? allowedOrigins[0]
-      : `${req.protocol}://${req.get('host')}`; // fallback dev sin ALLOWED_ORIGINS
+      : `${req.protocol}://${req.get('host')}`; // fallback dev sin nada seteado
   res.json({
     ok: true,
     url: `${publicWebOrigin}/p/${token}`,
