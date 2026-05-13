@@ -420,13 +420,26 @@ podcastsRouter.post('/:id/share', async (req, res) => {
   }
 
   // Build public URL pointing at the branded share page (NOT the raw
-  // audio endpoint). The /p/:token route fetches metadata + signed URL
-  // and renders the player + CTA. Recipients get a real product
-  // experience, not an mp3 dump.
-  const origin = `${req.protocol}://${req.get('host')}`;
+  // audio endpoint). The /p/:token route vive en el FRONTEND (web), no
+  // en el API. Construimos la URL apuntando al primer origin
+  // whitelisteado en ALLOWED_ORIGINS — usualmente el dominio público
+  // del web (e.g. https://cl2-v2.agentescl2.com).
+  //
+  // Bug previo (reportado por Jred 2026-05-12): usábamos req.get('host')
+  // que devolvía el dominio del API (cl2-v2-api-…run.app) en lugar del
+  // web. Los links compartidos abrían "Cannot GET /p/<token>" porque
+  // /p/:token no existe en el backend, solo en el SPA.
+  const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const publicWebOrigin =
+    allowedOrigins[0] && allowedOrigins[0].startsWith('http')
+      ? allowedOrigins[0]
+      : `${req.protocol}://${req.get('host')}`; // fallback dev sin ALLOWED_ORIGINS
   res.json({
     ok: true,
-    url: `${origin}/p/${token}`,
+    url: `${publicWebOrigin}/p/${token}`,
     token,
     expires_at: expiresAt,
   });
