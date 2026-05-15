@@ -18,6 +18,7 @@ import { logger } from '../services/logger.js';
 import { writeNeuronFile } from '../services/cerebroNeuron.js';
 import { adminFeedbackRouter } from './feedback.js';
 import { listTranscripciones, type LegacyTranscripcion } from '../services/legacyCl2Client.js';
+import { crawlList } from '../services/sharePointCrawler.js';
 
 const adminRouter = Router();
 
@@ -1344,6 +1345,75 @@ adminRouter.get('/podcasts/stats', async (req, res) => {
     req.log?.warn('admin/podcasts/stats failed', { error: (err as Error).message });
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
+});
+
+// ─── SharePoint crawler — manual trigger (dev + ops) ─────────────────
+//
+// POST /api/admin/crawler/run/:list_id
+//
+// Fires crawlList() in the background for the given list_id (GUID or Title).
+// Returns immediately with a job_id so the caller can poll the cursor table
+// to see progress.
+//
+// Auth: inherits the adminRouter role guard (admin | operador only).
+//
+// TODO: when we add a proper job queue (BullMQ or Cloud Tasks), wire this
+// to enqueue rather than spawning a background Promise. For now the background
+// Promise is fine for Cloud Run (single instance, demo scale).
+adminRouter.post('/crawler/run/:list_id', async (req, res) => {
+  const listId = req.params.list_id;
+  if (!listId || listId.trim().length < 2) {
+    res.status(400).json({ ok: false, error: 'list_id required (GUID or Title)' });
+    return;
+  }
+
+  // Use the provided list_title from body, or fall back to the list_id as label.
+  const listTitle = typeof req.body?.list_title === 'string'
+    ? req.body.list_title
+    : listId;
+
+  const jobId = `sp-crawl-${Date.now()}-${listId.slice(0, 8)}`;
+
+  // Fire and forget — log result when done.
+  void crawlList(listId, listTitle).then((result) => {
+    req.log?.info('admin.crawler.run: completed', {
+      job_id: jobId,
+      list_id: listId,
+      items_new: result.items_new,
+      items_updated: result.items_updated,
+      errors: result.errors,
+      duration_ms: result.duration_ms,
+    });
+    void audit({
+      actor_kind: 'system',
+      verb: 'completó crawler',
+      resource: `SharePoint list ${listTitle}`,
+      resource_kind: 'system',
+      result: result.errors > 0 ? 'error' : 'ok',
+      metadata: {
+        job_id: jobId,
+        items_new: result.items_new,
+        items_seen: result.items_seen,
+        errors: result.errors,
+      },
+    }).catch(() => undefined);
+  }).catch((err) => {
+    req.log?.error('admin.crawler.run: failed', {
+      job_id: jobId,
+      list_id: listId,
+      error: (err as Error).message,
+    });
+  });
+
+  await auditFromReq(req, {
+    verb: 'disparó crawler',
+    resource: `SharePoint list ${listTitle}`,
+    resource_kind: 'system',
+    result: 'ok',
+    metadata: { job_id: jobId, list_id: listId },
+  });
+
+  res.json({ ok: true, job_id: jobId, list_id: listId, started_at: new Date().toISOString() });
 });
 
 // Boot — log a one-time line so the operator can see the audit_log

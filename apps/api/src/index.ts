@@ -53,6 +53,8 @@ import { onboardingRouter } from './routes/onboarding.js';
 import { neuronRouter } from './routes/neuron.js';
 import { clientesRouter } from './routes/clientes.js';
 import { feedbackRouter } from './routes/feedback.js';
+import { decretoUserRouter, decretoAdminRouter } from './routes/decretos.js';
+import { ralRouter } from './routes/ral.js';
 import { requestContext } from './middleware/requestContext.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { logger } from './services/logger.js';
@@ -248,6 +250,29 @@ app.use(
   '/api/onboarding',
   rateLimit({ bucket: 'onboarding', max: 30, windowMs: 60_000 }),
   onboardingRouter,
+);
+app.use(
+  // Decretos Ejecutivos — estado del Plenario + lista de decretos + detalle.
+  // Reads are cheap (Supabase views); cap is generous for dashboard polling.
+  '/api/decretos',
+  rateLimit({ bucket: 'decretos', max: 120, windowMs: 60_000 }),
+  decretoUserRouter,
+);
+app.use(
+  // Decretos admin — trigger manual del ingestor + health check.
+  // Tight cap: operator action, not polling.
+  '/api/admin/decretos',
+  rateLimit({ bucket: 'decretos_admin', max: 30, windowMs: 60_000 }),
+  decretoAdminRouter,
+);
+app.use(
+  // RAL Comentado — artículos + interpretaciones oficiales.
+  // Track F, Sprint 1 (2026-05-14). Lookup por número de artículo e inciso,
+  // búsqueda por texto, y estado del catálogo de doctrina parlamentaria.
+  // Cap generoso: la UI del agente puede pedir varios artículos por turno.
+  '/api/ral',
+  rateLimit({ bucket: 'ral', max: 120, windowMs: 60_000 }),
+  ralRouter,
 );
 
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {

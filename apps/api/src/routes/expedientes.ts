@@ -10,12 +10,19 @@
  *
  * Auth: every endpoint requires a valid Supabase JWT. Service-role on
  * Supabase + bucket-level access on GCS — clients never get the SA.
+ *
+ * Endpoints:
+ *   GET /:numero          — legacy single-doc view (integer id)
+ *   GET /:numero/full     — NEW: unified dashboard, all detail tables
+ *                           in one round-trip (Track B Sprint 1)
+ *   GET /:numero/docs/:id — PDF proxy / GCS signed URL
  */
 import { Router, type Request, type Response } from 'express';
 import { Storage } from '@google-cloud/storage';
 import { getUserIdFromRequest } from '../services/auth.js';
 import { getExpedienteById } from '../services/silClient.js';
 import { withTimeout } from '../services/resilience.js';
+import { createClient } from '@supabase/supabase-js';
 
 export const expedientesRouter = Router();
 
@@ -38,6 +45,107 @@ async function requireUser(req: Request, res: Response): Promise<string | null> 
   }
   return userId;
 }
+
+function getSupabase() {
+  // El repo usa NEXT_PUBLIC_SUPABASE_URL (Vite + Next prefix) en .env.local y
+  // en Cloud Run. SUPABASE_URL no existe — fix 2026-05-15 después de smoke
+  // del Sprint v3 con Playwright (devolvía http 500 al frontend).
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_KEY;
+  if (!url || !key) throw new Error('Supabase env vars missing');
+  return createClient(url, key);
+}
+
+/**
+ * GET /api/expedientes/:numero/full
+ *
+ * Unified dashboard endpoint — all detail tables in one round-trip.
+ * Used by ExpedienteDashboardPage (Track B, Sprint 1).
+ *
+ * The `:numero` param accepts both the integer id (e.g. "23511") and the
+ * dot-formatted numero (e.g. "23.511") — we look up sil_expedientes by
+ * the `numero` text field to normalise.
+ *
+ * Returns an empty array (not 404) for tables that have no rows yet —
+ * the frontend shows empty states until the scraper backfill runs.
+ */
+expedientesRouter.get('/:numero/full', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+
+  // Accept "23511" (integer form from old links) or "23.511" (SIL canonical).
+  const rawNumero = req.params.numero;
+  // Normalise: if no dot and pure digits, convert "23511" → "23.511" style.
+  // The DB stores the dot-formatted numero as the FK. The integer `id` field
+  // is a separate column. We query by `numero` (text) for new tables and by
+  // `id` (int) for the old sil_expedientes table.
+  const isInt = /^\d+$/.test(rawNumero);
+  const supClientRaw = getSupabase();
+
+  try {
+    // Resolve the expediente: accept both id (int) and numero (text).
+    const generalQuery = isInt
+      ? supClientRaw.from('sil_expedientes').select('*').eq('id', Number(rawNumero)).single()
+      : supClientRaw.from('sil_expedientes').select('*').eq('numero', rawNumero).single();
+
+    const { data: general, error: generalErr } = await generalQuery;
+
+    if (generalErr || !general) {
+      res.status(404).json({ ok: false, error: 'expediente_not_found', numero: rawNumero });
+      return;
+    }
+
+    const numero: string = general.numero as string; // canonical "23.511" form
+
+    // Fetch all detail tables in parallel — empty array if no rows.
+    const [tramiteRes, proponentesRes, consultasRes, leyRes, documentosRes] = await Promise.all([
+      supClientRaw
+        .from('sil_expediente_tramite')
+        .select('*')
+        .eq('expediente_id', numero)
+        .order('orden', { ascending: true, nullsFirst: false })
+        .order('fecha_inicio', { ascending: true }),
+
+      supClientRaw
+        .from('sil_expediente_proponentes')
+        .select('*')
+        .eq('expediente_id', numero)
+        .order('firma_orden', { ascending: true }),
+
+      supClientRaw
+        .from('sil_expediente_consultas')
+        .select('*')
+        .eq('expediente_id', numero),
+
+      supClientRaw
+        .from('sil_leyes')
+        .select('*, sil_leyes_afectaciones(*)')
+        .eq('expediente_origen_id', numero)
+        .maybeSingle(),
+
+      supClientRaw
+        .from('sil_expediente_documentos')
+        .select('*')
+        .eq('expediente_id', numero)
+        .order('tipo', { ascending: true }),
+    ]);
+
+    res.json({
+      ok: true,
+      expediente: {
+        general,
+        tramite: tramiteRes.data ?? [],
+        proponentes: proponentesRes.data ?? [],
+        consultas: consultasRes.data ?? [],
+        ley: leyRes.data ?? null,
+        documentos: documentosRes.data ?? [],
+      },
+    });
+  } catch (err) {
+    req.log.error('expediente_full_failed', { error: (err as Error).message, numero: rawNumero });
+    res.status(502).json({ ok: false, error: 'upstream_unavailable', request_id: req.requestId });
+  }
+});
 
 /**
  * GET /api/expedientes/:numero

@@ -7,9 +7,11 @@ import {
   getExpedienteById,
   searchSilCorpus,
   searchReglamento,
+  searchRalComentado,
   renderExpedientesForLlm,
   renderExpedienteFullForLlm,
   renderReglamentoForLlm,
+  renderRalComentadoForLlm,
 } from './silClient.js';
 import { queryLightrag, type LightragMode } from './lightragClient.js';
 import { withTimeout, withRetry, ResilienceError } from './resilience.js';
@@ -202,6 +204,15 @@ function hasSilTools(agentTools: Array<Record<string, unknown>>): boolean {
 
 function hasReglamentoTool(agentTools: Array<Record<string, unknown>>): boolean {
   return agentTools.some((t) => t.name === 'search_reglamento');
+}
+
+// search_ral_comentado — Track F, Sprint 1. RAL Comentado con interpretaciones
+// oficiales. Declarado en el YAML de agentes que quieren el upgrade.
+// Si el agente solo declara search_reglamento (RAL plano), no recibe este tool.
+// Cuando un agente declare search_ral_comentado, recibe ESTE tool en lugar de
+// search_reglamento (o además de él, para backwards compat durante la transición).
+function hasRalComentadoTool(agentTools: Array<Record<string, unknown>>): boolean {
+  return agentTools.some((t) => t.name === 'search_ral_comentado');
 }
 
 function hasGraphTool(agentTools: Array<Record<string, unknown>>): boolean {
@@ -451,6 +462,56 @@ const SEARCH_REGLAMENTO_TOOL = {
         },
       },
       required: ['query'],
+    },
+  },
+};
+
+// ─── RAL Comentado tool — Track F, Sprint 1 ──────────────────────────────────
+// Upgrade de search_reglamento: devuelve el texto normativo del artículo + las
+// interpretaciones oficiales adheridas (resoluciones de la Presidencia,
+// sentencias de la Sala Constitucional, criterios de Servicios Técnicos) con
+// cita a la fuente (acta plenaria, voto, PDF).
+//
+// Cuándo usar search_ral_comentado vs search_reglamento:
+//   search_ral_comentado → cuando el agente tiene la tabla ral_articulos indexada
+//                          (migración 0035 aplicada) y el usuario pregunta por un
+//                          artículo específico o por la interpretación oficial.
+//   search_reglamento    → fallback / complemento para búsqueda semántica cuando
+//                          el artículo específico no se conoce.
+// El agente puede llamar ambas si necesita cubrirse semántica + interpretación.
+
+const SEARCH_RAL_COMENTADO_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'search_ral_comentado',
+    description:
+      'Busca en el Reglamento de la Asamblea Legislativa COMENTADO (5ta Edición) — el RAL con interpretaciones oficiales de la Presidencia de la Asamblea, sentencias de la Sala Constitucional, y criterios de Servicios Técnicos adheridos a cada artículo e inciso. ' +
+      'Usalo cuando el usuario pregunte específicamente por la interpretación oficial de un artículo, por precedentes procedimentales, o cuando necesitás citar "según la resolución de la Presidencia" o "según la Sala Constitucional". ' +
+      'Devuelve: texto normativo del artículo + interpretaciones con fuente exacta (acta plenaria, voto, URL del PDF). ' +
+      'Citá [Art. N] inline y la fuente entre paréntesis — ej: "El Presidente resolvió que... [Art. 137, Resolución Presidencia, Acta Sesión Plenaria 091, pág. 44]". ' +
+      'Si no hay interpretaciones indexadas para el artículo, lo indicás y buscás en search_reglamento como fallback.',
+    parameters: {
+      type: 'object',
+      properties: {
+        articulo_numero: {
+          type: 'string',
+          description: 'Número del artículo del RAL a buscar. Ej: "137", "3", "177". Si lo conocés, pasálo directamente para un lookup exacto.',
+        },
+        inciso: {
+          type: 'string',
+          description: 'Inciso específico del artículo (opcional). Ej: "3" para el inciso 3 del art. 137.',
+        },
+        query: {
+          type: 'string',
+          description: 'Búsqueda por concepto si no conocés el número de artículo. Ej: "mociones de fondo segundo día", "plazo dictamen". Se usa solo si articulo_numero no se especifica.',
+        },
+        k: {
+          type: 'integer',
+          description: 'Número máximo de artículos a recuperar (default 5).',
+          default: 5,
+        },
+      },
+      required: [],
     },
   },
 };
@@ -762,6 +823,13 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // squarely Lexa's territory).
   if (hasReglamentoTool(agent.tools)) {
     tools.push(SEARCH_REGLAMENTO_TOOL);
+  }
+  // RAL Comentado — Track F, Sprint 1 (2026-05-14).
+  // Upgrade del RAL plano: artículo + interpretaciones oficiales + citas a actas.
+  // Se registra ADEMÁS de search_reglamento (no en lugar de) para que el agente
+  // pueda usar ambos: semántico (reglamento) + lookup interpretación (ral_comentado).
+  if (hasRalComentadoTool(agent.tools)) {
+    tools.push(SEARCH_RAL_COMENTADO_TOOL);
   }
   // Graph-augmented retrieval (LightRAG). DEEP-INSIGHT-GATED.
   // The graph traversal + Opus 4.7 synthesis is our "premium reasoning" tier
@@ -1198,7 +1266,22 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
           `5. Si dice "⚡ DISPENSA" → tuvo fast-track (sin pasar por comisión), políticamente relevante.\n` +
           `6. Si la respuesta del usuario implica analizar el TEXTO del expediente, llamá a search_sil_corpus con palabras clave — el corpus tiene los PDFs ya parseados.\n` +
           `7. Citá [1] cuando hables de este expediente. Mencioná número como "Exp. ${exp.numero}".\n` +
-          `8. Si el usuario pide el texto literal y no aparece en los documentos listados, decile que el documento aún no está indexado.`,
+          `8. Si el usuario pide el texto literal y no aparece en los documentos listados, decile que el documento aún no está indexado.\n\n` +
+          `REGLA CRÍTICA — Estado "es ley" de un expediente:\n\n` +
+          `Un expediente es ley si CUALQUIERA de estas condiciones es verdadera:\n` +
+          `1. El ESTATUS FORMAL dice "✅ ES LEY" (hay numero_ley en extras)\n` +
+          `2. En sil_expedientes, el campo estado es 'Vigente' Y tiene fecha_publicacion en La Gaceta\n` +
+          `3. Existe una fila en sil_leyes con expediente_origen_id = este expediente\n\n` +
+          `Un expediente NO es ley si:\n` +
+          `- Su ESTATUS FORMAL dice "📦 ARCHIVADO" o "Desestimado" → fue archivado sin convertirse en ley.\n` +
+          `  NO digas "aún no es ley" para un expediente archivado — ya no lo será jamás.\n` +
+          `- Su ESTATUS FORMAL dice "🟡 EN TRÁMITE" → todavía en proceso, no ha llegado a ley.\n\n` +
+          `Cuando respondas sobre el estado de un expediente:\n` +
+          `- Si es ley: indicalo claramente + cita N° de Ley + N° de Gaceta + fecha de rige si están.\n` +
+          `- Si no es ley pero está activo: explicá en qué etapa está (comisión, plenario, etc.).\n` +
+          `- Si fue archivado: aclarálo sin decir "aún no es ley" — decí "fue archivado y no se convertirá en ley".\n\n` +
+          `Bug reportado por usuario Javier (min 03:13, reunión 2026-05-14): Lexa decía "este expediente aún no es ley"\n` +
+          `sobre un expediente que SÍ era ley. Verificá SIEMPRE el ESTATUS FORMAL antes de responder sobre "¿es ley?".`,
       });
       continue;
     }
@@ -1252,6 +1335,72 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
           `2. Si la pregunta no se responde literalmente con los artículos devueltos, decí "el Reglamento no regula explícitamente esto" y NO inventes la respuesta.\n` +
           `3. Cuando combinés varios artículos, citá [Art. N][Art. M].\n` +
           `4. Hablale al usuario de "el Reglamento", "el artículo", "la norma" — nunca de "chunk".`,
+      });
+      continue;
+    }
+
+    // ── search_ral_comentado — Track F, Sprint 1 ─────────────────────────────
+    // RAL Comentado con interpretaciones oficiales de Presidencia + Sala IV.
+    // Requiere migración 0035 aplicada. Si la tabla no existe, falla suave
+    // y retorna un mensaje indicando que el ingest no se corrió todavía.
+    if (tc.function.name === 'search_ral_comentado') {
+      let parsedArgs: { articulo_numero?: string; inciso?: string; query?: string; k?: number };
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments);
+      } catch {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: 'invalid json' }) });
+        continue;
+      }
+
+      let ralHits: Awaited<ReturnType<typeof searchRalComentado>> = [];
+      try {
+        ralHits = await searchRalComentado(parsedArgs);
+      } catch (err) {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: (err as Error).message }) });
+        continue;
+      }
+
+      // Citation events — uno por artículo encontrado.
+      if (ralHits.length > 0) {
+        args.onChunk({
+          type: 'citation',
+          payload: ralHits.map((h, i) => ({
+            id: `ral-${h.articulo_numero}-${h.articulo_inciso ?? 'full'}`,
+            session_id: '',
+            source_ref: h.articulo_inciso
+              ? `Art. ${h.articulo_numero}, inciso ${h.articulo_inciso} (RAL Comentado)`
+              : `Art. ${h.articulo_numero} (RAL Comentado)`,
+            content: h.texto_normativo.slice(0, 400),
+            similarity: 1.0,
+            fecha: null,
+            comision: null,
+            tipo: 'reglamento_comentado',
+            source_type: 'metadata',
+            expediente_numero: `Art. ${h.articulo_numero}`,
+            url_detalle: h.source_pdf,
+            video_url: null,
+            transcript_url: null,
+            rank: i + 1,
+          })),
+        });
+      }
+
+      const content = ralHits.length > 0
+        ? `RAL Comentado — ${ralHits.length} artículo(s) encontrado(s):\n\n${renderRalComentadoForLlm(ralHits)}\n\n---\n` +
+          `INSTRUCCIONES DE CITACIÓN:\n` +
+          `1. Citá [Art. N] inline para el texto normativo. Ej: "Las mociones de fondo se votan en dos días [Art. 137]."\n` +
+          `2. Para interpretaciones oficiales, citá la fuente entre paréntesis después del texto. Ej: "[Art. 137, Resolución Presidencia — Acta Sesión Plenaria 091 del 01-11-2012, pág. 44]".\n` +
+          `3. Si hay sentencias de Sala Constitucional, citá el voto. Ej: "[Art. 137, Voto N° 2019-12345 Sala IV]".\n` +
+          `4. Si las interpretaciones dicen "(Sin interpretaciones oficiales indexadas)", buscá también con search_reglamento para complementar.\n` +
+          `5. NUNCA inventes citas — solo usá las que la tool devolvió.`
+        : `(El RAL Comentado no tiene resultados para esta consulta. ` +
+          `Puede que la migración 0035_ral_comentado.sql no esté aplicada o el ingest no se corrió. ` +
+          `Intenta con search_reglamento para el texto normativo plano.)`;
+
+      messages.push({
+        role: 'tool',
+        tool_call_id: tc.id,
+        content,
       });
       continue;
     }

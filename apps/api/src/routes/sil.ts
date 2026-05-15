@@ -177,6 +177,43 @@ silRouter.get('/expedientes', async (req, res) => {
   const year = req.query.year ? Number(req.query.year) : null;
   const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
 
+  // ── Filtro por fecha (pedido 9 — Track E) ─────────────────────────────
+  // date_field selecciona qué columna comparar; date_from / date_to son
+  // ISO strings "YYYY-MM-DD". Se valida contra una whitelist para evitar
+  // SQL injection vía el ORM de Supabase.
+  const DATE_FIELD_WHITELIST = [
+    'fecha_presentacion',
+    'fecha_dictamen_estimada',
+    'fecha_publicacion_gaceta',
+    'fecha_vence_subcomision',
+    'fecha_cuatrienal',
+    'fecha_ultimo_cambio',
+  ] as const;
+  type DateField = (typeof DATE_FIELD_WHITELIST)[number];
+
+  const rawDateField = typeof req.query.date_field === 'string' ? req.query.date_field : null;
+  const dateField: DateField | null =
+    rawDateField && (DATE_FIELD_WHITELIST as readonly string[]).includes(rawDateField)
+      ? (rawDateField as DateField)
+      : null;
+
+  // Return 400 if date_field was supplied but is not in whitelist.
+  if (rawDateField && !dateField) {
+    res.status(400).json({
+      ok: false,
+      error: `invalid date_field "${rawDateField}". Valid values: ${DATE_FIELD_WHITELIST.join(', ')}`,
+    });
+    return;
+  }
+
+  const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const dateFrom = typeof req.query.date_from === 'string' && ISO_DATE_RE.test(req.query.date_from)
+    ? req.query.date_from
+    : null;
+  const dateTo = typeof req.query.date_to === 'string' && ISO_DATE_RE.test(req.query.date_to)
+    ? req.query.date_to
+    : null;
+
   try {
     const s = supa();
 
@@ -232,6 +269,13 @@ silRouter.get('/expedientes', async (req, res) => {
       const fromIso = `${year}-01-01`;
       const toIso = `${year}-12-31`;
       q1 = q1.gte('fecha_presentacion', fromIso).lte('fecha_presentacion', toIso);
+    }
+    // Date-range filter (Track E — pedido 9 calendario)
+    // Only applies when dateField is valid; date_from / date_to are optional
+    // individually (open-ended ranges are valid: e.g. "desde hoy en adelante").
+    if (dateField) {
+      if (dateFrom) q1 = q1.gte(dateField, dateFrom);
+      if (dateTo) q1 = q1.lte(dateField, dateTo);
     }
     if (q) {
       // Numero match (substring) OR title match. PostgREST or-clause

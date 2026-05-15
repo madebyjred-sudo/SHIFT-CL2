@@ -48,10 +48,28 @@ export function matchSesionId(path: string): string | null {
   return m ? m[1] : null;
 }
 
-/** Match `/expediente/:numero` → returns numero (string) or null. */
+/**
+ * Match `/expediente/:numero` → returns numero (string) or null.
+ *
+ * Accepts two formats:
+ *   • Integer id only   → /expediente/23511  (legacy links from old SilBrowsePage cards)
+ *   • Dot notation      → /expediente/23.511 (canonical SIL format, used by new dashboard)
+ *
+ * The backend resolves both forms against sil_expedientes (by `id` int or
+ * by `numero` text) so either URL leads to the same expediente.
+ */
 export function matchExpedienteNumero(path: string): string | null {
-  const m = path.match(/^\/expediente\/(\d+)\/?$/);
+  const m = path.match(/^\/expediente\/([\d.]+)\/?$/);
   return m ? m[1] : null;
+}
+
+/**
+ * Extract a clean numero string from a path, returning the dot-form when
+ * present. Utility for generating canonical deep-links to the new dashboard.
+ * Example: matchExpedienteNumeroForDashboard('/expediente/23.511') → '23.511'
+ */
+export function matchExpedienteNumeroForDashboard(path: string): string | null {
+  return matchExpedienteNumero(path);
 }
 
 /** Match `/sil` (the manual browse surface). Boolean since there's
@@ -177,4 +195,14 @@ export function isCentinela(path: string): boolean {
 /** Match `/mi-memoria` — neuron management panel (Track 0b). */
 export function isMiMemoria(path: string): boolean {
   return /^\/mi-memoria\/?$/.test(path);
+}
+
+/** Match `/alertas` — Alertas Centinela v2 (centinela_alerts_v2 con prioridades). */
+export function isAlertasPage(path: string): boolean {
+  return /^\/alertas\/?$/.test(path);
+}
+
+/** Match `/plenario/estado` — dashboard Estado del Plenario (Track D, Decretos Ejecutivos). */
+export function isEstadoPlenario(path: string): boolean {
+  return /^\/plenario\/estado\/?$/.test(path);
 }

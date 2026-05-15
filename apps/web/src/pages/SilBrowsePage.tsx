@@ -39,7 +39,9 @@ import {
   type SilExpedienteListItem,
   type SilFacets,
   type SilListQuery,
+  type FechaCampo,
 } from '@/services/silBrowseApi';
+import { CalendarFilter } from '@/components/sil/CalendarFilter';
 import { cn } from '@/lib/utils';
 
 interface FilterState {
@@ -49,6 +51,9 @@ interface FilterState {
   tipo: string | null;
   year: number | null;
   includeMetadata: boolean;
+  dateCampo: FechaCampo;
+  dateDesde: string | null;
+  dateHasta: string | null;
 }
 
 const DEFAULTS: FilterState = {
@@ -58,14 +63,26 @@ const DEFAULTS: FilterState = {
   tipo: null,
   year: null,
   includeMetadata: false,
+  dateCampo: 'fecha_presentacion',
+  dateDesde: null,
+  dateHasta: null,
 };
 
 const PAGE_SIZE = 50;
+
+const DATE_CAMPO_VALID = new Set<string>([
+  'fecha_presentacion', 'fecha_dictamen_estimada', 'fecha_publicacion_gaceta',
+  'fecha_vence_subcomision', 'fecha_cuatrienal', 'fecha_ultimo_cambio',
+]);
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function readFiltersFromUrl(): FilterState {
   if (typeof window === 'undefined') return DEFAULTS;
   const sp = new URLSearchParams(window.location.search);
   const yearRaw = sp.get('year');
+  const rawCampo = sp.get('date_field') ?? '';
+  const rawDesde = sp.get('date_from') ?? '';
+  const rawHasta = sp.get('date_to') ?? '';
   return {
     q: sp.get('q') ?? '',
     comision: sp.get('comision') || null,
@@ -73,6 +90,9 @@ function readFiltersFromUrl(): FilterState {
     tipo: sp.get('tipo') || null,
     year: yearRaw && /^\d{4}$/.test(yearRaw) ? Number(yearRaw) : null,
     includeMetadata: sp.get('all') === '1',
+    dateCampo: DATE_CAMPO_VALID.has(rawCampo) ? (rawCampo as FechaCampo) : 'fecha_presentacion',
+    dateDesde: ISO_DATE_RE.test(rawDesde) ? rawDesde : null,
+    dateHasta: ISO_DATE_RE.test(rawHasta) ? rawHasta : null,
   };
 }
 
@@ -85,6 +105,11 @@ function writeFiltersToUrl(f: FilterState) {
   if (f.tipo) sp.set('tipo', f.tipo);
   if (f.year) sp.set('year', String(f.year));
   if (f.includeMetadata) sp.set('all', '1');
+  if (f.dateDesde || f.dateHasta) {
+    sp.set('date_field', f.dateCampo);
+    if (f.dateDesde) sp.set('date_from', f.dateDesde);
+    if (f.dateHasta) sp.set('date_to', f.dateHasta);
+  }
   const qs = sp.toString();
   const next = `/sil${qs ? `?${qs}` : ''}`;
   if (next !== window.location.pathname + window.location.search) {
@@ -153,6 +178,13 @@ export function SilBrowsePage() {
       include_metadata: filters.includeMetadata || undefined,
       limit: PAGE_SIZE,
       offset,
+      ...(filters.dateDesde || filters.dateHasta
+        ? {
+            date_field: filters.dateCampo,
+            date_from: filters.dateDesde ?? undefined,
+            date_to: filters.dateHasta ?? undefined,
+          }
+        : {}),
     };
     fetchSilExpedientes(query)
       .then((r) => {
@@ -174,6 +206,9 @@ export function SilBrowsePage() {
     filters.tipo,
     filters.year,
     filters.includeMetadata,
+    filters.dateCampo,
+    filters.dateDesde,
+    filters.dateHasta,
     offset,
   ]);
 
@@ -181,7 +216,8 @@ export function SilBrowsePage() {
     (filters.comision ? 1 : 0) +
     (filters.estado ? 1 : 0) +
     (filters.tipo ? 1 : 0) +
-    (filters.year ? 1 : 0);
+    (filters.year ? 1 : 0) +
+    (filters.dateDesde || filters.dateHasta ? 1 : 0);
 
   const canLoadMore = items.length < total;
 
@@ -296,11 +332,31 @@ export function SilBrowsePage() {
                       options={facets.years.map(String)}
                       onChange={(v) => setFilters({ year: v ? Number(v) : null })}
                     />
+                    <div>
+                      <label className="block text-[10px] font-semibold uppercase tracking-[0.16em] text-[#0e1745]/50 dark:text-white/50 mb-1.5">
+                        Por calendario
+                      </label>
+                      <CalendarFilter
+                        campo={filters.dateCampo}
+                        desde={filters.dateDesde}
+                        hasta={filters.dateHasta}
+                        onChange={(campo, desde, hasta) =>
+                          setFilters({ dateCampo: campo, dateDesde: desde, dateHasta: hasta })
+                        }
+                      />
+                    </div>
                     {activeFilterCount > 0 && (
                       <button
                         type="button"
                         onClick={() =>
-                          setFilters({ comision: null, estado: null, tipo: null, year: null })
+                          setFilters({
+                            comision: null,
+                            estado: null,
+                            tipo: null,
+                            year: null,
+                            dateDesde: null,
+                            dateHasta: null,
+                          })
                         }
                         className="inline-flex items-center gap-1 text-[11.5px] font-medium text-[#0e1745]/65 dark:text-white/65 hover:text-cl2-accent transition-colors"
                       >
@@ -511,7 +567,11 @@ function ExpedienteCard({ item }: { item: SilExpedienteListItem }) {
   const isIndexed = item.status === 'indexed';
   const handleClick = () => {
     if (isIndexed) {
-      navigate(`/expediente/${item.id}`);
+      // Prefer the dot-format numero ("23.511") to deep-link to the new
+      // ExpedienteDashboardPage. Fall back to the integer id for legacy items
+      // that don't have a formatted numero yet.
+      const dest = item.numero ? `/expediente/${item.numero}` : `/expediente/${item.id}`;
+      navigate(dest);
     } else if (item.url_detalle) {
       window.open(item.url_detalle, '_blank', 'noopener');
     }
@@ -603,7 +663,8 @@ function EmptyState({
   coverage: SilCoverage | null;
 }) {
   const hasFilters =
-    filters.q.length > 0 || filters.comision || filters.estado || filters.tipo || filters.year;
+    filters.q.length > 0 || filters.comision || filters.estado || filters.tipo || filters.year
+    || filters.dateDesde || filters.dateHasta;
 
   // Special case: zero indexed expedientes match AND user hasn't toggled
   // include_metadata. Recommend toggling to see the broader catalog.
@@ -637,7 +698,7 @@ function EmptyState({
         <button
           type="button"
           onClick={() =>
-            setFilters({ q: '', comision: null, estado: null, tipo: null, year: null })
+            setFilters({ q: '', comision: null, estado: null, tipo: null, year: null, dateDesde: null, dateHasta: null })
           }
           className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium text-cl2-accent border border-cl2-accent/30 hover:bg-cl2-accent/[0.06] transition-colors"
         >

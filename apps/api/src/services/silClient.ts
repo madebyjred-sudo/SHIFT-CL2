@@ -520,3 +520,218 @@ export function renderExpedienteFullForLlm(exp: SilExpedienteFull): string {
 
   return `ESTATUS FORMAL:\n${status.map((s) => '  ' + s).join('\n')}\n\n${head}${historial}${docsSection}`;
 }
+
+// ─── RAL Comentado — search con interpretaciones oficiales ────────────────────
+//
+// Track F, Sprint 1 — 2026-05-14.
+// Extiende el conocimiento procedimental de Lexa del "RAL plano" al
+// "RAL Comentado con jurisprudencia interna de la Asamblea".
+//
+// El tool search_ral_comentado (SEARCH_RAL_COMENTADO_TOOL en openRouterClient)
+// llama a esta función. El resultado incluye:
+//   - Texto normativo del artículo o inciso.
+//   - Interpretaciones oficiales adheridas (resoluciones Presidencia, Sala IV).
+//   - Cita textual a la fuente (acta plenaria, voto, etc.).
+//   - URL al PDF de origen.
+//
+// Diferencia con searchReglamento:
+//   searchReglamento          → búsqueda semántica sobre legislative_chunks
+//                               (el RAL plano indexado como chunks de embedding).
+//   searchRalComentado        → lookup directo en ral_articulos + JOIN a
+//                               ral_interpretaciones (tables de la migración 0035).
+//                               Más preciso para lookup por número de artículo.
+//                               Cubre interpretaciones que no están en los chunks.
+//
+// Cascada: intentar búsqueda en ral_articulos primero. Si la tabla no existe
+// (migración 0035 no aplicada), caer de vuelta a searchReglamento.
+
+export interface RalComentadoHit {
+  articulo_numero: string;
+  articulo_inciso: string | null;
+  capitulo: string | null;
+  texto_normativo: string;
+  edicion: string;
+  source_pdf: string | null;
+  source_pagina: number | null;
+  vigente: boolean;
+  interpretaciones: RalInterpretacionHit[];
+}
+
+export interface RalInterpretacionHit {
+  texto: string;
+  fuente_tipo: string;
+  fuente_cita: string | null;
+  fuente_fecha: string | null;
+  fuente_pdf: string | null;
+}
+
+/**
+ * Busca artículos del RAL Comentado, devolviendo texto normativo +
+ * interpretaciones oficiales adheridas.
+ *
+ * @param args.articulo_numero  Si se especifica, lookup directo por número
+ *                               de artículo (ej: '137'). Más preciso.
+ * @param args.inciso           Inciso específico dentro del artículo (ej: '3').
+ *                               Solo se usa si articulo_numero también se pasa.
+ * @param args.query            Si no hay articulo_numero, búsqueda semántica
+ *                               vía searchReglamento (fallback).
+ * @param args.k                Número máximo de artículos a retornar (default 5).
+ *
+ * @returns Array de hits con artículo + interpretaciones.
+ *          Vacío si la migración 0035 no está aplicada (graceful fallback).
+ */
+export async function searchRalComentado(args: {
+  articulo_numero?: string;
+  inciso?: string;
+  query?: string;
+  k?: number;
+}): Promise<RalComentadoHit[]> {
+  const k = Math.min(Math.max(args.k ?? 5, 1), 15);
+  const db = supa();
+
+  try {
+    let articulosQuery = db
+      .from('ral_articulos')
+      .select('id, numero, inciso, capitulo, texto_normativo, edicion, source_pdf, source_pagina, vigente')
+      .eq('vigente', true)
+      .limit(k);
+
+    if (args.articulo_numero) {
+      // Lookup directo por número de artículo.
+      articulosQuery = articulosQuery.eq('numero', args.articulo_numero);
+      if (args.inciso) {
+        articulosQuery = articulosQuery.eq('inciso', args.inciso);
+      }
+    } else if (args.query) {
+      // Sin número específico: búsqueda por texto normativo con ilike.
+      // Para búsqueda semántica completa usar searchReglamento (que usa embeddings).
+      // Acá cubrimos el caso de "busca el artículo sobre mociones de fondo".
+      const keywords = args.query.toLowerCase().split(/\s+/).filter((w) => w.length > 3).slice(0, 3);
+      for (const kw of keywords) {
+        articulosQuery = articulosQuery.ilike('texto_normativo', `%${kw}%`);
+      }
+    } else {
+      // Sin query ni número → retornar primeros artículos vigentes.
+      articulosQuery = articulosQuery.order('numero', { ascending: true });
+    }
+
+    const { data: articulos, error: artErr } = await articulosQuery;
+
+    if (artErr) {
+      if (artErr.code === '42P01' || artErr.message.includes('ral_articulos')) {
+        // Tabla no existe → migración 0035 no aplicada. Fallback gracioso.
+        console.warn('[searchRalComentado] ral_articulos table missing — apply migration 0035. Returning empty.');
+        return [];
+      }
+      throw new Error(`searchRalComentado ral_articulos: ${artErr.message}`);
+    }
+
+    if (!articulos || articulos.length === 0) return [];
+
+    // Para cada artículo, cargar sus interpretaciones.
+    const articuloIds = articulos.map((a: { id: string }) => a.id);
+    const { data: interps, error: interpErr } = await db
+      .from('ral_interpretaciones')
+      .select('articulo_id, texto_interpretacion, fuente_tipo, fuente_cita, fuente_fecha, fuente_pdf, vigente')
+      .in('articulo_id', articuloIds)
+      .eq('vigente', true);
+
+    if (interpErr && interpErr.code !== '42P01') {
+      // Log warn pero no fallar — mejor devolver artículo sin interpretaciones
+      // que no devolver nada.
+      console.warn('[searchRalComentado] Failed to load interpretaciones:', interpErr.message);
+    }
+
+    const interpsByArticuloId = new Map<string, RalInterpretacionHit[]>();
+    for (const interp of interps ?? []) {
+      const list = interpsByArticuloId.get(interp.articulo_id) ?? [];
+      list.push({
+        texto: interp.texto_interpretacion,
+        fuente_tipo: interp.fuente_tipo,
+        fuente_cita: interp.fuente_cita ?? null,
+        fuente_fecha: interp.fuente_fecha ?? null,
+        fuente_pdf: interp.fuente_pdf ?? null,
+      });
+      interpsByArticuloId.set(interp.articulo_id, list);
+    }
+
+    return articulos.map((a: {
+      id: string;
+      numero: string;
+      inciso: string | null;
+      capitulo: string | null;
+      texto_normativo: string;
+      edicion: string;
+      source_pdf: string | null;
+      source_pagina: number | null;
+      vigente: boolean;
+    }) => ({
+      articulo_numero: a.numero,
+      articulo_inciso: a.inciso,
+      capitulo: a.capitulo,
+      texto_normativo: a.texto_normativo,
+      edicion: a.edicion,
+      source_pdf: a.source_pdf,
+      source_pagina: a.source_pagina,
+      vigente: a.vigente,
+      interpretaciones: interpsByArticuloId.get(a.id) ?? [],
+    }));
+  } catch (err) {
+    // Fallback gracioso — no romper el chat si la tabla no existe.
+    console.warn('[searchRalComentado] error, returning empty:', (err as Error).message);
+    return [];
+  }
+}
+
+/**
+ * Renderiza los resultados del RAL Comentado para el LLM.
+ *
+ * Formato:
+ *   **Art. 137 — Mociones de fondo** (RAL Comentado 5ta Edición, pág. 142)
+ *   Capítulo: ...
+ *   Texto: ...
+ *
+ *   Interpretaciones oficiales:
+ *   [1] RESOLUCIÓN DE LA PRESIDENCIA
+ *       Cita: Acta Sesión Plenaria Ordinaria 091 del 01-11-2012, pág. 44
+ *       Texto: ...
+ *
+ *   [Fuente PDF: https://...]
+ */
+export function renderRalComentadoForLlm(hits: RalComentadoHit[]): string {
+  if (hits.length === 0) return '(sin resultados en el RAL Comentado)';
+
+  return hits.map((h) => {
+    const artRef = h.articulo_inciso
+      ? `Art. ${h.articulo_numero}, inciso ${h.articulo_inciso}`
+      : `Art. ${h.articulo_numero}`;
+    const pageRef = h.source_pagina ? `, pág. ${h.source_pagina}` : '';
+    const header = `**${artRef}** (${h.edicion}${pageRef})`;
+    const capLine = h.capitulo ? `Capítulo: ${h.capitulo}\n` : '';
+    const textoLine = `Texto normativo:\n${h.texto_normativo}`;
+
+    let interpsSection = '';
+    if (h.interpretaciones.length > 0) {
+      const TIPO_LABEL: Record<string, string> = {
+        resolucion_presidencia: 'RESOLUCIÓN DE LA PRESIDENCIA',
+        sentencia_sala_constitucional: 'SENTENCIA SALA CONSTITUCIONAL',
+        criterio_servicios_tecnicos: 'CRITERIO SERVICIOS TÉCNICOS',
+        otro: 'OTRA FUENTE',
+      };
+      const interpLines = h.interpretaciones.map((interp, i) => {
+        const label = TIPO_LABEL[interp.fuente_tipo] ?? interp.fuente_tipo.toUpperCase();
+        const citaLine = interp.fuente_cita ? `    Cita: ${interp.fuente_cita}\n` : '';
+        const fechaLine = interp.fuente_fecha ? `    Fecha: ${interp.fuente_fecha}\n` : '';
+        const pdfLine = interp.fuente_pdf ? `    PDF: ${interp.fuente_pdf}\n` : '';
+        return `  [${i + 1}] ${label}\n${citaLine}${fechaLine}${pdfLine}    Texto: ${interp.texto.slice(0, 600)}`;
+      }).join('\n\n');
+      interpsSection = `\n\nInterpretaciones oficiales:\n${interpLines}`;
+    } else {
+      interpsSection = '\n\n(Sin interpretaciones oficiales indexadas para este artículo)';
+    }
+
+    const pdfRef = h.source_pdf ? `\n\n[Fuente PDF: ${h.source_pdf}]` : '';
+
+    return `${header}\n${capLine}${textoLine}${interpsSection}${pdfRef}`;
+  }).join('\n\n═══════════════════════════════════\n\n');
+}

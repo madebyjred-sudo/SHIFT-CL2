@@ -12,16 +12,19 @@ import { SupabaseAuthView } from './components/SupabaseAuthView';
 import { AuthCallback } from './components/AuthCallback';
 import { AccessGate } from './components/access/AccessGate';
 import { useSupabaseStore } from './store/useSupabaseStore';
-import { useRoute, matchSesionId, matchExpedienteNumero, matchAdminSection, isSilBrowse, isLandingPage, isWorkspacesList, matchWorkspaceId, isAudiosPage, matchPodcastShareToken, isCentinela, isMiMemoria } from './lib/router';
+import { useRoute, matchSesionId, matchExpedienteNumero, matchAdminSection, isSilBrowse, isLandingPage, isWorkspacesList, matchWorkspaceId, isAudiosPage, matchPodcastShareToken, isCentinela, isMiMemoria, isAlertasPage, isEstadoPlenario } from './lib/router';
 import { SesionesListPage } from './pages/SesionesListPage';
 import { SesionViewPage } from './pages/SesionViewPage';
 import { SubirSesionPage } from './pages/SubirSesionPage';
 import { ExpedienteViewPage } from './pages/ExpedienteViewPage';
+import { ExpedienteDashboardPage } from './pages/ExpedienteDashboardPage';
 import { AdminApp } from './pages/admin/AdminApp';
 import { SilBrowsePage } from './pages/SilBrowsePage';
 import { WorkspacesListPage } from './pages/WorkspacesListPage';
 import { CentinelaPage } from './pages/CentinelaPage';
 import { MiMemoriaPage } from './pages/MiMemoriaPage';
+import { AlertasPage } from './pages/AlertasPage';
+import { EstadoPlenarioPage } from './pages/EstadoPlenarioPage';
 import { WorkspaceCanvasPage } from './pages/WorkspaceCanvasPage';
 import { LandingPage } from './pages/LandingPage';
 import { AudiosPage } from './pages/AudiosPage';
@@ -109,7 +112,12 @@ export default function App() {
           ) : sesionId ? (
             <SesionViewPage sesionId={sesionId} />
           ) : expedienteNumero ? (
-            <ExpedienteViewPage numero={Number(expedienteNumero)} />
+            // Route to the new unified dashboard when the numero contains a dot
+            // (canonical SIL format: "23.511"). Pure-integer links go to the
+            // legacy ExpedienteViewPage for backward compatibility.
+            expedienteNumero.includes('.')
+              ? <ExpedienteDashboardPage numero={expedienteNumero} />
+              : <ExpedienteViewPage numero={Number(expedienteNumero)} />
           ) : adminSection ? (
             <AdminApp section={adminSection} />
           ) : isSilBrowse(path) ? (
@@ -122,6 +130,10 @@ export default function App() {
             <WorkspaceCanvasPage id={workspaceId} />
           ) : isCentinela(path) ? (
             <CentinelaPage />
+          ) : isAlertasPage(path) ? (
+            <AlertasPage />
+          ) : isEstadoPlenario(path) ? (
+            <EstadoPlenarioPage />
           ) : isMiMemoria(path) ? (
             <MiMemoriaPage />
           ) : (

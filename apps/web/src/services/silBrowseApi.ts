@@ -65,6 +65,14 @@ export interface SilExpedienteList {
   include_metadata: boolean;
 }
 
+export type FechaCampo =
+  | 'fecha_presentacion'
+  | 'fecha_dictamen_estimada'
+  | 'fecha_publicacion_gaceta'
+  | 'fecha_vence_subcomision'
+  | 'fecha_cuatrienal'
+  | 'fecha_ultimo_cambio';
+
 export interface SilListQuery {
   q?: string;
   comision?: string;
@@ -74,6 +82,12 @@ export interface SilListQuery {
   include_metadata?: boolean;
   limit?: number;
   offset?: number;
+  /** Campo de fecha a filtrar (whitelist validada en el backend) */
+  date_field?: FechaCampo;
+  /** Fecha ISO "YYYY-MM-DD" — límite inferior del rango */
+  date_from?: string;
+  /** Fecha ISO "YYYY-MM-DD" — límite superior del rango */
+  date_to?: string;
 }
 
 export const fetchSilCoverage = () => get<SilCoverage>('/coverage');
@@ -88,6 +102,9 @@ export const fetchSilExpedientes = (q: SilListQuery): Promise<SilExpedienteList>
   if (q.include_metadata) sp.set('include_metadata', '1');
   if (q.limit) sp.set('limit', String(q.limit));
   if (q.offset) sp.set('offset', String(q.offset));
+  if (q.date_field) sp.set('date_field', q.date_field);
+  if (q.date_from) sp.set('date_from', q.date_from);
+  if (q.date_to) sp.set('date_to', q.date_to);
   const qs = sp.toString();
   return get<SilExpedienteList>(`/expedientes${qs ? `?${qs}` : ''}`);
 };

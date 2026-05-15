@@ -34,6 +34,8 @@ import { scrapeAgenda } from '../jobs/agendaScrape.js';
 import { detectSimilarExpedientes } from '../jobs/centinelaSimilarDetect.js';
 import { getUserFromRequest, getUserIdFromRequest, type AuthedUser } from '../services/auth.js';
 import { logger } from '../services/logger.js';
+import { insertAndDispatch } from '../services/centinelaNotifier.js';
+import { inferPriority, type CentinelaEventType } from '../services/centinelaMatchEngine.js';
 
 // ── Lazy Supabase client (service role) ──────────────────────────────────────
 let _supa: SupabaseClient | null = null;
@@ -766,6 +768,271 @@ centinelaUserRouter.patch('/prefs', async (req, res) => {
     res.json({ ok: true, prefs: data });
   } catch (err) {
     const message = (err as Error)?.message ?? String(err);
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// NUEVOS ENDPOINTS TRACK C — centinela_eventos + centinela_alerts_v2
+// Agregados 2026-05-14 por pedido 16d: prioridades estructuradas.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── GET /api/centinela/eventos?priority=critical&limit=50 ─────────────────
+//
+// Audit/dev-friendly: lista los eventos del sistema (tabla centinela_eventos).
+// Filtros: priority, event_type, expediente_id, limit, cursor (detected_at).
+// Auth: usuario logueado (los eventos son datos públicos).
+centinelaUserRouter.get('/eventos', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+
+  const limit = Math.min(Math.max(parseInt((req.query.limit as string) ?? '50', 10) || 50, 1), 200);
+  const priority = (req.query.priority as string) ?? null;
+  const event_type = (req.query.event_type as string) ?? null;
+  const expediente_id = (req.query.expediente_id as string) ?? null;
+  const cursor = (req.query.cursor as string) ?? null;
+
+  try {
+    let q = supa()
+      .from('centinela_eventos')
+      .select('id, event_type, priority, expediente_id, payload, source_url, comision, diputado, materia, detected_at')
+      .order('detected_at', { ascending: false })
+      .limit(limit);
+
+    if (priority) q = q.eq('priority', priority);
+    if (event_type) q = q.eq('event_type', event_type);
+    if (expediente_id) q = q.eq('expediente_id', expediente_id);
+    if (cursor) q = q.lt('detected_at', cursor);
+
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+
+    const items = data ?? [];
+    const nextCursor = items.length === limit
+      ? (items[items.length - 1] as { detected_at: string }).detected_at
+      : null;
+
+    res.json({ ok: true, items, nextCursor });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.warn('centinela_eventos_list_failed', { userId, error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ── GET /api/centinela/alertas ────────────────────────────────────────────
+//
+// Alertas del usuario actual (tabla centinela_alerts_v2), no leídas primero.
+// Filtros: priority, unread_only, limit, cursor.
+centinelaUserRouter.get('/alertas', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+
+  const limit = Math.min(Math.max(parseInt((req.query.limit as string) ?? '30', 10) || 30, 1), 100);
+  const priority = (req.query.priority as string) ?? null;
+  const unreadOnly = (req.query.unread_only as string) === '1';
+  const cursor = (req.query.cursor as string) ?? null;
+
+  try {
+    let q = supa()
+      .from('centinela_alerts_v2')
+      .select('id, event_id, watch_id, priority, title, body, delivered_at, read_at, snoozed_until, channel')
+      .eq('user_id', userId)
+      // No leídas primero, luego por fecha desc
+      .order('read_at', { ascending: true, nullsFirst: true })
+      .order('delivered_at', { ascending: false })
+      .limit(limit);
+
+    if (priority) q = q.eq('priority', priority);
+    if (unreadOnly) q = q.is('read_at', null);
+    if (cursor) q = q.lt('delivered_at', cursor);
+
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+
+    const items = data ?? [];
+    const nextCursor = items.length === limit
+      ? (items[items.length - 1] as { delivered_at: string }).delivered_at
+      : null;
+
+    res.json({ ok: true, items, nextCursor });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.warn('centinela_alertas_list_failed', { userId, error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ── PATCH /api/centinela/alertas/:id/read ─────────────────────────────────
+//
+// Marca una alerta (centinela_alerts_v2) como leída.
+centinelaUserRouter.patch('/alertas/:id/read', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const { id } = req.params;
+
+  try {
+    const { error } = await supa()
+      .from('centinela_alerts_v2')
+      .update({ read_at: new Date().toISOString() })
+      .eq('id', id)
+      .eq('user_id', userId);
+    if (error) throw new Error(error.message);
+    res.json({ ok: true });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ── PATCH /api/centinela/alertas/:id/snooze ───────────────────────────────
+//
+// Snooze una alerta por X horas.
+// Body: { hours: 1 | 24 | 48 }
+centinelaUserRouter.patch('/alertas/:id/snooze', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const { id } = req.params;
+  const hours = Math.max(1, Math.min(168, Number(req.body?.hours ?? 1)));
+  const snoozedUntil = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+
+  try {
+    const { error } = await supa()
+      .from('centinela_alerts_v2')
+      .update({ snoozed_until: snoozedUntil })
+      .eq('id', id)
+      .eq('user_id', userId);
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, snoozed_until: snoozedUntil });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ── GET /api/centinela/alertas/badge ─────────────────────────────────────
+//
+// Conteo rápido de alertas no leídas por priority. Alimenta el AlertasBadge.
+// Muy liviano: solo COUNT, sin datos.
+centinelaUserRouter.get('/alertas/badge', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+
+  try {
+    // Excluir leídas y snoozeadas activas (snoozed_until en el futuro).
+    // Alertas con snooze ya vencido (snoozed_until en el pasado) SÍ se cuentan.
+    const now = new Date().toISOString();
+    const { data, error } = await supa()
+      .from('centinela_alerts_v2')
+      .select('priority')
+      .eq('user_id', userId)
+      .is('read_at', null)
+      .or(`snoozed_until.is.null,snoozed_until.lte.${now}`);
+
+    if (error) throw new Error(error.message);
+
+    const counts: Record<string, number> = { critical: 0, high: 0, medium: 0, info: 0 };
+    for (const row of (data ?? []) as Array<{ priority: string }>) {
+      counts[row.priority] = (counts[row.priority] ?? 0) + 1;
+    }
+
+    const total = Object.values(counts).reduce((a, b) => a + b, 0);
+    const highestPriority =
+      counts.critical > 0 ? 'critical'
+      : counts.high > 0 ? 'high'
+      : counts.medium > 0 ? 'medium'
+      : counts.info > 0 ? 'info'
+      : null;
+
+    res.json({ ok: true, total, counts, highestPriority });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ── POST /api/centinela/eventos (admin / dev) ─────────────────────────────
+//
+// Inserta un evento manualmente y dispara el match engine.
+// SOLO para testing y demo. En producción, los eventos los inserta el crawler.
+// Auth: usuario logueado (se valida; en prod proteger con admin gate).
+centinelaUserRouter.post('/eventos', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+
+  const {
+    event_type,
+    expediente_id,
+    payload,
+    source_url,
+    comision,
+    diputado,
+    materia,
+    priority: priorityOverride,
+  } = (req.body ?? {}) as {
+    event_type?: string;
+    expediente_id?: string;
+    payload?: Record<string, unknown>;
+    source_url?: string;
+    comision?: string;
+    diputado?: string;
+    materia?: string;
+    priority?: string;
+  };
+
+  if (!event_type) {
+    res.status(400).json({ ok: false, error: 'event_type_required' });
+    return;
+  }
+
+  const validTypes: CentinelaEventType[] = [
+    'orden_dia_publicada', 'cambio_estado', 'mocion_fondo_presentada',
+    'audiencia_confirmada', 'resolucion_sala_constitucional', 'ley_publicada',
+    'decreto_convocatoria', 'fecha_dictamen_proxima', 'plazo_cuatrienal_proximo',
+    'desviacion_procedimental',
+  ];
+
+  if (!validTypes.includes(event_type as CentinelaEventType)) {
+    res.status(400).json({ ok: false, error: 'invalid_event_type', valid: validTypes });
+    return;
+  }
+
+  const typedPayload = (payload ?? {}) as Record<string, unknown>;
+  const inferredPriority = inferPriority(event_type as CentinelaEventType, typedPayload);
+  const finalPriority = (['critical', 'high', 'medium', 'info'].includes(priorityOverride ?? ''))
+    ? priorityOverride as 'critical' | 'high' | 'medium' | 'info'
+    : inferredPriority;
+
+  try {
+    const result = await insertAndDispatch({
+      event_type: event_type as CentinelaEventType,
+      priority: finalPriority,
+      expediente_id: expediente_id ?? null,
+      payload: typedPayload,
+      source_url: source_url ?? null,
+      comision: comision ?? null,
+      diputado: diputado ?? null,
+      materia: materia ?? null,
+    }, supa());
+
+    logger.info('centinela_evento_manual_insert', {
+      actor: userId,
+      event_id: result.evento.id,
+      event_type,
+      priority: finalPriority,
+      matches: result.matches,
+      persisted: result.persisted,
+    });
+
+    res.json({
+      ok: true,
+      evento: result.evento,
+      matches: result.matches,
+      persisted: result.persisted,
+    });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_evento_manual_insert_failed', { error: message });
     res.status(500).json({ ok: false, error: message });
   }
 });
