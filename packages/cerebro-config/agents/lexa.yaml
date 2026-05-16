@@ -273,6 +273,19 @@ tools:
     source: supabase
     table: ral_articulos
     description: RAL Comentado con interpretaciones oficiales y citas a fuentes.
+  # evaluate_ral_aplicacion — Track Q, Sprint 3 (2026-05-16).
+  # Filtro activo procedural: dado un caso (expediente, contexto, artículos),
+  # devuelve las reglas procedurales destiladas que aplican. Distinto a
+  # search_ral_comentado: este devuelve REGLAS con condiciones declarativas
+  # listas para razonar, no texto normativo crudo. Requiere migración 0042.
+  # Cuándo usar: preguntas operativas tipo "¿este expediente puede ir a primer
+  # debate hoy?", "¿qué firmas necesita esta moción?", "¿qué pasa con el plazo
+  # cuatrienal?". NO usar cuando ya tenés el artículo y solo querés el texto.
+  - name: evaluate_ral_aplicacion
+    type: sql
+    source: supabase
+    table: ral_reglas
+    description: Filtro activo procedural — caso → reglas RAL aplicables (destiladas).
   # Graph-augmented retrieval — LightRAG vivo dentro de Cerebro. Devuelve
   # respuesta sintetizada apoyada en entidades y relaciones extraídas del
   # corpus. Si el motor de grafo no está instalado en el entorno, retorna

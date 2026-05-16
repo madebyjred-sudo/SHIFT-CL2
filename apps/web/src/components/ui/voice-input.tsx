@@ -47,6 +47,14 @@ interface VoiceInputProps {
    * token if the user has a session and reject it as malformed.
    */
   skipAuth?: boolean
+  /**
+   * Fired on long-press (≥500ms hold) OR double-tap. Used to open the
+   * conversational voice mode (VoiceConverseModal). When the handler is
+   * provided, a long-press/double-tap will NOT trigger the standard
+   * push-to-record STT flow. When omitted, the mic button behaves exactly
+   * as before — single-click toggle.
+   */
+  onConversationalRequest?: () => void
 }
 
 const MAX_RECORD_MS = 5 * 60 * 1000  // 5 min — matches the cost guardrail
@@ -60,6 +68,7 @@ export function VoiceInput({
   className,
   endpoint = "/api/voice/transcribe",
   skipAuth = false,
+  onConversationalRequest,
 }: VoiceInputProps) {
   const [state, setState] = React.useState<State>("idle")
   const [seconds, setSeconds] = React.useState(0)
@@ -68,6 +77,15 @@ export function VoiceInput({
   const streamRef = React.useRef<MediaStream | null>(null)
   const tickRef = React.useRef<ReturnType<typeof setInterval> | null>(null)
   const autoStopRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Long-press + double-tap gesture refs. The press timer fires after
+  // 500ms of held click → opens conversational mode. A second click within
+  // 300ms of the first also opens it. Either gesture suppresses the normal
+  // single-click STT trigger via the suppressClickRef flag.
+  const pressTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastTapRef = React.useRef<number>(0)
+  const suppressClickRef = React.useRef<boolean>(false)
+  const LONG_PRESS_MS = 500
+  const DOUBLE_TAP_MS = 300
 
   const stopTracks = React.useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop())
@@ -181,12 +199,66 @@ export function VoiceInput({
   const handleClick = (e: React.MouseEvent) => {
     e.stopPropagation()
     if (disabled) return
+    // Gesture suppression: long-press or double-tap already handled the
+    // interaction. Reset the flag and skip the normal toggle.
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false
+      return
+    }
     if (state === "idle" || state === "error" || state === "denied") {
       startRecording()
     } else if (state === "recording") {
       stopRecording()
     }
     // No-op while transcribing
+  }
+
+  // Pointer-down starts the long-press timer. We deliberately use pointer
+  // events instead of mouse + touch separately — pointer covers both and
+  // matches what motion/framer-motion expects.
+  const handlePointerDown = (_e: React.PointerEvent) => {
+    if (disabled || !onConversationalRequest) return
+    if (state !== "idle" && state !== "error" && state !== "denied") return
+    if (pressTimerRef.current) clearTimeout(pressTimerRef.current)
+    pressTimerRef.current = setTimeout(() => {
+      pressTimerRef.current = null
+      suppressClickRef.current = true
+      onConversationalRequest()
+    }, LONG_PRESS_MS)
+  }
+
+  const cancelPressTimer = () => {
+    if (pressTimerRef.current) {
+      clearTimeout(pressTimerRef.current)
+      pressTimerRef.current = null
+    }
+  }
+
+  const handlePointerUp = (_e: React.PointerEvent) => {
+    // If the long-press timer is still pending, this was a quick tap →
+    // cancel the long-press, fall through to double-tap detection.
+    cancelPressTimer()
+    if (!onConversationalRequest) return
+    if (disabled) return
+    const now = Date.now()
+    if (now - lastTapRef.current < DOUBLE_TAP_MS) {
+      suppressClickRef.current = true
+      lastTapRef.current = 0
+      // If we're mid-recording from the first tap of the double, abort it.
+      if (state === "recording") {
+        // Stop without sending — the user wanted the modal, not a one-shot.
+        try { recorderRef.current?.stop() } catch { /* swallow */ }
+      }
+      onConversationalRequest()
+      return
+    }
+    lastTapRef.current = now
+  }
+
+  // If the pointer leaves the button while held, treat as cancel — avoids
+  // accidental modal opens when the user drags off mid-press.
+  const handlePointerLeave = () => {
+    cancelPressTimer()
   }
 
   const formatTime = (s: number) => {
@@ -203,13 +275,19 @@ export function VoiceInput({
     : state === "error" ? "Error en transcripción — clickeá para reintentar"
     : state === "transcribing" ? "Transcribiendo…"
     : state === "recording" ? "Click para terminar y enviar"
-    : "Dictar pregunta (ElevenLabs Scribe)"
+    : onConversationalRequest
+      ? "Dictar pregunta — mantené presionado o doble-click para modo conversación"
+      : "Dictar pregunta (ElevenLabs Scribe)"
 
   return (
     <div className={cn("flex items-center", className)}>
       <motion.button
         type="button"
         onClick={handleClick}
+        onPointerDown={handlePointerDown}
+        onPointerUp={handlePointerUp}
+        onPointerLeave={handlePointerLeave}
+        onPointerCancel={handlePointerLeave}
         disabled={disabled || isTranscribing}
         title={tooltip}
         aria-label={tooltip}

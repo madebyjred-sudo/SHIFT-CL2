@@ -20,6 +20,9 @@ import { adminFeedbackRouter } from './feedback.js';
 import { listTranscripciones, type LegacyTranscripcion } from '../services/legacyCl2Client.js';
 import { crawlList } from '../services/sharePointCrawler.js';
 import { runNoveltyScan } from '../jobs/noveltyScan.js';
+import { runCategorizeExpedientes } from '../jobs/categorizeExpedientes.js';
+import { runGenerateResumenes } from '../jobs/generateResumenMixto.js';
+import { runGenerateInformesSemanales } from '../jobs/generateInformeSemanal.js';
 
 const adminRouter = Router();
 
@@ -1450,6 +1453,130 @@ adminRouter.post('/novelty/run-now', async (req, res) => {
     await auditFromReq(req, {
       verb: 'falló scan de novedades',
       resource: 'noveltyScan',
+      resource_kind: 'system',
+      result: 'error',
+      metadata: { error: message },
+    });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ─── Editorial — Sprint 3 Track P ─────────────────────────────────────
+//
+// 3 endpoints admin-only para disparar manualmente los jobs editoriales.
+// El role guard del adminRouter ya filtra: sólo admin/operador entra.
+//
+// POST /api/admin/editorial/run-categorize ?all=true → categoriza expedientes
+// POST /api/admin/editorial/run-resumenes  ?all=true → genera resúmenes mixtos
+// POST /api/admin/editorial/run-informe-semanal ?user_id=X ?force=true
+//   → genera informes semanales (default todos los users con watchlist)
+//
+// Los 3 son sincrónicos y devuelven el resultado del job. En prod cada uno
+// también puede dispararse vía Cloud Scheduler con secret header (deferido
+// a Track J/I cuando se programe el cron mensual).
+
+adminRouter.post('/editorial/run-categorize', async (req, res) => {
+  try {
+    const all = String(req.query.all ?? '') === 'true';
+    const limit = req.query.limit ? Math.max(1, Number(req.query.limit)) : undefined;
+    const startedAt = new Date().toISOString();
+    const result = await runCategorizeExpedientes({
+      scope: all ? 'all' : 'watchlist',
+      ...(limit !== undefined ? { limit } : {}),
+    });
+    await auditFromReq(req, {
+      verb: 'corrió clasificación editorial',
+      resource: 'categorizeExpedientes',
+      resource_kind: 'system',
+      result: result.errors > 0 ? 'error' : 'ok',
+      metadata: {
+        scope: all ? 'all' : 'watchlist',
+        ...result,
+      },
+    });
+    res.json({ ok: true, started_at: startedAt, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('admin/editorial/run-categorize failed', { error: message });
+    await auditFromReq(req, {
+      verb: 'falló clasificación editorial',
+      resource: 'categorizeExpedientes',
+      resource_kind: 'system',
+      result: 'error',
+      metadata: { error: message },
+    });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+adminRouter.post('/editorial/run-resumenes', async (req, res) => {
+  try {
+    const all = String(req.query.all ?? '') === 'true';
+    const force = String(req.query.force ?? '') === 'true';
+    const limit = req.query.limit ? Math.max(1, Number(req.query.limit)) : undefined;
+    const startedAt = new Date().toISOString();
+    const result = await runGenerateResumenes({
+      scope: all ? 'all' : 'watchlist',
+      force,
+      ...(limit !== undefined ? { limit } : {}),
+    });
+    await auditFromReq(req, {
+      verb: 'corrió resumen mixto editorial',
+      resource: 'generateResumenMixto',
+      resource_kind: 'system',
+      result: result.errors > 0 ? 'error' : 'ok',
+      metadata: {
+        scope: all ? 'all' : 'watchlist',
+        force,
+        ...result,
+      },
+    });
+    res.json({ ok: true, started_at: startedAt, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('admin/editorial/run-resumenes failed', { error: message });
+    await auditFromReq(req, {
+      verb: 'falló resumen mixto editorial',
+      resource: 'generateResumenMixto',
+      resource_kind: 'system',
+      result: 'error',
+      metadata: { error: message },
+    });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+adminRouter.post('/editorial/run-informe-semanal', async (req, res) => {
+  try {
+    const userId = typeof req.query.user_id === 'string' ? req.query.user_id : undefined;
+    const semanaIso =
+      typeof req.query.semana_iso === 'string' ? req.query.semana_iso : undefined;
+    const force = String(req.query.force ?? '') === 'true';
+    const startedAt = new Date().toISOString();
+    const result = await runGenerateInformesSemanales({
+      ...(userId ? { user_id: userId } : {}),
+      ...(semanaIso ? { semana_iso: semanaIso } : {}),
+      force,
+    });
+    await auditFromReq(req, {
+      verb: 'corrió informe semanal editorial',
+      resource: 'generateInformeSemanal',
+      resource_kind: 'system',
+      result: result.errors > 0 ? 'error' : 'ok',
+      metadata: {
+        user_id: userId,
+        semana_iso: semanaIso,
+        force,
+        ...result,
+      },
+    });
+    res.json({ ok: true, started_at: startedAt, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('admin/editorial/run-informe-semanal failed', { error: message });
+    await auditFromReq(req, {
+      verb: 'falló informe semanal editorial',
+      resource: 'generateInformeSemanal',
       resource_kind: 'system',
       result: 'error',
       metadata: { error: message },

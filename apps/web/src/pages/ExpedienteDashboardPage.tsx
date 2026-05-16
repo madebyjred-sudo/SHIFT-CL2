@@ -54,7 +54,9 @@ import { SalaConstitucionalPanel } from '@/components/expediente/SalaConstitucio
 import { ActasComisionPanel } from '@/components/expediente/ActasComisionPanel';
 import { NovedadesPanel } from '@/components/expediente/NovedadesPanel';
 import { OrdenDiaPanel } from '@/components/expediente/OrdenDiaPanel';
-import { Calendar, MessageCircle, Zap } from 'lucide-react';
+import { ListaDespachoPanel } from '@/components/expediente/ListaDespachoPanel';
+import { ListaDespachoBadge } from '@/components/expediente/ListaDespachoBadge';
+import { Calendar, MessageCircle, Zap, Briefcase } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -70,6 +72,7 @@ type SectionId =
   | 'actas'       // pedido 08
   | 'novedades'   // pedidos 16e, 16j
   | 'orden_dia'   // pedido 16c
+  | 'despacho'    // Sprint 3 Track R — Donovan 38:17
   | 'ley'
   | 'documentos';
 
@@ -167,12 +170,18 @@ export function ExpedienteDashboardPage({ numero }: Props) {
   const actasComision = data?.actas_comision ?? meta?.actas_comision ?? [];
   const novedadesAlgoritmo = data?.novedades_detectadas ?? meta?.novedades_detectadas ?? [];
   const ordenDiaApariciones = data?.orden_dia_apariciones ?? meta?.orden_dia_apariciones ?? [];
+  // Sprint 3 Track R
+  const despachoHistorial = data?.despacho_historial ?? [];
+  const despachoActivo = despachoHistorial.find(
+    (d) => d.status === 'a_despacho' && !d.fecha_salida,
+  );
 
   const tieneFechas = !!fechasVigente || !!fechasOtras;
   const tieneSala = consultasSala.length > 0;
   const tieneActas = actasComision.length > 0;
   const tieneNovedades = audiencias.length > 0 || novedadesAlgoritmo.length > 0;
   const tieneOrdenDia = ordenDiaApariciones.length > 0;
+  const tieneDespacho = despachoHistorial.length > 0;
 
   const allSections: SectionConfig[] = [
     {
@@ -206,6 +215,13 @@ export function ExpedienteDashboardPage({ numero }: Props) {
       icon: <Calendar size={13} />,
       count: ordenDiaApariciones.length,
       hidden: !!data && !tieneOrdenDia,
+    },
+    {
+      id: 'despacho' as SectionId,
+      label: 'A despacho',
+      icon: <Briefcase size={13} />,
+      count: despachoHistorial.length,
+      hidden: !!data && !tieneDespacho,
     },
     {
       id: 'consultas' as SectionId,
@@ -301,6 +317,9 @@ export function ExpedienteDashboardPage({ numero }: Props) {
                     Es Ley
                     {data.ley?.numero_ley && ` N.° ${data.ley.numero_ley}`}
                   </span>
+                )}
+                {despachoActivo && (
+                  <ListaDespachoBadge fechaEntrada={despachoActivo.fecha_entrada} />
                 )}
                 {general?.tipo && (
                   <span className="text-[10.5px] text-[#0e1745]/45 dark:text-white/45">
@@ -450,6 +469,9 @@ export function ExpedienteDashboardPage({ numero }: Props) {
               )}
               {activeSection === 'orden_dia' && (
                 <OrdenDiaPanel apariciones={ordenDiaApariciones} />
+              )}
+              {activeSection === 'despacho' && (
+                <ListaDespachoPanel historial={despachoHistorial} />
               )}
             </motion.div>
           )}

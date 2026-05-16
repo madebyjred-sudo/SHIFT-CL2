@@ -55,6 +55,7 @@ import { clientesRouter } from './routes/clientes.js';
 import { feedbackRouter } from './routes/feedback.js';
 import { decretoUserRouter, decretoAdminRouter } from './routes/decretos.js';
 import { ralRouter } from './routes/ral.js';
+import { informesSemanalesRouter } from './routes/informesSemanales.js';
 import { requestContext } from './middleware/requestContext.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { logger } from './services/logger.js';
@@ -273,6 +274,14 @@ app.use(
   '/api/ral',
   rateLimit({ bucket: 'ral', max: 120, windowMs: 60_000 }),
   ralRouter,
+);
+app.use(
+  // Informes semanales editoriales — Sprint 3 Track P. Lectura de archivos
+  // generados por el job `generateInformeSemanal`. Cap generoso porque la
+  // lista refresca al volver al tab.
+  '/api/informes-semanales',
+  rateLimit({ bucket: 'informes_semanales', max: 120, windowMs: 60_000 }),
+  informesSemanalesRouter,
 );
 
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {

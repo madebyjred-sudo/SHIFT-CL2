@@ -13,6 +13,10 @@ import {
   renderReglamentoForLlm,
   renderRalComentadoForLlm,
 } from './silClient.js';
+import {
+  evaluateRalAplicacion,
+  renderEvaluacionForLlm,
+} from './ralReglasEvaluator.js';
 import { queryLightrag, type LightragMode } from './lightragClient.js';
 import { withTimeout, withRetry, ResilienceError } from './resilience.js';
 
@@ -213,6 +217,17 @@ function hasReglamentoTool(agentTools: Array<Record<string, unknown>>): boolean 
 // search_reglamento (o además de él, para backwards compat durante la transición).
 function hasRalComentadoTool(agentTools: Array<Record<string, unknown>>): boolean {
   return agentTools.some((t) => t.name === 'search_ral_comentado');
+}
+
+// evaluate_ral_aplicacion — Track Q, Sprint 3 (2026-05-16). Filtro activo
+// procedural: dado un caso (expediente / contexto / artículos), devuelve las
+// reglas procedurales de `ral_reglas` que aplican. Distinto a search_ral_comentado
+// (que trae texto normativo + interpretaciones) — este devuelve REGLAS
+// DESTILADAS con condiciones declarativas. Requiere migración 0042 aplicada.
+function hasEvaluateRalAplicacionTool(
+  agentTools: Array<Record<string, unknown>>,
+): boolean {
+  return agentTools.some((t) => t.name === 'evaluate_ral_aplicacion');
 }
 
 function hasGraphTool(agentTools: Array<Record<string, unknown>>): boolean {
@@ -512,6 +527,57 @@ const SEARCH_RAL_COMENTADO_TOOL = {
         },
       },
       required: [],
+    },
+  },
+};
+
+// ─── evaluate_ral_aplicacion tool — Track Q, Sprint 3 (2026-05-16) ───────────
+// "Filtro activo" procedural: el RAL como REGLAS DESTILADAS, no como texto.
+// Lexa describe el caso del consultor ("¿este expediente puede ir a primer
+// debate hoy?", "¿qué firmas necesita esta moción?") y este tool devuelve las
+// reglas procedurales que aplican (50+ reglas seedeadas en `ral_reglas`).
+//
+// Diferencia con search_ral_comentado:
+//   search_ral_comentado     → devuelve texto normativo + interpretaciones
+//                              oficiales del artículo. Buena para "¿qué dice
+//                              el art. 137?".
+//   evaluate_ral_aplicacion  → devuelve REGLAS DESTILADAS con condiciones
+//                              declarativas. Buena para "¿qué aplica a este
+//                              caso?". Más operativo.
+//
+// El tool NO usa LLM internamente — query directa a la tabla `ral_reglas`
+// con filtros sobre articulos_relacionados o keyword match sobre descripcion.
+const EVALUATE_RAL_APLICACION_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'evaluate_ral_aplicacion',
+    description:
+      'Evalúa qué reglas procedurales del Reglamento de la Asamblea Legislativa de Costa Rica aplican a un caso concreto. Útil cuando un consultor pregunta "¿este expediente puede someterse a primer debate?" o "¿qué pasa si nadie firma la moción?". ' +
+      'Devuelve hasta 5 reglas relevantes con sus condiciones, artículos relacionados y excepciones — todo ya destilado, NO el texto crudo del RAL. ' +
+      'Cuándo usarla: preguntas operativas sobre procedimiento legislativo costarricense (mociones, audiencias, comisiones, plenario, leyes especiales, consultas, cuatrienales, sesiones, votaciones, derechos de diputados). ' +
+      'Cuándo NO usarla: para citar el texto normativo literal de un artículo usá search_ral_comentado. Para búsqueda semántica sobre el RAL plano usá search_reglamento. ' +
+      'Citación: cada regla viene con su slug, área procedural y artículos relacionados — citalos inline como [Art. N] y mencioná la regla por su título cuando expliques.',
+    parameters: {
+      type: 'object',
+      properties: {
+        contexto: {
+          type: 'string',
+          description:
+            'Descripción del caso o pregunta del consultor en lenguaje natural. Ej: "el cliente pregunta si el expediente 23.511 puede someterse a primer debate hoy aunque el dictamen es de hace 2 días".',
+        },
+        expediente_numero: {
+          type: 'string',
+          description:
+            'Opcional. Número del expediente si el caso refiere a uno específico. Ej: "23.511".',
+        },
+        articulos: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Opcional. Artículos del RAL específicos a evaluar (solo el número, sin "Art."). Ej: ["137", "138"]. Si los pasás, el tool hace lookup directo y los matches son más precisos.',
+        },
+      },
+      required: ['contexto'],
     },
   },
 };
@@ -830,6 +896,13 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // pueda usar ambos: semántico (reglamento) + lookup interpretación (ral_comentado).
   if (hasRalComentadoTool(agent.tools)) {
     tools.push(SEARCH_RAL_COMENTADO_TOOL);
+  }
+  // evaluate_ral_aplicacion — Track Q, Sprint 3 (2026-05-16).
+  // Filtro activo: dado un caso, devuelve reglas procedurales destiladas.
+  // Se declara en el YAML del agente que la quiere (Lexa principalmente).
+  // Complementa search_reglamento + search_ral_comentado — no los reemplaza.
+  if (hasEvaluateRalAplicacionTool(agent.tools)) {
+    tools.push(EVALUATE_RAL_APLICACION_TOOL);
   }
   // Graph-augmented retrieval (LightRAG). DEEP-INSIGHT-GATED.
   // The graph traversal + Opus 4.7 synthesis is our "premium reasoning" tier
@@ -1401,6 +1474,91 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
         role: 'tool',
         tool_call_id: tc.id,
         content,
+      });
+      continue;
+    }
+
+    // ── evaluate_ral_aplicacion — Track Q, Sprint 3 ──────────────────────────
+    // Filtro activo procedural: caso → reglas aplicables. NO usa LLM
+    // internamente. Si la tabla `ral_reglas` no existe (migración 0042 no
+    // aplicada), el servicio devuelve [] + log warn; acá se traduce a un
+    // mensaje informativo para el modelo.
+    if (tc.function.name === 'evaluate_ral_aplicacion') {
+      let parsedArgs: {
+        contexto: string;
+        expediente_numero?: string;
+        articulos?: string[];
+      };
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments);
+      } catch {
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify({ error: 'invalid json' }),
+        });
+        continue;
+      }
+
+      let evaluation: Awaited<ReturnType<typeof evaluateRalAplicacion>>;
+      try {
+        evaluation = await evaluateRalAplicacion({
+          contexto: parsedArgs.contexto,
+          expediente: parsedArgs.expediente_numero,
+          articulos_pregunta: parsedArgs.articulos,
+        });
+      } catch (err) {
+        // evaluateRalAplicacion no debería tirar (cinturón interno) pero
+        // si por algún motivo lo hace, surface limpio al modelo.
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify({ error: (err as Error).message }),
+        });
+        continue;
+      }
+
+      // Citation events — una por regla matcheada. Reusa source_type
+      // 'metadata' (igual que search_ral_comentado) hasta que el UI tenga
+      // un card específico para reglas procedurales.
+      if (evaluation.reglas_aplicables.length > 0) {
+        args.onChunk({
+          type: 'citation',
+          payload: evaluation.reglas_aplicables.map((r, i) => ({
+            id: `ral-regla-${r.slug}`,
+            session_id: '',
+            source_ref: `${r.titulo} (${r.area_procedural})`,
+            content: r.descripcion.slice(0, 400),
+            similarity: r.confidence_match,
+            fecha: null,
+            comision: null,
+            tipo: 'reglamento_regla',
+            source_type: 'metadata',
+            expediente_numero:
+              r.articulos_relacionados.length > 0
+                ? `Art. ${r.articulos_relacionados[0]}`
+                : null,
+            url_detalle: r.fuente_pdf_url,
+            video_url: null,
+            transcript_url: null,
+            rank: i + 1,
+          })),
+        });
+      }
+
+      messages.push({
+        role: 'tool',
+        tool_call_id: tc.id,
+        content:
+          renderEvaluacionForLlm(evaluation) +
+          (evaluation.reglas_aplicables.length > 0
+            ? `\n\nINSTRUCCIONES DE USO:\n` +
+              `1. Las reglas devueltas YA están destiladas — no inventes contenido más allá de lo que dice cada "descripcion" y "excepciones".\n` +
+              `2. Citá inline [Art. N] usando los \`articulos_relacionados\` de cada regla.\n` +
+              `3. Cuando una regla tiene "Excepciones", explicalas explícitamente al consultor.\n` +
+              `4. Si una regla tiene confidence_match < 0.5, mencioná que el match es parcial.\n` +
+              `5. NO mezcles reglas con texto del RAL plano sin aclarar la fuente.`
+            : ''),
       });
       continue;
     }

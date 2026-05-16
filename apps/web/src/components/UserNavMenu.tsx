@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { BookHeart, BookOpen, Eye, Headphones, Library, LogOut, Menu as MenuIcon, MessageSquare, Radio, ShieldCheck, X } from 'lucide-react';
+import { BookHeart, BookOpen, Eye, FileText, Headphones, Library, LogOut, Menu as MenuIcon, MessageSquare, Radio, ShieldCheck, X } from 'lucide-react';
 import { MenuContainer, MenuItem } from './ui/fluid-menu';
 import { useSupabaseStore } from '@/store/useSupabaseStore';
 
-type View = 'chat' | 'live' | 'sil' | 'audios' | 'admin' | 'hojas' | 'centinela' | 'mi-memoria';
+type View = 'chat' | 'live' | 'sil' | 'audios' | 'admin' | 'hojas' | 'centinela' | 'mi-memoria' | 'informes';
 
 interface UserNavMenuProps {
   currentView?: View;
@@ -166,6 +166,12 @@ export function UserNavMenu({ currentView = 'chat', onNavigate }: UserNavMenuPro
         icon={<Eye size={18} strokeWidth={1.75} />}
         isActive={currentView === 'centinela'}
         onClick={() => onNavigate?.('centinela')}
+      />
+      <MenuItem
+        ariaLabel="Informes semanales"
+        icon={<FileText size={18} strokeWidth={1.75} />}
+        isActive={currentView === 'informes'}
+        onClick={() => onNavigate?.('informes')}
       />
       <MenuItem
         ariaLabel="Mi memoria"

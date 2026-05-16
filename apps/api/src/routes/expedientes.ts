@@ -118,6 +118,8 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
       tramiteRes, proponentesRes, consultasRes, leyRes, documentosRes,
       // Sprint v3 — tablas dedicadas (0037 + 0038)
       fechasRes, audienciasRes, actasRes, salaRes, ordenDiaRes,
+      // Sprint 3 Track R — Lista de despacho
+      despachoRes,
     ] = await Promise.all([
       supClientRaw
         .from('sil_expediente_tramite')
@@ -178,6 +180,14 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
         .select('*')
         .eq('expediente_id', numero)
         .order('fecha_sesion', { ascending: false })),
+
+      // Sprint 3 Track R — historial de la lista de despacho. Graceful
+      // degradation si 0043 no se aplicó todavía (safeQuery devuelve []).
+      safeQuery(supClientRaw
+        .from('lista_despacho_items')
+        .select('id, expediente_id, fecha_entrada, fecha_salida, status, fuente_pdf_url, comentario_diputado, detectado_at')
+        .eq('expediente_id', numero)
+        .order('fecha_entrada', { ascending: false })),
     ]);
 
     // Pedido 16j ("algoritmo Carlos") — fuente principal: `centinela_eventos`
@@ -328,6 +338,8 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
         consultas_sala_constitucional: consultasSalaConst,
         orden_dia_apariciones: ordenDiaApariciones,
         novedades_detectadas: novedadesFinales,
+        // Sprint 3 Track R — historial completo de lista de despacho
+        despacho_historial: despachoRes,
         // Diagnóstico de fuente — útil en dev/admin para saber qué se sirvió
         _source: {
           fechas: fechasRes.length > 0 ? 'tabla_dedicada' : 'metadata_jsonb',
@@ -336,12 +348,138 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
           sala: salaRes.length > 0 ? 'tabla_dedicada' : 'metadata_jsonb',
           orden_dia: ordenDiaRes.length > 0 ? 'tabla_dedicada' : 'metadata_jsonb',
           novedades: novedadesDetectadas.length > 0 ? novedadesSource : 'metadata_jsonb',
+          despacho: despachoRes.length > 0 ? 'tabla_dedicada' : 'sin_datos',
         },
       },
     });
   } catch (err) {
     req.log.error('expediente_full_failed', { error: (err as Error).message, numero: rawNumero });
     res.status(502).json({ ok: false, error: 'upstream_unavailable', request_id: req.requestId });
+  }
+});
+
+/**
+ * GET /api/expedientes/:numero/despacho — Sprint 3 Track R.
+ *
+ * Devuelve el historial completo de la lista de despacho para este expediente.
+ * Cada item representa una entrada/salida (UNIQUE por expediente + fecha_entrada).
+ *
+ * Ordenado por fecha_entrada desc — más reciente primero. El primer item con
+ * status='a_despacho' y fecha_salida=null es el "activo" actual.
+ *
+ * Devuelve `[]` si el expediente nunca entró a la lista (no es 404 — es estado
+ * normal y la UI necesita poder mostrarlo).
+ */
+expedientesRouter.get('/:numero/despacho', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+
+  const rawNumero = req.params.numero;
+  const isInt = /^\d+$/.test(rawNumero);
+  const sb = getSupabase();
+
+  try {
+    // Resolver el canonical numero (acepta tanto "23511" como "23.511").
+    const expQuery = isInt
+      ? sb.from('sil_expedientes').select('numero').eq('id', Number(rawNumero)).maybeSingle()
+      : sb.from('sil_expedientes').select('numero').eq('numero', rawNumero).maybeSingle();
+
+    const { data: expRow, error: expErr } = await expQuery;
+    if (expErr || !expRow) {
+      res.status(404).json({ ok: false, error: 'expediente_not_found', numero: rawNumero });
+      return;
+    }
+    const numero = (expRow as { numero: string }).numero;
+
+    const { data, error } = await sb
+      .from('lista_despacho_items')
+      .select(
+        'id, expediente_id, fecha_entrada, fecha_salida, status, fuente_pdf_url, comentario_diputado, detectado_at',
+      )
+      .eq('expediente_id', numero)
+      .order('fecha_entrada', { ascending: false });
+
+    if (error) {
+      req.log.warn('expediente_despacho_query_failed', {
+        error: error.message,
+        numero,
+      });
+      // Si la migration 0043 aún no se aplicó (tabla no existe), devolver []
+      // en lugar de 500 — mismo pattern que /full con safeQuery.
+      res.json({ ok: true, historial: [] });
+      return;
+    }
+
+    res.json({ ok: true, historial: data ?? [] });
+  } catch (err) {
+    req.log.error('expediente_despacho_failed', {
+      error: (err as Error).message,
+      numero: rawNumero,
+    });
+    res.status(502).json({ ok: false, error: 'upstream_unavailable', request_id: req.requestId });
+  }
+});
+
+/**
+ * GET /api/expedientes/:numero/editorial — Sprint 3 Track P.
+ *
+ * Devuelve el resumen mixto + categorías CL2 para mostrar en el dashboard
+ * del expediente. Lee de la VIEW `cl2_expediente_editorial` que ya joinea
+ * cl2_resumenes con cl2_expediente_categorias.
+ *
+ * 404 cuando el expediente no tiene resumen aún. El frontend muestra un
+ * empty state "Resumen pendiente — corré el job admin".
+ */
+expedientesRouter.get('/:numero/editorial', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+
+  const rawNumero = req.params.numero;
+  // Acepta tanto "23511" (int) como "23.511" (canonical dot form).
+  const isInt = /^\d+$/.test(rawNumero);
+  const sb = getSupabase();
+
+  try {
+    // Resolver el canonical numero primero (acepta ambos formatos).
+    const expQuery = isInt
+      ? sb.from('sil_expedientes').select('numero').eq('id', Number(rawNumero)).maybeSingle()
+      : sb.from('sil_expedientes').select('numero').eq('numero', rawNumero).maybeSingle();
+    const { data: expRow } = await expQuery;
+    if (!expRow) {
+      res.status(404).json({ ok: false, error: 'expediente_not_found', numero: rawNumero });
+      return;
+    }
+    const numero = (expRow as { numero: string }).numero;
+
+    const { data: editorial, error } = await sb
+      .from('cl2_expediente_editorial')
+      .select('*')
+      .eq('expediente_id', numero)
+      .maybeSingle();
+
+    if (error) {
+      req.log?.error('editorial_view_failed', { error: error.message, numero });
+      res.status(500).json({ ok: false, error: error.message });
+      return;
+    }
+
+    if (!editorial) {
+      res.status(404).json({
+        ok: false,
+        error: 'editorial_not_ready',
+        numero,
+        hint: 'No hay resumen ni categorías generadas todavía para este expediente.',
+      });
+      return;
+    }
+
+    res.json({ ok: true, editorial });
+  } catch (err) {
+    req.log?.error('editorial_endpoint_threw', {
+      error: (err as Error).message,
+      numero: rawNumero,
+    });
+    res.status(500).json({ ok: false, error: 'internal_error' });
   }
 });
 

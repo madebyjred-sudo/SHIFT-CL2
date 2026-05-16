@@ -31,6 +31,7 @@ import type { ImportSource } from '@/services/workspaceApi';
 import { cn } from '@/lib/utils';
 import { TextLoop } from '@/components/ui/text-loop';
 import { VoiceInput } from '@/components/ui/voice-input';
+import { VoiceConverseModal } from '@/components/VoiceConverseModal';
 import { ShinyButton } from '@/components/ui/shiny-button';
 import {
   useChat,
@@ -197,6 +198,7 @@ export function AnimatedAiInput({
 
   const [value, setValue] = useState('');
   const [podcastOpen, setPodcastOpen] = useState(false);
+  const [voiceConverseOpen, setVoiceConverseOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   useAutoResizeTextarea(textareaRef, value);
 
@@ -841,6 +843,11 @@ export function AnimatedAiInput({
         source_title="Conversación con Lexa"
       />
 
+      <VoiceConverseModal
+        open={voiceConverseOpen}
+        onClose={() => setVoiceConverseOpen(false)}
+      />
+
       {/* ── Hero intro ────────────────────────────────────────────────────── */}
       <AnimatePresence>
         {messages.length === 0 && !value && !isWorkspaceScope && (
@@ -1395,7 +1402,8 @@ export function AnimatedAiInput({
                   </AnimatePresence>
                 </div>
 
-                {/* Voice input */}
+                {/* Voice input — single-tap = STT (dictate prompt),
+                    long-press / double-tap = conversational mode (Lexa). */}
                 <VoiceInput
                   accent={agentInfo.color}
                   disabled={isLoading}
@@ -1408,6 +1416,7 @@ export function AnimatedAiInput({
                     });
                     requestAnimationFrame(() => textareaRef.current?.focus());
                   }}
+                  onConversationalRequest={() => setVoiceConverseOpen(true)}
                 />
               </div>
 

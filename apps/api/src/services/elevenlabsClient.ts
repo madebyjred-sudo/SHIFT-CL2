@@ -263,6 +263,43 @@ export function applyEmotionTag(text: string, emotion: string | undefined, model
   return `[${emotion}] ${text}`;
 }
 
+/**
+ * Thin convenience wrapper around `generateMonologue` for the voice-converse
+ * route. `generateMonologue` is the canonical TTS call (used by the podcast
+ * pipeline); this just picks a sensible default voice + model for the Lexa
+ * conversational use case.
+ *
+ * Voice resolution order:
+ *   1. Explicit `voiceId` argument
+ *   2. `LEXA_VOICE_ID` env (lets ops pin a specific voice without redeploy)
+ *   3. The first voice from `resolveWhitelistedVoices()` (which itself falls
+ *      back to the first voice in the account)
+ *
+ * Model: `eleven_multilingual_v2` — good Spanish coverage, fast enough for
+ * an interactive conversation loop (~1-2s TTFA on short replies).
+ *
+ * The caller is responsible for length capping (the converse route enforces
+ * an 800-char ceiling before calling here). We do NOT retry — a retry on the
+ * same text would be billed twice.
+ */
+export async function synthesizeSpeech(text: string, voiceId?: string): Promise<Buffer> {
+  const trimmed = text.trim();
+  if (!trimmed) throw new Error('text empty');
+
+  let voice = voiceId ?? process.env.LEXA_VOICE_ID;
+  if (!voice) {
+    const resolved = await resolveWhitelistedVoices();
+    voice = resolved[0]?.id;
+  }
+  if (!voice) throw new Error('no voice available for TTS');
+
+  return generateMonologue({
+    voiceId: voice,
+    text: trimmed,
+    modelId: 'eleven_multilingual_v2',
+  });
+}
+
 // ─── Speech-to-Text (Scribe) ──────────────────────────────────────────
 //
 // ElevenLabs Scribe is the cheap STT tier (~$0.40/hour ≈ $0.0067/min) —

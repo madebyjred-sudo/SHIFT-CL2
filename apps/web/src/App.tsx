@@ -12,7 +12,7 @@ import { SupabaseAuthView } from './components/SupabaseAuthView';
 import { AuthCallback } from './components/AuthCallback';
 import { AccessGate } from './components/access/AccessGate';
 import { useSupabaseStore } from './store/useSupabaseStore';
-import { useRoute, matchSesionId, matchExpedienteNumero, matchAdminSection, isSilBrowse, isLandingPage, isWorkspacesList, matchWorkspaceId, isAudiosPage, matchPodcastShareToken, isCentinela, isMiMemoria, isAlertasPage, isEstadoPlenario, isMatrizCliente } from './lib/router';
+import { useRoute, matchSesionId, matchExpedienteNumero, matchAdminSection, isSilBrowse, isLandingPage, isWorkspacesList, matchWorkspaceId, isAudiosPage, matchPodcastShareToken, isCentinela, isMiMemoria, isAlertasPage, isEstadoPlenario, isMatrizCliente, isInformesSemanales } from './lib/router';
 import { SesionesListPage } from './pages/SesionesListPage';
 import { SesionViewPage } from './pages/SesionViewPage';
 import { SubirSesionPage } from './pages/SubirSesionPage';
@@ -26,6 +26,7 @@ import { MiMemoriaPage } from './pages/MiMemoriaPage';
 import { AlertasPage } from './pages/AlertasPage';
 import { EstadoPlenarioPage } from './pages/EstadoPlenarioPage';
 import { MatrizClientePage } from './pages/MatrizClientePage';
+import { InformesSemanalesPage } from './pages/InformesSemanalesPage';
 import { WorkspaceCanvasPage } from './pages/WorkspaceCanvasPage';
 import { LandingPage } from './pages/LandingPage';
 import { AudiosPage } from './pages/AudiosPage';
@@ -137,6 +138,8 @@ export default function App() {
             <EstadoPlenarioPage />
           ) : isMatrizCliente(path) ? (
             <MatrizClientePage />
+          ) : isInformesSemanales(path) ? (
+            <InformesSemanalesPage />
           ) : isMiMemoria(path) ? (
             <MiMemoriaPage />
           ) : (

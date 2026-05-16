@@ -215,3 +215,11 @@ export function isMatrizCliente(path: string): boolean {
   return /^\/matriz-cliente\/?$/.test(path);
 }
 
+/**
+ * Match `/informes-semanales` — informes editoriales semanales (Sprint 3
+ * Track P). Sin sub-rutas: el detalle se navega in-page con state.
+ */
+export function isInformesSemanales(path: string): boolean {
+  return /^\/informes-semanales\/?$/.test(path);
+}
+

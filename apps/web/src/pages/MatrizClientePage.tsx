@@ -17,6 +17,7 @@ import { useEffect, useState } from 'react';
 import { Download, RefreshCw, FileSpreadsheet } from 'lucide-react';
 import { TopDock } from '@/components/top-dock';
 import { fetchExpedienteFull } from '@/services/expedientesApi';
+import { ListaDespachoBadge } from '@/components/expediente/ListaDespachoBadge';
 import { supabase } from '@/lib/supabase';
 
 interface MatrizRow {
@@ -30,6 +31,8 @@ interface MatrizRow {
   alertas_altas: number;
   audiencia_proxima?: string;
   decreto_vigente?: string;
+  // Sprint 3 Track R — fecha en que entró a despacho (null si no está activo)
+  despacho_fecha_entrada?: string | null;
 }
 
 export function MatrizClientePage() {
@@ -76,6 +79,14 @@ export function MatrizClientePage() {
         const criticas = alertsForExp.filter((a: any) => a.priority === 'critical').length;
         const altas = alertsForExp.filter((a: any) => a.priority === 'high').length;
 
+        // Sprint 3 Track R — chequear si el expediente está actualmente a
+        // despacho. El BFF devuelve `despacho_historial` ordenado por
+        // fecha_entrada desc. El activo es el primer item con status
+        // 'a_despacho' y fecha_salida null.
+        const despachoActivo = (full.despacho_historial ?? []).find(
+          (d) => d.status === 'a_despacho' && !d.fecha_salida,
+        );
+
         matriz.push({
           expediente_id: numero,
           titulo: full.general.titulo ?? '(sin título)',
@@ -87,6 +98,7 @@ export function MatrizClientePage() {
           alertas_altas: altas,
           audiencia_proxima: audienciaProxima,
           decreto_vigente: decretoConvocado,
+          despacho_fecha_entrada: despachoActivo?.fecha_entrada ?? null,
         });
       } catch (e) {
         // skip
@@ -104,6 +116,7 @@ export function MatrizClientePage() {
       'Expediente', 'Título', 'Estado', 'Comisión', 'Proponente principal',
       'Dictamen estimado', 'Alertas críticas', 'Alertas altas',
       'Audiencia próxima', 'Decreto vigente',
+      'A despacho desde', // Sprint 3 Track R
     ];
     const csv = [
       headers.join('\t'),
@@ -112,6 +125,7 @@ export function MatrizClientePage() {
         r.proponente_principal, r.fecha_dictamen_estimada ?? '',
         r.alertas_criticas, r.alertas_altas,
         r.audiencia_proxima ?? '', r.decreto_vigente ?? '',
+        r.despacho_fecha_entrada ?? '',
       ].join('\t')),
     ].join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
@@ -193,6 +207,7 @@ export function MatrizClientePage() {
                   <th className="px-4 py-3 font-semibold text-[10.5px] uppercase tracking-[0.1em] text-[#0e1745]/60 dark:text-white/60">Dictamen estim.</th>
                   <th className="px-4 py-3 font-semibold text-[10.5px] uppercase tracking-[0.1em] text-[#0e1745]/60 dark:text-white/60">Alertas</th>
                   <th className="px-4 py-3 font-semibold text-[10.5px] uppercase tracking-[0.1em] text-[#0e1745]/60 dark:text-white/60">Audiencia próx.</th>
+                  <th className="px-4 py-3 font-semibold text-[10.5px] uppercase tracking-[0.1em] text-[#0e1745]/60 dark:text-white/60">A despacho</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#0e1745]/[0.04] dark:divide-white/[0.04]">
@@ -216,6 +231,16 @@ export function MatrizClientePage() {
                       </div>
                     </td>
                     <td className="px-4 py-3 font-mono text-[11.5px]">{r.audiencia_proxima ?? '—'}</td>
+                    <td className="px-4 py-3">
+                      {r.despacho_fecha_entrada ? (
+                        <ListaDespachoBadge
+                          fechaEntrada={r.despacho_fecha_entrada}
+                          compact
+                        />
+                      ) : (
+                        <span className="text-[#0e1745]/30 dark:text-white/30">—</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

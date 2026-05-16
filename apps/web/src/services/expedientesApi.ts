@@ -237,6 +237,24 @@ export interface NovedadDetectada {
   fuentes?: unknown;
 }
 
+// ─── Sprint 3 Track R — Lista de despacho ─────────────────────────────────────
+
+export interface DespachoHistorialItem {
+  id: string;
+  expediente_id: string;
+  fecha_entrada: string;
+  fecha_salida: string | null;
+  status:
+    | 'a_despacho'
+    | 'devuelto_a_comision'
+    | 'remitido_plenario'
+    | 'archivado'
+    | 'caduca_cuatrienal';
+  fuente_pdf_url: string | null;
+  comentario_diputado: string | null;
+  detectado_at?: string;
+}
+
 export interface ExpedienteFullData {
   general: ExpedienteGeneral;
   tramite: TramiteEvento[];
@@ -253,8 +271,33 @@ export interface ExpedienteFullData {
   orden_dia_apariciones?: OrdenDiaAparicion[];
   novedades_detectadas?: NovedadDetectada[];
 
+  // ── Sprint 3 Track R — Lista de despacho ────────────────────────────────────
+  despacho_historial?: DespachoHistorialItem[];
+
   // Diagnóstico (opcional, útil en admin)
   _source?: Record<string, 'tabla_dedicada' | 'metadata_jsonb' | 'detector_live'>;
+}
+
+/**
+ * Fetch del historial de lista de despacho de un expediente.
+ * GET /api/expedientes/:numero/despacho
+ */
+export async function fetchExpedienteDespacho(
+  numero: string,
+): Promise<DespachoHistorialItem[]> {
+  const res = await fetch(
+    `/api/expedientes/${encodeURIComponent(numero)}/despacho`,
+    { headers: await authHeaders() },
+  );
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail?.error ?? `http ${res.status}`);
+  }
+  const json = (await res.json()) as {
+    ok: true;
+    historial: DespachoHistorialItem[];
+  };
+  return json.historial;
 }
 
 /**

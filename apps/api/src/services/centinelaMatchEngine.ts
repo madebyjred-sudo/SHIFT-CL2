@@ -41,7 +41,10 @@ export type CentinelaEventType =
   | 'decreto_convocatoria'
   | 'fecha_dictamen_proxima'
   | 'plazo_cuatrienal_proximo'
-  | 'desviacion_procedimental';
+  | 'desviacion_procedimental'
+  // Sprint 3 Track R — Lista de despacho
+  | 'entro_lista_despacho'
+  | 'salio_lista_despacho';
 
 export type Priority = 'critical' | 'high' | 'medium' | 'info';
 
@@ -140,6 +143,15 @@ export function inferPriority(
       return 'info';
     }
 
+    // Sprint 3 Track R — Lista de despacho.
+    // Entrada a despacho = high (el Presidente decide en cualquier momento).
+    // Salida = medium (informativo: ya tomó la decisión, importa el qué).
+    case 'entro_lista_despacho':
+      return 'high';
+
+    case 'salio_lista_despacho':
+      return 'medium';
+
     default:
       return 'info';
   }
@@ -166,6 +178,8 @@ export function buildAlertTitle(evento: CentinelaEvento, _watch: WatchRow): stri
     fecha_dictamen_proxima: 'Fecha estimada de dictamen próxima',
     plazo_cuatrienal_proximo: 'Plazo cuatrienal próximo',
     desviacion_procedimental: 'Desviación procedimental detectada',
+    entro_lista_despacho: 'A despacho — esperando decisión',
+    salio_lista_despacho: _buildSalioTitle(evento),
   };
 
   const label = typeLabels[evento.event_type] ?? evento.event_type;
@@ -180,6 +194,21 @@ function _buildMocionTitle(evento: CentinelaEvento): string {
   const artLabel = art ? ` (art. ${art})` : '';
   const diaLabel = dia ? ` — ${dia} día` : '';
   return `Moción de fondo${artLabel}${diaLabel}`;
+}
+
+/**
+ * Subtítulo para salida de despacho. El status final cambia drásticamente
+ * lo que importa al consultor (devuelto vs archivado vs plenario).
+ */
+function _buildSalioTitle(evento: CentinelaEvento): string {
+  const status = (evento.payload.status as string) ?? '';
+  const statusLabel: Record<string, string> = {
+    devuelto_a_comision: 'Devuelto a comisión',
+    remitido_plenario: 'Remitido a plenario',
+    archivado: 'Archivado por la presidencia',
+    caduca_cuatrienal: 'Caducó (4 años)',
+  };
+  return `Salió de despacho — ${statusLabel[status] ?? status}`;
 }
 
 // ─── Body de la alerta ──────────────────────────────────────────────────────
@@ -244,6 +273,26 @@ function buildAlertBody(evento: CentinelaEvento): string {
     case 'desviacion_procedimental': {
       const desc = evento.payload.descripcion as string ?? 'incumplimiento de regla RAL';
       return `Desviación procedimental detectada en el ${exp}: ${desc}.`;
+    }
+
+    case 'entro_lista_despacho': {
+      const fecha = evento.payload.fecha_entrada as string ?? '';
+      return `El ${exp} entró a la lista de despacho${
+        fecha ? ` el ${fecha}` : ''
+      }. Está esperando decisión del Presidente.`;
+    }
+
+    case 'salio_lista_despacho': {
+      const status = evento.payload.status as string ?? 'desconocido';
+      const detail: Record<string, string> = {
+        devuelto_a_comision: 'fue devuelto a comisión',
+        remitido_plenario: 'fue remitido al plenario',
+        archivado: 'fue archivado por la presidencia',
+        caduca_cuatrienal: 'caducó por plazo cuatrienal',
+      };
+      const accion = detail[status] ?? `cambió a status ${status}`;
+      const fecha = evento.payload.fecha_salida as string ?? '';
+      return `El ${exp} ${accion}${fecha ? ` el ${fecha}` : ''}.`;
     }
 
     default:
