@@ -766,13 +766,19 @@ async function streamCompletion(
  */
 export async function openRouterStream(args: StreamArgs): Promise<void> {
   // Track B: Bearer key es la de Cerebro (entregada con feat/oai-compat).
-  // Fallback a OPENROUTER_API_KEY mientras drainamos el rollout — si en
-  // alguna revisión el env de Cerebro no está seteado, podemos seguir
-  // funcionando contra OpenRouter directo (sin memory ni cost logging,
-  // pero el chat responde). Eliminamos el fallback en un commit
-  // siguiente cuando el smoke esté verde 24h.
-  const orKey = process.env.CEREBRO_API_KEY ?? process.env.OPENROUTER_API_KEY ?? '';
-  if (!orKey) throw new Error('CEREBRO_API_KEY not set');
+  // Weekend Refactor Wave 0 (2026-05-16): drop del fallback a
+  // OPENROUTER_API_KEY. La sesión Cerebro confirmó smoke verde 24h del
+  // feat oai_chat_completions_v2 — el path Cerebro Bearer es estable y
+  // toda llamada de chat de CL2 pasa por Cerebro (memory + cost logging
+  // + PII scrub + cache cross-app). Si CEREBRO_API_KEY no está seteada
+  // en el env del Cloud Run, queremos un error inmediato — NO un
+  // fallback silencioso que rompe el flywheel de Cerebro.
+  const orKey = process.env.CEREBRO_API_KEY ?? '';
+  if (!orKey) {
+    throw new Error(
+      'CEREBRO_API_KEY required — fallback to OPENROUTER_API_KEY removed 2026-05-16 (Weekend Refactor Wave 0)',
+    );
+  }
 
   const agent = getAgent(args.agent_id);
   if (!agent) throw new Error(`unknown agent: ${args.agent_id}`);
