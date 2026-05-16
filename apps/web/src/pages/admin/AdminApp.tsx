@@ -13,6 +13,7 @@ import { matchAdminSection, matchTranscriptDetailId, navigate, useRoute, type Ad
 import { AdminShell } from './AdminShell';
 import { useAccess, canAccessAdmin } from '@/components/access/AccessContext';
 import { AdminDeniedScreen } from './AdminDeniedScreen';
+import { useSupabaseStore } from '@/store/useSupabaseStore';
 import { ToastProvider } from './Toast';
 import { OverviewSection } from './sections/OverviewSection';
 import { TranscriptsSection } from './sections/TranscriptsSection';
@@ -42,6 +43,7 @@ export function AdminApp({ section }: AdminAppProps): React.ReactElement {
   const [badges, setBadges] = useState<Partial<Record<AdminSection, number>>>({});
   const path = useRoute();
   const access = useAccess();
+  const supaUser = useSupabaseStore((s) => s.user);
 
   // ── Role gate ──────────────────────────────────────────────────────
   // Solo admin + operador acceden al panel. Lectores y editores aprobados
@@ -50,7 +52,22 @@ export function AdminApp({ section }: AdminAppProps): React.ReactElement {
   // ver auditoría o tocar configuración. El gate real vive en el backend
   // (admin.ts middleware); esto es la capa de UX para que no aparezca un
   // menú que igual les iba a tirar 403.
-  if (!canAccessAdmin(access.role)) {
+  //
+  // Doble fuente: access.role (de /api/me, fuente canónica) O
+  // supaUser.user_metadata.role (del JWT, sobrevive a /api/me 401 transient).
+  // Si CUALQUIERA de las dos dice admin, dejamos pasar — el backend rebota
+  // si está mal.
+  const jwtRole = (supaUser?.user_metadata?.role as string | undefined) ?? null;
+  const effectiveRole = canAccessAdmin(access.role) ? access.role : (jwtRole === 'admin' || jwtRole === 'operador' ? (jwtRole as typeof access.role) : access.role);
+  if (!canAccessAdmin(effectiveRole)) {
+    // eslint-disable-next-line no-console
+    console.warn('[AdminApp] gate rejected', {
+      access_role: access.role,
+      access_status: access.status,
+      jwt_role: jwtRole,
+      supa_user_id: supaUser?.id,
+      supa_email: supaUser?.email,
+    });
     return <AdminDeniedScreen role={access.role} />;
   }
 
