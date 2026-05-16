@@ -93,7 +93,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --timeout=600 \
   --execution-environment=gen2 \
   --no-cpu-throttling \
-  "${TRAFFIC_FLAGS[@]}" \
+  ${TRAFFIC_FLAGS[@]+"${TRAFFIC_FLAGS[@]}"} \
   --set-env-vars "API_PORT=8080" \
   --set-env-vars "NODE_ENV=production" \
   --set-env-vars "NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL" \
@@ -103,8 +103,8 @@ gcloud run deploy "$SERVICE_NAME" \
   --set-env-vars "ELEVENLABS_API_KEY=$ELEVENLABS_API_KEY" \
   --set-env-vars "CEREBRO_BASE_URL=$CEREBRO_BASE_URL" \
   --set-env-vars "CEREBRO_TENANT=cl2" \
-  --set-env-vars "ALLOWED_ORIGINS=$ALLOWED_ORIGINS" \
-  --set-env-vars "PUBLIC_WEB_URL=${PUBLIC_WEB_URL:-$ALLOWED_ORIGINS}" \
+  --set-env-vars "^|^ALLOWED_ORIGINS=$ALLOWED_ORIGINS" \
+  --set-env-vars "^|^PUBLIC_WEB_URL=${PUBLIC_WEB_URL:-$ALLOWED_ORIGINS}" \
   --set-env-vars "GCS_BUCKET_SIL=shift-cl2-sil" \
   --set-env-vars "GCP_PROJECT_ID=$PROJECT_ID" \
   --set-env-vars "GCP_LOCATION=$REGION" \
