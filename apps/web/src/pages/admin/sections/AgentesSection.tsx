@@ -148,8 +148,8 @@ export function AgentesSection(): React.ReactElement {
               onClick={() =>
                 notify({
                   kind: 'info',
-                  text: 'Crear agente requiere correr el flujo de skills/registry.',
-                  detail: 'Por ahora se hace editando packages/cerebro-config/agents/*.yaml y subiendo el package.',
+                  text: 'Crear agente requiere intervención técnica.',
+                  detail: 'Contactá al equipo técnico para sumar un nuevo agente al sistema.',
                 })
               }
             >
@@ -264,7 +264,7 @@ export function AgentesSection(): React.ReactElement {
                   onClick={() =>
                     notify({
                       kind: 'info',
-                      text: 'Prompt vive en packages/cerebro-config/agents/' + a.agent_id + '.yaml',
+                      text: 'El prompt de ' + a.agent_id + ' se edita desde el equipo técnico.',
                     })
                   }
                 >
@@ -301,42 +301,13 @@ export function AgentesSection(): React.ReactElement {
         })}
       </div>
 
-      {/* Cross-agent routing matrix */}
-      <Card>
-        <CardHeader
-          title={
-            <span className="inline-flex items-center gap-1.5">
-              <Layers size={13} /> Capacidades · matriz de routing
-            </span>
-          }
-          meta="El router envía a un agente según el dominio detectado"
-        />
-        <AdminTable<RoutingRow>
-          rowKey={(r) => r.capability}
-          rows={ROUTING}
-          columns={[
-            { header: 'Capacidad', cell: (r) => <span className="font-semibold">{r.capability}</span> },
-            { header: 'Agente preferido', cell: (r) => <AgentPill id={r.primary} />, width: '160px' },
-            {
-              header: 'Fallback',
-              cell: (r) =>
-                r.fallback ? <AgentPill id={r.fallback} /> : <span className="text-[#0e1745]/55 dark:text-white/55">—</span>,
-              width: '140px',
-            },
-            { header: 'Confianza umbral', cell: (r) => <span className="font-mono tabular-nums">{r.threshold}</span>, width: '140px' },
-            {
-              header: 'Citación obligatoria',
-              cell: (r) =>
-                r.citationRequired ? (
-                  <Pill kind="success" icon={Check}>requerida</Pill>
-                ) : (
-                  <Pill kind="neutral">opcional</Pill>
-                ),
-              width: '160px',
-            },
-          ]}
-        />
-      </Card>
+      {/* Matriz de routing removida (post-audit 2026-05-10).
+          Era 7 rows hardcoded en el TSX que no reflejaban necesariamente
+          la lógica real de agentRouter.ts. La fuente de verdad de qué
+          agente atiende qué dominio vive en packages/cerebro-config/agents/.
+          Cuando agreguemos la lectura runtime de esa config, esta tabla
+          vuelve. Mientras tanto: cards de los 3 agentes con toggle on/off
+          y override de modelo siguen funcionando arriba. */}
 
       {editingAgent && (
         <ModelEditDialog
@@ -400,7 +371,7 @@ function ModelEditDialog(props: {
         </div>
 
         <label className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#0e1745]/55 dark:text-white/55">
-          OpenRouter model id
+          Identificador del modelo
         </label>
         <input
           value={value}
@@ -413,7 +384,7 @@ function ModelEditDialog(props: {
           Default: <span className="font-mono">{props.defaultModel}</span>
           {isOverride && (
             <span className="ml-2 inline-flex items-center gap-1 text-cl2-accent">
-              <span>●</span> override activo
+              <span>●</span> ajuste manual activo
             </span>
           )}
         </div>

@@ -577,9 +577,14 @@ export async function saveCitation(opts: {
 // surface, then flip the flag once the API lands.
 //
 // Override at runtime via:
-//   - localStorage.setItem('cl2-generated-assets-mock', '0')  → real API
+//   - localStorage.setItem('cl2-generated-assets-mock', '0')  → real API (default)
 //   - localStorage.setItem('cl2-generated-assets-mock', '1')  → mock
-// Default (when flag absent): respects VITE_GENERATED_ASSETS_MOCK env, else mock.
+// Default (when flag absent): respects VITE_GENERATED_ASSETS_MOCK env, else REAL API.
+//
+// Cambio 2026-05-10: el backend ya converge (commit b191f79 trajo
+// /export-asset, /slides/:i/edit, /regenerate-all, /history). Default flippea
+// a real para que la demo del lunes 11 arranque contra producción sin que
+// nadie tenga que recordar el localStorage.setItem.
 
 const GENERATED_ASSETS_MOCK_KEY = 'cl2-generated-assets-mock';
 
@@ -589,10 +594,10 @@ function isGeneratedAssetsMock(): boolean {
     if (v === '0') return false;
     if (v === '1') return true;
   }
-  // Vite-style env access; default ON until backend converges.
+  // Vite-style env access; default OFF (real API) ahora que backend converge.
   const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
-  if (env?.VITE_GENERATED_ASSETS_MOCK === '0') return false;
-  return true;
+  if (env?.VITE_GENERATED_ASSETS_MOCK === '1') return true;
+  return false;
 }
 
 /** Generate a new asset and (optionally) drop it on the canvas. */

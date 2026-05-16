@@ -7,13 +7,13 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Layers, X } from 'lucide-react';
 
 interface Props {
-  ids: number[];
+  ids: Array<number | string>;
   onClear: () => void;
-  onCompare: (ids: number[]) => void;
+  onCompare: (ids: Array<number | string>) => void;
   /** Optional: when set, renders a "Enviar a workspace" CTA next to
    *  Comparar. Click pushes the selected ids up so the page can open
    *  its SendToWorkspaceModal. */
-  onSendToWorkspace?: (ids: number[]) => void;
+  onSendToWorkspace?: (ids: Array<number | string>) => void;
 }
 
 export function CompareDock({ ids, onClear, onCompare, onSendToWorkspace }: Props) {

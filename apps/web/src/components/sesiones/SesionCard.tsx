@@ -16,8 +16,8 @@ interface Props {
   session: SessionListItem;
   selectable?: boolean;
   selected?: boolean;
-  onToggleSelect?: (id: number) => void;
-  onClick?: (id: number) => void;
+  onToggleSelect?: (id: number | string) => void;
+  onClick?: (id: number | string) => void;
 }
 
 const MONTHS_ES_SHORT = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];

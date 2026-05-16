@@ -108,9 +108,19 @@ export interface CerebroStreamChunk {
     | 'confidence'
     | 'pptx_status'   // Atlas pptx tool: lifecycle event ("starting" | "polling" | etc.)
     | 'pptx_ready'    // Atlas pptx tool: deck completed, includes gammaUrl + exportUrl
+    | 'workspace_created' // Atlas create_workspace tool: new workspace ready, includes id + url
     | 'done'
     | 'error';
   payload?: unknown;
+}
+
+/** Payload for `workspace_created` chunk emitted by Atlas's create_workspace tool. */
+export interface WorkspaceCreatedPayload {
+  id: string;         // UUID del workspace nuevo
+  title: string;
+  url: string;        // ruta interna SPA, e.g. "/hojas/<uuid>"
+  seeds_imported: number;
+  seeds_failed: number;
 }
 
 /** Payload for `pptx_ready` chunk emitted by Atlas's generate_presentation tool. */

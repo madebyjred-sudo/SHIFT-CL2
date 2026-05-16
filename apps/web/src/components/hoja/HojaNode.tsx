@@ -44,12 +44,16 @@ import { LexaInlineModal, TEMPLATES, type TemplateKind } from './LexaInlineModal
 import type { Editor as TiptapEditor, Range as TiptapRange } from '@tiptap/react';
 
 // ─── Color themes ─────────────────────────────────────────────────────
-const COLOR_THEMES: Record<NodeColor, { wrapper: string; header: string; dot: string }> = {
-  default:  { wrapper: 'bg-white dark:bg-[#1c1c1c] border-black/8 dark:border-white/8',     header: 'bg-gray-50 dark:bg-white/[0.04]', dot: 'bg-gray-400' },
-  burgundy: { wrapper: 'bg-[#7A3B47]/6 dark:bg-[#7A3B47]/15 border-[#7A3B47]/20',            header: 'bg-[#7A3B47]/8 dark:bg-[#7A3B47]/20', dot: 'bg-cl2-burgundy' },
-  ink:      { wrapper: 'bg-[#0e1745]/5 dark:bg-[#0e1745]/20 border-[#0e1745]/15',            header: 'bg-[#0e1745]/6 dark:bg-[#0e1745]/25', dot: 'bg-[#0e1745]' },
-  sage:     { wrapper: 'bg-emerald-50/80 dark:bg-emerald-950/20 border-emerald-200/40',       header: 'bg-emerald-50 dark:bg-emerald-950/30', dot: 'bg-emerald-500' },
-  amber:    { wrapper: 'bg-amber-50/80 dark:bg-amber-950/20 border-amber-200/40',             header: 'bg-amber-50 dark:bg-amber-950/30',    dot: 'bg-amber-500' },
+// `scrollbarVar` define el color del thumb del scrollbar interno del
+// nodo. Sin esto el scrollbar nativo en macOS aparece blanco/gris
+// fuerte y descansa visualmente desde el color de la hoja — feo,
+// especialmente en hojas oscuras como ink/burgundy.
+const COLOR_THEMES: Record<NodeColor, { wrapper: string; header: string; dot: string; scrollbar: string }> = {
+  default:  { wrapper: 'bg-white dark:bg-[#1c1c1c] border-black/8 dark:border-white/8',     header: 'bg-gray-50 dark:bg-white/[0.04]', dot: 'bg-gray-400',     scrollbar: 'rgba(14,23,69,0.18)' },
+  burgundy: { wrapper: 'bg-[#7A3B47]/6 dark:bg-[#7A3B47]/15 border-[#7A3B47]/20',            header: 'bg-[#7A3B47]/8 dark:bg-[#7A3B47]/20', dot: 'bg-cl2-burgundy', scrollbar: 'rgba(122,59,71,0.30)' },
+  ink:      { wrapper: 'bg-[#0e1745]/5 dark:bg-[#0e1745]/20 border-[#0e1745]/15',            header: 'bg-[#0e1745]/6 dark:bg-[#0e1745]/25', dot: 'bg-[#0e1745]',    scrollbar: 'rgba(14,23,69,0.28)'  },
+  sage:     { wrapper: 'bg-emerald-50/80 dark:bg-emerald-950/20 border-emerald-200/40',       header: 'bg-emerald-50 dark:bg-emerald-950/30', dot: 'bg-emerald-500',  scrollbar: 'rgba(16,128,96,0.28)' },
+  amber:    { wrapper: 'bg-amber-50/80 dark:bg-amber-950/20 border-amber-200/40',             header: 'bg-amber-50 dark:bg-amber-950/30',    dot: 'bg-amber-500',    scrollbar: 'rgba(180,120,30,0.28)' },
 };
 const COLOR_LABELS: NodeColor[] = ['default', 'burgundy', 'ink', 'sage', 'amber'];
 
@@ -391,7 +395,14 @@ export function HojaNode({ id, data, selected }: { id: string; data: HojaNodeDat
 
       {/* ── TipTap body ─────────────────────────────────────────── */}
       <div
-        className="flex-1 overflow-y-auto"
+        className="flex-1 overflow-y-auto hoja-scrollbar"
+        style={
+          {
+            // Color del thumb del scrollbar matchea el theme del nodo.
+            // CSS vars consumidas por las reglas .hoja-scrollbar en index.css.
+            ['--hoja-scroll-thumb' as string]: theme.scrollbar,
+          } as React.CSSProperties
+        }
         onMouseDown={(e) => e.stopPropagation()} // let TipTap handle clicks
       >
         <EditorContent editor={editor} />

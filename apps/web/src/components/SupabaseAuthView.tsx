@@ -3,18 +3,35 @@ import { Scale, FileText, Radar } from 'lucide-react';
 import { useSupabaseStore } from '@/store/useSupabaseStore';
 import { Cl2Mark } from './Cl2Mark';
 
+/**
+ * SupabaseAuthView — pantalla de login = landing principal de CL2.
+ *
+ * Diseño:
+ *   • Light theme editorial (CL2 brand): fondo cream/papel, ink en
+ *     tipografía, acento burgundy. Sin gradients dramáticos: la pantalla
+ *     es la cara pública del producto, no un demo dramático.
+ *   • Composición single-column centrada — el logo, el copy y el botón
+ *     comparten el mismo eje vertical para que se lea como una columna
+ *     editorial de revista.
+ *   • Tipografía mixta: display (Newsreader serif italic) en el accent,
+ *     sans-serif en el resto. Mismo sistema que /sesiones.
+ *   • El botón coral se mantiene — es el único punto de acción y queremos
+ *     que sea inequívoco.
+ */
 export function SupabaseAuthView() {
   const { signInGoogle, isAuthLoading, error } = useSupabaseStore();
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-mesh text-white">
+    <div className="relative min-h-screen overflow-hidden bg-[#fbf7f1] text-[#0e1745]">
+      {/* Sutil halo burgundy en la esquina superior izquierda — apenas
+          perceptible, da textura a la página sin competir con el contenido. */}
       <div
-        className="absolute -top-40 -left-40 h-[500px] w-[500px] rounded-full opacity-30 blur-3xl pointer-events-none"
-        style={{ background: 'radial-gradient(circle, rgb(244 63 94 / 0.5), transparent 70%)' }}
+        className="absolute -top-32 -left-32 h-[440px] w-[440px] rounded-full opacity-[0.06] blur-3xl pointer-events-none"
+        style={{ background: 'radial-gradient(circle, #7A3B47, transparent 70%)' }}
       />
       <div
-        className="absolute bottom-0 right-0 h-[400px] w-[400px] rounded-full opacity-20 blur-3xl pointer-events-none"
-        style={{ background: 'radial-gradient(circle, rgb(37 99 235 / 0.5), transparent 70%)' }}
+        className="absolute bottom-0 right-0 h-[360px] w-[360px] rounded-full opacity-[0.05] blur-3xl pointer-events-none"
+        style={{ background: 'radial-gradient(circle, #F93549, transparent 70%)' }}
       />
 
       <div className="relative min-h-screen flex items-center justify-center px-4">
@@ -22,52 +39,53 @@ export function SupabaseAuthView() {
           initial={{ opacity: 0, y: 24 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6, ease: 'easeOut' }}
-          className="max-w-md w-full"
+          className="max-w-md w-full flex flex-col items-center"
         >
-          <div className="text-center space-y-4 mb-10">
-            <motion.div
-              initial={{ scale: 0.8, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              transition={{ delay: 0.1, type: 'spring', damping: 14 }}
-              className="mx-auto"
-              style={{ filter: 'drop-shadow(0 0 40px rgba(249, 53, 73, 0.35))' }}
-            >
-              <Cl2Mark size={64} className="rounded-2xl" />
-            </motion.div>
+          {/* Brand mark — centered, no glow halo on light theme */}
+          <motion.div
+            initial={{ scale: 0.85, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            transition={{ delay: 0.1, type: 'spring', damping: 16 }}
+            className="mb-7"
+          >
+            <Cl2Mark size={64} className="rounded-2xl shadow-lg shadow-cl2-burgundy/20" />
+          </motion.div>
 
-            <div className="space-y-1">
-              <h1 className="text-3xl font-extrabold tracking-tight font-heading">
-                <span className="bg-gradient-to-r from-cl2-accent to-cl2-accent-soft bg-clip-text text-transparent">
-                  Inteligencia
-                </span>
-                <br />
-                <span>Legislativa</span>
-              </h1>
-              <p className="text-white/60 text-sm">Consultoría estratégica · CL2</p>
-            </div>
+          {/* Headline editorial */}
+          <div className="text-center mb-10">
+            <h1 className="font-display text-[40px] sm:text-[44px] font-normal leading-[1.05] tracking-tight">
+              <span className="italic text-cl2-burgundy/90">Inteligencia</span>
+              <br />
+              <span>Legislativa</span>
+            </h1>
+            <p className="mt-3 text-[12.5px] uppercase tracking-[0.22em] text-[#0e1745]/55">
+              Consultoría estratégica · CL2
+            </p>
           </div>
 
+          {/* Card de login */}
           <motion.div
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.25, duration: 0.5 }}
-            className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-6 space-y-5"
+            className="w-full rounded-2xl border border-[#0e1745]/[0.08] bg-white shadow-[0_8px_30px_rgba(14,23,69,0.06)] p-6 space-y-5"
           >
-            <div className="flex items-center justify-between text-white/60">
-              <AgentMini icon={<Scale className="h-4 w-4" />} name="Lexa" color="var(--color-cl2-burgundy)" />
-              <AgentMini icon={<FileText className="h-4 w-4" />} name="Atlas" color="#8B6E54" />
-              <AgentMini icon={<Radar className="h-4 w-4" />} name="Centinela" color="#F43F5E" />
+            {/* Tres agentes — chips suaves */}
+            <div className="flex items-center justify-between text-[#0e1745]/65">
+              <AgentMini icon={<Scale className="h-3.5 w-3.5" />} name="Lexa" color="#7A3B47" />
+              <AgentMini icon={<FileText className="h-3.5 w-3.5" />} name="Atlas" color="#8B6E54" />
+              <AgentMini icon={<Radar className="h-3.5 w-3.5" />} name="Centinela" color="#F93549" />
             </div>
 
-            <div className="border-t border-white/10" />
+            <div className="border-t border-[#0e1745]/[0.06]" />
 
-            <p className="text-white/60 text-sm leading-relaxed">
-              Acceso restringido. Iniciá sesión con una cuenta autorizada para consultar actas,
-              mociones y transcripciones.
+            <p className="text-[13px] leading-relaxed text-[#0e1745]/70">
+              Iniciá sesión con tu cuenta de Google. Si es la primera vez, tu
+              acceso quedará pendiente de aprobación por la firma.
             </p>
 
             {error && (
-              <div className="text-red-400 text-xs bg-red-500/10 border border-red-500/20 rounded-lg p-2">
+              <div className="text-rose-700 text-[11.5px] bg-rose-500/[0.08] border border-rose-500/20 rounded-lg p-2.5">
                 {error}
               </div>
             )}
@@ -75,14 +93,14 @@ export function SupabaseAuthView() {
             <button
               onClick={() => signInGoogle()}
               disabled={isAuthLoading}
-              className="w-full rounded-xl bg-gradient-to-br from-cl2-accent to-cl2-accent-hover text-white font-semibold py-3 hover:shadow-[0_0_30px_rgba(244,63,94,0.4)] transition-shadow disabled:opacity-50 flex items-center justify-center gap-3"
+              className="w-full rounded-xl bg-gradient-to-br from-cl2-accent to-cl2-accent-hover text-white font-semibold py-3 hover:shadow-[0_8px_24px_rgba(249,53,73,0.28)] hover:brightness-105 transition-all disabled:opacity-50 flex items-center justify-center gap-3"
             >
               <GoogleIcon />
               Continuar con Google
             </button>
           </motion.div>
 
-          <p className="text-center text-[10px] uppercase tracking-widest text-white/30 mt-6">
+          <p className="mt-6 text-[10px] uppercase tracking-[0.24em] text-[#0e1745]/35">
             Cerebro Legislativo 2.0 · Costa Rica
           </p>
         </motion.div>
@@ -93,14 +111,14 @@ export function SupabaseAuthView() {
 
 function AgentMini({ icon, name, color }: { icon: React.ReactNode; name: string; color: string }) {
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-1.5">
       <div
-        className="h-7 w-7 rounded-lg flex items-center justify-center text-white"
-        style={{ backgroundColor: color, boxShadow: `0 0 16px ${color}40` }}
+        className="h-6 w-6 rounded-md flex items-center justify-center text-white"
+        style={{ backgroundColor: color }}
       >
         {icon}
       </div>
-      <span className="text-xs font-medium text-white/80">{name}</span>
+      <span className="text-[11.5px] font-medium text-[#0e1745]/80">{name}</span>
     </div>
   );
 }

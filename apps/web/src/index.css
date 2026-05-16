@@ -155,6 +155,34 @@ button {
     /* Chrome, Safari, Opera */
 }
 
+/* ─── Scrollbar para HojaNode (canvas workspace) ────────────────────────
+   El thumb hereda color de la CSS var `--hoja-scroll-thumb` que cada
+   nodo setea según su theme (burgundy/ink/sage/amber). Esto hace que
+   la barra se sienta parte del nodo, no un add-on blanco mac-nativo.
+   Track invisible para no robar atención. */
+.hoja-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: var(--hoja-scroll-thumb, rgba(14, 23, 69, 0.18)) transparent;
+}
+
+.hoja-scrollbar::-webkit-scrollbar {
+    width: 6px;
+}
+
+.hoja-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.hoja-scrollbar::-webkit-scrollbar-thumb {
+    background: var(--hoja-scroll-thumb, rgba(14, 23, 69, 0.18));
+    border-radius: 999px;
+}
+
+.hoja-scrollbar:hover::-webkit-scrollbar-thumb {
+    /* Apenas más visible en hover para que el usuario sepa que puede scrollear. */
+    filter: brightness(1.2) saturate(1.15);
+}
+
 /* ═══════════════════════════════════════════════════════════════════
    ReactFlow / xyflow — Dark Mode Overrides
    Controls buttons, MiniMap, and edges need explicit dark styling

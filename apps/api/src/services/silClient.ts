@@ -509,13 +509,81 @@ export function renderExpedienteFullForLlm(exp: SilExpedienteFull): string {
   }
 
   // ── Sección 4: documentos adjuntos ──────────────────────────────────
+  // Pedido 16k del cliente (Donovan, 19:00):
+  //   "Los textos sustitutivos, estos informes de primer día de mociones, todo
+  //    esto uno tiene acceso directamente desde el SIL, igual aquí como texto
+  //    sustitutivo te da la te lo descarga..."
+  //
+  // Doctrina: cuando un expediente tiene `texto_sustitutivo`, ese es el texto
+  // VIGENTE del proyecto. El texto original quedó superseded. Lexa debe
+  // basarse en el sustitutivo para responder "qué dice el proyecto", citar
+  // articulado, etc. Por eso separamos los documentos en dos bloques + le
+  // damos una instrucción explícita al LLM sobre cuál usar primero.
+
+  // Prioridad por tipo. Más bajo = más prioritario (se lista primero).
+  // texto_sustitutivo + dictamen_mayoria son el "estado vigente" del proyecto.
+  const TIPO_PRIORIDAD: Record<string, number> = {
+    texto_sustitutivo: 0,
+    dictamen_mayoria: 1,
+    dictamen_minoria: 2,
+    mocion_177: 3,
+    mocion_137_segundo_dia: 4,
+    mocion_138: 4,
+    mocion_137_primer_dia: 5,
+    informe_subcomision: 6,
+    informe_servicios_tecnicos: 7,
+  };
+
   let docsSection = '';
   if (exp.documentos.length === 0) {
     docsSection = '\n(sin documentos adjuntos indexados en la base)';
   } else {
-    docsSection = '\nDocumentos:\n' + exp.documentos
-      .map((d, i) => `  [${i + 1}] ${d.tipo}: ${d.titulo ?? '(s/título)'} ${d.fecha ?? ''} — ${d.source_url}`)
-      .join('\n');
+    const sorted = [...exp.documentos].sort((a, b) => {
+      const pa = TIPO_PRIORIDAD[a.tipo] ?? 99;
+      const pb = TIPO_PRIORIDAD[b.tipo] ?? 99;
+      if (pa !== pb) return pa - pb;
+      // dentro del mismo tipo, el más reciente arriba
+      const fa = a.fecha ?? '';
+      const fb = b.fecha ?? '';
+      return fb.localeCompare(fa);
+    });
+
+    const sustitutivos = sorted.filter((d) => d.tipo === 'texto_sustitutivo');
+    const dictamenesMayoria = sorted.filter((d) => d.tipo === 'dictamen_mayoria');
+
+    const lines: string[] = [];
+    if (sustitutivos.length > 0 || dictamenesMayoria.length > 0) {
+      lines.push('Documentos (orden de prioridad — usar PRIMERO los de la cima):');
+      lines.push(
+        '  IMPORTANTE: cuando exista un "texto_sustitutivo" o un "dictamen_mayoria",',
+      );
+      lines.push(
+        '  ese ES el texto vigente del proyecto. Cualquier referencia al articulado o al',
+      );
+      lines.push(
+        '  contenido del proyecto debe basarse en el sustitutivo más reciente, no en el',
+      );
+      lines.push(
+        '  texto original. El original quedó SUPERSEDED en el momento que la comisión',
+      );
+      lines.push(
+        '  aprobó el sustitutivo. Citá fecha de sustitutivo cuando el cliente pregunte.',
+      );
+    } else {
+      lines.push('Documentos:');
+    }
+
+    for (let i = 0; i < sorted.length; i++) {
+      const d = sorted[i];
+      const prefix = d.tipo === 'texto_sustitutivo'
+        ? '★ VIGENTE'
+        : d.tipo === 'dictamen_mayoria'
+        ? '◆ DICTAMEN'
+        : '  ';
+      lines.push(`  ${prefix} [${i + 1}] ${d.tipo}: ${d.titulo ?? '(s/título)'} ${d.fecha ?? ''} — ${d.source_url}`);
+    }
+
+    docsSection = '\n' + lines.join('\n');
   }
 
   return `ESTATUS FORMAL:\n${status.map((s) => '  ' + s).join('\n')}\n\n${head}${historial}${docsSection}`;

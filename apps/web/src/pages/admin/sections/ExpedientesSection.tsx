@@ -137,11 +137,12 @@ export function ExpedientesSection(): React.ReactElement {
         }
       />
 
-      <div className="mb-4 grid grid-cols-2 gap-3.5 lg:grid-cols-4">
-        <KPI label="Total en DB" value={summary.data ? summary.data.expedientes.toLocaleString('es-CR') : '—'} delta="live · Supabase" deltaDir="flat" />
+      {/* KPIs limpios — solo los dos que vienen de queries reales.
+          Los KPIs "Con texto base 2.4k+" y "Con dictamen 33k+" se removieron
+          (post-audit 2026-05-10): estaban hardcoded y nunca se actualizaban. */}
+      <div className="mb-4 grid grid-cols-2 gap-3.5">
+        <KPI label="Total registrados" value={summary.data ? summary.data.expedientes.toLocaleString('es-CR') : '—'} delta="en vivo" deltaDir="flat" />
         <KPI label="Mostrando arriba" value={rows ? String(rows.length) : '—'} delta="60 más recientes" deltaDir="flat" />
-        <KPI label="Con texto base" value="2.4k+" delta="post bulk DOCX" deltaDir="up" />
-        <KPI label="Con dictamen" value="33k+" delta="chunks indexados" deltaDir="up" />
       </div>
 
       <AdminTable<ExpedienteRow>

@@ -8,7 +8,8 @@
 import { supabase } from '@/lib/supabase';
 
 export interface SessionListItem {
-  id: number;
+  /** int para sesiones legacy MariaDB, UUID string para sesiones nuevas Supabase. */
+  id: number | string;
   titulo: string;
   youtube_url: string;
   youtube_id: string | null;
@@ -74,10 +75,23 @@ async function getJson<T>(url: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export async function fetchSessions(args: { from?: string; to?: string } = {}): Promise<SessionListItem[]> {
+export interface FetchSessionsArgs {
+  from?: string;
+  to?: string;
+  /** Si 'plenario', solo plenarias/comisiones largas (≥30min). Cualquier otro
+   *  valor (o ausente) = sin filtro de tipo (incluye clips, entrevistas, shorts). */
+  type?: 'plenario' | 'all';
+  /** Si true, incluye sesiones en pending_review/processing (admin use).
+   *  Default false → solo sesiones ya publicadas al equipo. */
+  includePending?: boolean;
+}
+
+export async function fetchSessions(args: FetchSessionsArgs = {}): Promise<SessionListItem[]> {
   const qs = new URLSearchParams();
   if (args.from) qs.set('from', args.from);
   if (args.to) qs.set('to', args.to);
+  if (args.type && args.type !== 'all') qs.set('type', args.type);
+  if (args.includePending) qs.set('include_pending', 'true');
   const q = qs.toString();
   const data = await getJson<{ ok: true; sessions: SessionListItem[] }>(
     `/api/sessions${q ? `?${q}` : ''}`,

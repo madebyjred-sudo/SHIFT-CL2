@@ -114,7 +114,7 @@ export function SesionesListPage() {
 
   const [items, setItems] = useState<SessionListItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<number[]>([]);
+  const [selected, setSelected] = useState<Array<number | string>>([]);
   const [sendOpen, setSendOpen] = useState(false);
 
   useEffect(() => {
@@ -154,8 +154,8 @@ export function SesionesListPage() {
 
   const heroCollapsed = filters.q.length > 0;
 
-  const onCardClick = (id: number) => navigate(`/sesiones/${id}`);
-  const onToggleSelect = (id: number) => {
+  const onCardClick = (id: number | string) => navigate(`/sesiones/${id}`);
+  const onToggleSelect = (id: number | string) => {
     setSelected((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
   };
   const onCalendarDayClick = (date: Date) => {

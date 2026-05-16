@@ -48,3 +48,10 @@ infra/deploy/.env.production
 
 # Runtime log dirs (script output, seed progress, etc.)
 .logs/
+
+# Ciclo 28-pedidos backup envs
+.env.local.bak
+
+# Scratch transcripts
+scripts/_test_transcript.ts
+

@@ -450,8 +450,8 @@ function DetailPane({ detail, isBusy, onApprove, onReject }: DetailPaneProps): R
                 onClick={() =>
                   notify({
                     kind: 'info',
-                    text: 'Editor segment-by-segment vendrá en una iteración próxima.',
-                    detail: 'Por ahora editá el JSON en el bucket de transcripciones y volvé a transcribir.',
+                    text: 'Editor segmento por segmento llegará pronto.',
+                    detail: 'Por ahora podés solicitar una nueva transcripción desde "Re-procesar".',
                   })
                 }
               >
@@ -637,7 +637,7 @@ function DetailPane({ detail, isBusy, onApprove, onReject }: DetailPaneProps): R
                 </span>
                 .
               </li>
-              <li>Los chunks entran al índice RAG con embeddings v3.</li>
+              <li>Los fragmentos se incorporan al buscador semántico.</li>
               <li>
                 Se notifica a los usuarios con la sesión en favoritos.
               </li>

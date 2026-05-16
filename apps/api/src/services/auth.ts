@@ -39,6 +39,124 @@ export interface AuthedUser {
   email: string | null;
 }
 
+// ── User access gate (status + role) ────────────────────────────────
+// Cualquier persona puede crear cuenta con Google, pero solo accede a la
+// app si un admin la aprueba en /admin/usuarios. La data vive en la tabla
+// user_access (ver migration 0025_user_access_gate.sql).
+
+export interface UserAccess {
+  user_id: string;
+  email: string;
+  full_name: string | null;
+  avatar_url: string | null;
+  status: 'pending' | 'active' | 'rejected' | 'suspended';
+  role: 'lector' | 'editor' | 'operador' | 'admin' | null;
+  approved_at: string | null;
+}
+
+let _service: SupabaseClient | null = null;
+function service(): SupabaseClient {
+  if (_service) return _service;
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) throw new Error('Supabase service-role env not set (auth)');
+  _service = createClient(url, key, { auth: { persistSession: false } });
+  return _service;
+}
+
+/**
+ * Cargá el row de user_access del user actual. Si no existe (race condition:
+ * el trigger no corrió aún para un user recién creado) devolvemos null.
+ * El caller decide qué hacer — usualmente: 401 si no hay user, 403 si
+ * status !== 'active', 200 con data en cualquier otro caso.
+ */
+export async function loadUserAccess(userId: string): Promise<UserAccess | null> {
+  const { data, error } = await service()
+    .from('user_access')
+    .select('user_id, email, full_name, avatar_url, status, role, approved_at')
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (error) {
+    // Tabla no existe (migration aún no aplicada) — log y permitir pasar.
+    // En desarrollo esto evita lockout total mientras corremos la migration.
+    if (error.code === '42P01') {
+      // eslint-disable-next-line no-console
+      console.warn('user_access table missing; gate disabled until migration applied');
+      return null;
+    }
+    throw new Error(`loadUserAccess failed: ${error.message}`);
+  }
+  return data as UserAccess | null;
+}
+
+/**
+ * Helper para handlers: requiere user autenticado + status='active'. Si
+ * no, responde con el error apropiado y devuelve null para que el handler
+ * haga early return.
+ *
+ * Casos manejados:
+ *   - No hay token → 401 auth_required
+ *   - Token válido pero el user no está en user_access (race) → permitir pasar
+ *     (el trigger crea el row async; reintentos del cliente la próxima vez
+ *     ya van a tener el row)
+ *   - status=pending → 403 access_pending
+ *   - status=rejected → 403 access_rejected
+ *   - status=suspended → 403 access_suspended
+ *   - status=active → return UserAccess (con id+role)
+ */
+import type { Response } from 'express';
+export async function requireActiveUser(
+  req: Request,
+  res: Response,
+): Promise<UserAccess | null> {
+  const u = await getUserFromRequest(req);
+  if (!u) {
+    res.status(401).json({ ok: false, error: 'auth_required' });
+    return null;
+  }
+  let access: UserAccess | null;
+  try {
+    access = await loadUserAccess(u.id);
+  } catch (err) {
+    // Si la consulta falla por algo distinto de "tabla no existe", no
+    // bloqueamos al user — preferimos degradar a "permite pasar" antes
+    // que romper toda la app por un hiccup transitorio de DB.
+    // eslint-disable-next-line no-console
+    console.error('loadUserAccess error, allowing through:', (err as Error).message);
+    return {
+      user_id: u.id,
+      email: u.email ?? '',
+      full_name: null,
+      avatar_url: null,
+      status: 'active',
+      role: 'lector',
+      approved_at: null,
+    };
+  }
+  if (!access) {
+    // Race: el trigger aún no creó el row. Permitir paso — el row se
+    // creará la próxima vez. Pintamos default "pending" en el frontend.
+    return {
+      user_id: u.id,
+      email: u.email ?? '',
+      full_name: null,
+      avatar_url: null,
+      status: 'pending',
+      role: null,
+      approved_at: null,
+    };
+  }
+  if (access.status !== 'active') {
+    res.status(403).json({
+      ok: false,
+      error: `access_${access.status}`,
+      access: { status: access.status, email: access.email },
+    });
+    return null;
+  }
+  return access;
+}
+
 /** Like getUserIdFromRequest but returns id + email. Useful for audit
  *  log writes where we want a human-readable actor in the row.
  *  Null when the token is missing, expired, or rejected. */

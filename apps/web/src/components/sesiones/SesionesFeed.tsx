@@ -13,9 +13,9 @@ import { motion } from 'motion/react';
 interface Props {
   sessions: SessionListItem[];
   selectable?: boolean;
-  selected?: number[];
-  onToggleSelect?: (id: number) => void;
-  onClick?: (id: number) => void;
+  selected?: Array<number | string>;
+  onToggleSelect?: (id: number | string) => void;
+  onClick?: (id: number | string) => void;
 }
 
 export function SesionesFeed({

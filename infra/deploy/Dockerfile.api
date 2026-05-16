@@ -5,96 +5,80 @@
 #
 # Build:
 #   docker build -t cl2-v2-api -f infra/deploy/Dockerfile.api .
-#
-# Run:
-#   docker run --rm -p 8080:8080 \
-#     -e API_PORT=8080 \
-#     -e NEXT_PUBLIC_SUPABASE_URL=... \
-#     -e SUPABASE_SERVICE_ROLE_KEY=... \
-#     -e OPENROUTER_API_KEY=... \
-#     -e CEREBRO_BASE_URL=... \
-#     cl2-v2-api
 
 # ──────────────────────────────────────────────────────────────────────
-# Stage 1 — install deps for the entire workspace.
-# Cached separately so source-only changes skip the install layer.
+# Stage 1 — install npm deps for the entire workspace.
 # ──────────────────────────────────────────────────────────────────────
-FROM node:20-slim AS deps
+FROM node:20-bookworm-slim AS deps
 WORKDIR /app
 
-# Copy ONLY the package manifests so npm can resolve the workspace graph.
-# Order: root first, then each workspace.
 COPY package.json package-lock.json ./
 COPY apps/api/package.json apps/api/package.json
 COPY packages/shared-types/package.json packages/shared-types/package.json
 
+# PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD evita que `npm ci` tire de Chromium en
+# este layer — lo descargamos explícitamente en runtime stage con un
+# directorio con permisos correctos.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 RUN npm ci --workspaces --include-workspace-root --no-audit --no-fund
 
 # ──────────────────────────────────────────────────────────────────────
-# Stage 2 — build the api (TypeScript -> dist).
-# Note: npm workspaces hoists ALL deps to the root /app/node_modules
-# (per-workspace node_modules dirs aren't created by npm ci with hoisting).
-# So we only copy the root node_modules, not per-workspace ones.
+# Stage 2 — TypeScript -> dist
 # ──────────────────────────────────────────────────────────────────────
-FROM node:20-slim AS builder
+FROM node:20-bookworm-slim AS builder
 WORKDIR /app
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json package-lock.json tsconfig*.json ./
 COPY apps/api ./apps/api
 COPY packages/shared-types ./packages/shared-types
-# Agent YAMLs (atlas, lexa, etc.) — loaded at runtime by agentLoader.ts
-# via a path relative to the compiled JS. Without this, the chat handler
-# scandirs an empty path and crashes mid-response (after flushHeaders),
-# producing a 200 with content-length: 0 and an SSE stream that never
-# emits a single chunk.
 COPY packages/cerebro-config ./packages/cerebro-config
 
-# tsc emits to apps/api/dist via apps/api/tsconfig.json (outDir: "dist")
 RUN npm run build --workspace=apps/api
 
 # ──────────────────────────────────────────────────────────────────────
-# Stage 3 — slim runtime image. Only what we need to run.
+# Stage 3 — Microsoft Playwright official image (Chromium + deps preinstalled)
+# Switch from node:slim+manual-install to mcr.microsoft.com/playwright:
+#   - Browsers + system libs already there (no apt + no `playwright install`)
+#   - Versioned to match our playwright npm dep (1.59.x → v1.59.1-noble)
+#   - Same Ubuntu Noble (24.04) under the hood as node:20-bookworm-slim Debian,
+#     but with all the X11 / NSS / fonts deps Chromium needs out of the box
 # ──────────────────────────────────────────────────────────────────────
-FROM node:20-slim AS runner
+FROM mcr.microsoft.com/playwright:v1.59.1-noble AS runner
 WORKDIR /app
 ENV NODE_ENV=production
-# Cloud Run will override API_PORT via its $PORT injection; we pass
-# API_PORT in the deploy command (see deploy-api.sh) so the existing
-# `process.env.API_PORT ?? 3001` reader picks it up.
 ENV API_PORT=8080
 
-# tini gives us proper signal forwarding so SIGTERM cleans up
-# in-flight SSE streams instead of getting eaten by the node parent.
-# Debian-slim usa apt; añadimos también ca-certificates (necesario para
-# cualquier llamada HTTPS desde el contenedor — Supabase, OpenRouter,
-# Gamma, Cerebro, GCS — y NO viene preinstalado en debian:slim).
+# Playwright base image already ships Chromium under /ms-playwright (root-readable).
+# Tell node-side Playwright to look there so the lazy import in
+# htmlAssetRenderer.ts finds the binary without re-downloading.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+# tini for SIGTERM forwarding (SSE long-lived connections need clean shutdown).
+# yt-dlp is the fallback transcript fetcher — see ytDlpTranscript.ts. We
+# install it via pip because Ubuntu's apt yt-dlp lags 1-2 months behind
+# upstream and YouTube's anti-scraping changes rotate weekly. pip gives us
+# the freshest binary and trivial in-place upgrades.
+# The Playwright image is Ubuntu-noble so apt + pip are available.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tini ca-certificates \
+ && apt-get install -y --no-install-recommends tini python3 python3-pip \
+ && pip3 install --break-system-packages --no-cache-dir yt-dlp \
  && rm -rf /var/lib/apt/lists/*
 
-# Copy installed node_modules + built artifacts BEFORE installing the
-# Playwright browser so the next step can use the playwright CLI from
-# the workspace deps (apps/api added it as a runtime dep).
+# Copy node_modules (skipping browser download — already in base image)
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 COPY --from=deps    /app/node_modules ./node_modules
 COPY --from=builder /app/apps/api/dist ./apps/api/dist
 COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
 COPY --from=builder /app/packages/shared-types ./packages/shared-types
-# Agent YAMLs (loaded at runtime — see comment in builder stage above).
 COPY --from=builder /app/packages/cerebro-config ./packages/cerebro-config
 COPY package.json package-lock.json ./
 
-# ── Playwright Chromium ─────────────────────────────────────────────
-# El pipeline de assets (atlasContentGenerator + htmlAssetRenderer)
-# levanta una instancia headless para renderizar HTML→PDF (carrusel
-# 1080×1080, pptx 16:9, document A4). `--with-deps` instala las libs
-# del sistema (libnss3, libatk-bridge, libcups2, fonts-liberation, etc.)
-# que Chromium pide en Linux. Sin esto, el renderer tira
-# `playwright_not_installed` en runtime.
-RUN npx --yes playwright install --with-deps chromium
-
-# Drop privileges. node:slim ships the `node` user (uid 1000).
-USER node
+# The Playwright image creates a `pwuser` (uid 1001). Node:slim creates `node`
+# (uid 1000). We use pwuser to keep the cache permissions sane and we ensure
+# /app is readable.
+RUN chown -R pwuser:pwuser /app
+USER pwuser
 
 EXPOSE 8080
 

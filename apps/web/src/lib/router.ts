@@ -206,3 +206,12 @@ export function isAlertasPage(path: string): boolean {
 export function isEstadoPlenario(path: string): boolean {
   return /^\/plenario\/estado\/?$/.test(path);
 }
+
+/**
+ * Match `/matriz-cliente` — matriz auto-generada con todos los expedientes
+ * que el consultor vigila (pedido 16a del cliente).
+ */
+export function isMatrizCliente(path: string): boolean {
+  return /^\/matriz-cliente\/?$/.test(path);
+}
+

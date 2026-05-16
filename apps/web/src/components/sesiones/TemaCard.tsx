@@ -13,7 +13,7 @@ import type { SessionListItem } from '@/services/sessionsApi';
 interface Props {
   /** Top sessions to surface. Sorted newest-first by caller. */
   topSessions: SessionListItem[];
-  onItemClick?: (id: number) => void;
+  onItemClick?: (id: number | string) => void;
 }
 
 const MONTHS_ES_SHORT = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];

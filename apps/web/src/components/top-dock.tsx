@@ -5,6 +5,7 @@ import { useRoute, navigate } from '@/lib/router';
 import { cn } from '@/lib/utils';
 import { useOnboarding } from './onboarding/OnboardingProvider';
 import { Cl2Mark } from './Cl2Mark';
+import { AlertasBadge } from './centinela/AlertasBadge';
 
 interface TopDockProps {
   onOpenHistory?: () => void;
@@ -106,6 +107,9 @@ export function TopDock({ onOpenHistory, onToggleHistory, isHistoryOpen }: TopDo
               <HelpCircle className="w-4 h-4" />
             </button>
           )}
+
+          {/* Badge de alertas Centinela — no leídas por prioridad */}
+          {currentView !== 'admin' && <AlertasBadge />}
 
           <div data-tour="user-nav">
             <UserNavMenu currentView={currentView} onNavigate={handleNavigate} />

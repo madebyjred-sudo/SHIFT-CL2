@@ -49,6 +49,22 @@ export interface CrawlOptions {
    * for all GLCP lists).
    */
   maxPages?: number;
+  /**
+   * Override the cursor stored in `sharepoint_cursors` with a custom
+   * `Modified gt datetime'<iso>'` lower bound (pedido 16l del cliente —
+   * backfill actas desde 2022 sin esperar a la deriva natural del crawler).
+   *
+   *   `null`     → ignora el cursor por completo (full backfill).
+   *   `string`   → usa el ISO timestamp como punto de partida; útil para
+   *                "todo desde 2022-01-01T00:00:00Z".
+   *   `undefined`→ comportamiento normal (usa el cursor de la DB).
+   *
+   * El cursor en DB NO se modifica al inicio del run; al final del run el
+   * crawler avanza el cursor al máximo `Modified` visto, igual que un run
+   * normal. O sea: una pasada con override expande la cobertura sin perder
+   * la posición.
+   */
+  cursorOverride?: string | null;
 }
 
 export interface CrawlResult {
@@ -159,11 +175,19 @@ export async function crawlList(
   }
 
   const cursor = cursorRow as CursorRow | null;
-  const lastModified = cursor?.last_modified ?? null;
+  // cursorOverride === undefined → uso el cursor de DB (comportamiento normal).
+  // cursorOverride === null → full backfill (ignoro el cursor existente).
+  // cursorOverride === ISO string → uso ese ISO como punto de partida.
+  const lastModified =
+    options.cursorOverride === undefined
+      ? cursor?.last_modified ?? null
+      : options.cursorOverride;
+  const usingOverride = options.cursorOverride !== undefined;
 
   log.info('crawl start', {
     last_modified: lastModified ?? 'full_backfill',
     items_processed_lifetime: cursor?.items_processed_lifetime ?? 0,
+    cursor_overridden: usingOverride,
   });
 
   // ── 2. Build filter ───────────────────────────────────────────────────────

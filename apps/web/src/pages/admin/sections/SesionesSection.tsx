@@ -56,6 +56,9 @@ interface Filters {
   from?: string;
   to?: string;
   status?: 'all' | 'indexed' | 'pending';
+  /** 'plenario' (default) = solo sesiones plenarias/comisiones largas (≥30min).
+   *  'all' = incluye también clips de prensa, entrevistas y shorts del canal. */
+  scope?: 'plenario' | 'all';
 }
 
 function decorate(item: SessionListItem): Row {
@@ -73,15 +76,24 @@ function decorate(item: SessionListItem): Row {
 export function SesionesSection(): React.ReactElement {
   const [rows, setRows] = useState<Row[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [filters, setFilters] = useState<Filters>({ status: 'all' });
+  // scope default 'plenario' — la sección se llama "Sesiones plenarias",
+  // no es lugar para news clips ni entrevistas cortas.
+  const [filters, setFilters] = useState<Filters>({ status: 'all', scope: 'plenario' });
   const [showFilters, setShowFilters] = useState(false);
-  const [openMenu, setOpenMenu] = useState<number | null>(null);
+  const [openMenu, setOpenMenu] = useState<number | string | null>(null);
   const { notify } = useToast();
 
   const load = async () => {
     setError(null);
     try {
-      const data = await fetchSessions({ from: filters.from, to: filters.to });
+      const data = await fetchSessions({
+        from: filters.from,
+        to: filters.to,
+        type: filters.scope ?? 'plenario',
+        // Admin tab: ve también las pending_review para saber qué viene en cola.
+        // El feed público (/sesiones) NO pasa este flag, así que solo ve indexed.
+        includePending: true,
+      });
       let decorated = data.map(decorate);
       if (filters.status === 'indexed') {
         decorated = decorated.filter((r) => r.estado === 2 || r.estado === 3);
@@ -97,7 +109,7 @@ export function SesionesSection(): React.ReactElement {
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filters.from, filters.to, filters.status]);
+  }, [filters.from, filters.to, filters.status, filters.scope]);
 
   // Close any open kebab when clicking outside
   useEffect(() => {
@@ -116,6 +128,35 @@ export function SesionesSection(): React.ReactElement {
         eyebrow="Contenido · Sesiones plenarias"
         actions={
           <>
+            {/* Toggle scope: por default ocultamos clips/entrevistas para que
+                esta sección honre su nombre. El operador puede expandir si
+                quiere ver el canal completo (ej. para auditar el sync). */}
+            <div className="inline-flex overflow-hidden rounded-lg border border-[#0e1745]/[0.10] dark:border-white/10">
+              <button
+                type="button"
+                onClick={() => setFilters((f) => ({ ...f, scope: 'plenario' }))}
+                className={
+                  'px-2.5 py-1.5 text-[11.5px] font-medium transition-colors ' +
+                  ((filters.scope ?? 'plenario') === 'plenario'
+                    ? 'bg-[#0e1745] text-white dark:bg-white dark:text-[#0e1745]'
+                    : 'bg-transparent text-[#0e1745]/65 dark:text-white/65 hover:bg-[#0e1745]/[0.04] dark:hover:bg-white/[0.04]')
+                }
+              >
+                Solo plenarias
+              </button>
+              <button
+                type="button"
+                onClick={() => setFilters((f) => ({ ...f, scope: 'all' }))}
+                className={
+                  'px-2.5 py-1.5 text-[11.5px] font-medium transition-colors ' +
+                  (filters.scope === 'all'
+                    ? 'bg-[#0e1745] text-white dark:bg-white dark:text-[#0e1745]'
+                    : 'bg-transparent text-[#0e1745]/65 dark:text-white/65 hover:bg-[#0e1745]/[0.04] dark:hover:bg-white/[0.04]')
+                }
+              >
+                Todo el canal
+              </button>
+            </div>
             <ActionButton variant="ghost" icon={RefreshCw} onClick={() => void load()}>
               Recargar
             </ActionButton>

@@ -10,7 +10,7 @@
  * dump from current state. Each row in "Cola de revisión" navigates to
  * the right section so the dashboard is a real launchpad.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Inbox,
   Activity,
@@ -40,7 +40,6 @@ import {
 } from '../primitives';
 import {
   fetchAdminSummary,
-  fetchTranscripciones,
   fetchAdminActivity,
   fetchAdminAlerts,
   fetchAgentsStatus,
@@ -48,7 +47,8 @@ import {
   useAdminFetch,
   type ActivityItem,
 } from '@/services/adminApi';
-import { fetchPending } from '@/services/puntoMedioApi';
+// Eliminado: import de puntoMedioApi (Cerebro 404, sección Curaduría
+// removida del rail post-audit 2026-05-10).
 import { navigate } from '@/lib/router';
 import { useToast } from '../Toast';
 
@@ -81,62 +81,55 @@ const VERB_ICON: Record<string, LucideIcon> = {
 export function OverviewSection(): React.ReactElement {
   const { notify } = useToast();
   const summary = useAdminFetch(fetchAdminSummary);
-  const transcripciones = useAdminFetch(fetchTranscripciones);
   const activity = useAdminFetch(fetchAdminActivity);
   const alerts = useAdminFetch(fetchAdminAlerts);
   const agents = useAdminFetch(fetchAgentsStatus);
-  const [puntoMedioPending, setPuntoMedioPending] = useState<{ cons: number; pat: number } | null>(null);
   const [reindexing, setReindexing] = useState(false);
+  // Eliminado: estado puntoMedioPending + fetchPending. Cerebro Railway
+  // está caído (404) y la sección Curaduría se removió del rail.
 
-  useEffect(() => {
-    let alive = true;
-    fetchPending()
-      .then((b) => {
-        if (!alive) return;
-        setPuntoMedioPending({
-          cons: b.pending_consolidations_count ?? 0,
-          pat: b.pending_patterns_count ?? 0,
-        });
-      })
-      .catch(() => {
-        if (!alive) return;
-        setPuntoMedioPending({ cons: 0, pat: 0 });
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
-
+  // Cola humana real (post-audit 2026-05-10):
+  //   • Transcripciones esperando revisión = sessions.status='pending_review'
+  //     (vienen del cron de YouTube, transcript ya bajado, espera approve)
+  //   • Sesiones en pipeline = status='pending'/'transcript_not_ready'
+  //     (descubiertas pero sin transcript todavía — YT auto-captions tarda 4-12h)
+  //   • Correcciones LLM = transcript_corrections.human_review='pending'
+  //     (el LLM revisor sugirió cambios, el operador decide)
+  // Antes mostrábamos rows de Curaduría (PuntoMedio) que con Cerebro 404
+  // siempre eran 0. Quitados.
   const queueRows: QueueRow[] = [
     {
-      tab: 'Transcripciones automáticas',
-      n: transcripciones.data?.counts.pending ?? 0,
+      tab: 'Transcripciones por aprobar',
+      n: summary.data?.pending_transcripciones ?? 0,
       pill: 'Lexa',
       pillKind: 'lexa',
       icon: Inbox,
-      delta:
-        transcripciones.isMock
-          ? 'Datos de demostración'
-          : `${transcripciones.data?.counts.pending ?? 0} sin revisar`,
-      href: '/admin/transcripciones',
+      delta: (summary.data?.pending_transcripciones ?? 0) === 0
+        ? 'Cola vacía'
+        : `${summary.data?.pending_transcripciones} sesiones listas para revisión`,
+      href: '/admin/transcripts',
     },
     {
-      tab: 'Curaduría · borradores',
-      n: puntoMedioPending?.cons ?? 0,
-      pill: 'Editorial',
-      pillKind: 'neutral',
+      tab: 'Sesiones en proceso',
+      n: summary.data?.sessions_pending_processing ?? 0,
+      pill: 'En proceso',
+      pillKind: 'info',
       icon: Activity,
-      delta: puntoMedioPending?.cons === 0 ? 'Sin borradores pendientes' : `${puntoMedioPending?.cons ?? 0} por revisar`,
-      href: '/admin/curaduria',
+      delta: (summary.data?.sessions_pending_processing ?? 0) === 0
+        ? 'Sin pendientes'
+        : 'esperando subtítulos del video',
+      href: '/admin/transcripts',
     },
     {
-      tab: 'Curaduría · tendencias',
-      n: puntoMedioPending?.pat ?? 0,
+      tab: 'Correcciones por revisar',
+      n: summary.data?.pending_corrections ?? 0,
       pill: 'Editorial',
       pillKind: 'neutral',
       icon: Sparkles,
-      delta: puntoMedioPending?.pat === 0 ? 'Sin tendencias pendientes' : `${puntoMedioPending?.pat ?? 0} por revisar`,
-      href: '/admin/curaduria',
+      delta: (summary.data?.pending_corrections ?? 0) === 0
+        ? 'Sin sugerencias por moderar'
+        : 'sugerencias para aceptar o rechazar',
+      href: '/admin/transcripts',
     },
   ];
 
@@ -166,9 +159,9 @@ export function OverviewSection(): React.ReactElement {
       ['chunks_indexados', String(summary.data?.chunks ?? 0)].join(','),
       ['sesiones', String(summary.data?.sessions ?? 0)].join(','),
       ['expedientes_sil', String(summary.data?.expedientes ?? 0)].join(','),
-      ['transcripciones_pendientes', String(summary.data?.pending_transcripciones ?? 0)].join(','),
-      ['curaduria_borradores', String(puntoMedioPending?.cons ?? 0)].join(','),
-      ['curaduria_tendencias', String(puntoMedioPending?.pat ?? 0)].join(','),
+      ['transcripciones_por_aprobar', String(summary.data?.pending_transcripciones ?? 0)].join(','),
+      ['sesiones_en_pipeline', String(summary.data?.sessions_pending_processing ?? 0)].join(','),
+      ['correcciones_llm_pendientes', String(summary.data?.pending_corrections ?? 0)].join(','),
     ].join('\n');
     const blob = new Blob([lines], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -190,7 +183,7 @@ export function OverviewSection(): React.ReactElement {
               Reporte semanal
             </ActionButton>
             <ActionButton variant="coral" icon={Zap} onClick={handleReindex} disabled={reindexing}>
-              {reindexing ? 'Encolando…' : 'Forzar re-índice'}
+              {reindexing ? 'Procesando…' : 'Refrescar buscador'}
             </ActionButton>
           </>
         }
@@ -199,9 +192,9 @@ export function OverviewSection(): React.ReactElement {
       {/* KPI strip */}
       <div className="mb-5 grid grid-cols-1 gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
         <KPI
-          label="Chunks indexados"
+          label="Fragmentos indexados"
           value={summary.data ? NUM.format(summary.data.chunks) : '—'}
-          delta="live · Supabase"
+          delta="en vivo"
           deltaDir="flat"
           spark={[3, 5, 4, 7, 6, 9, 8, 12, 10, 14]}
         />
@@ -216,7 +209,7 @@ export function OverviewSection(): React.ReactElement {
         <KPI
           label="Expedientes SIL"
           value={summary.data ? NUM.format(summary.data.expedientes) : '—'}
-          delta="live · Supabase"
+          delta="en vivo"
           deltaDir="flat"
           spark={[1.6, 1.7, 1.7, 1.9, 2.0, 2.0, 2.1, 2.0, 2.1, 2.1]}
           sparkColor="#1534dc"

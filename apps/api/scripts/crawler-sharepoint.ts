@@ -12,6 +12,14 @@
  *   LIST_IDS            CSV of list GUIDs to crawl. Defaults to the 5 top
  *                       lists if not set. Example:
  *                       LIST_IDS="guid1,guid2,guid3"
+ *   BACKFILL_FROM       ISO timestamp para forzar backfill desde esa fecha
+ *                       (pedido 16l del cliente — actas comisión desde 2022).
+ *                       Ignora el cursor de DB para este run pero NO lo borra;
+ *                       el run termina avanzando el cursor a su tope, como
+ *                       siempre. Ejemplo: BACKFILL_FROM="2022-01-01T00:00:00Z"
+ *   BACKFILL_FULL       Si vale "1", ignora el cursor y baja TODO desde el
+ *                       principio. Equivalente a borrar la fila de cursors
+ *                       pero más explícito.
  *   NEXT_PUBLIC_SUPABASE_URL    Required.
  *   SUPABASE_SERVICE_ROLE_KEY   Required.
  *   SIL_SHAREPOINT_BASE         Optional. Defaults to https://www.asamblea.go.cr/glcp
@@ -107,14 +115,43 @@ function parseListIds(env: string | undefined): ListSpec[] {
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
+/**
+ * Resuelve el `cursorOverride` a partir de las env vars BACKFILL_*.
+ *
+ * Precedencia (de mayor a menor):
+ *   1. BACKFILL_FULL=1  →  `null` (full backfill, ignora cursor)
+ *   2. BACKFILL_FROM=ISO →  esa ISO como lower bound
+ *   3. nada            →  `undefined` (comportamiento normal con cursor de DB)
+ */
+function resolveCursorOverride(): string | null | undefined {
+  if (process.env.BACKFILL_FULL === '1') return null;
+  const from = process.env.BACKFILL_FROM?.trim();
+  if (!from) return undefined;
+  // Validación mínima: ISO 8601 con la 'T' interna. No queremos pasar basura
+  // que rompa el filtro OData.
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(from)) {
+    throw new Error(
+      `BACKFILL_FROM debe ser ISO 8601 (ej. "2022-01-01T00:00:00Z"). Recibido: "${from}"`,
+    );
+  }
+  return from;
+}
+
 async function main(): Promise<void> {
   const lists = parseListIds(process.env.LIST_IDS);
+  const cursorOverride = resolveCursorOverride();
   const results: CrawlResult[] = [];
   let anyFailed = false;
 
   logger.info('crawler-sharepoint: starting', {
     lists: lists.map((l) => l.title),
     total: lists.length,
+    cursor_override:
+      cursorOverride === undefined
+        ? 'cursor_db'
+        : cursorOverride === null
+          ? 'full_backfill'
+          : cursorOverride,
   });
 
   for (const list of lists) {
@@ -126,6 +163,7 @@ async function main(): Promise<void> {
           ? ['Id', 'Title', 'Modified', 'Created', 'FileLeafRef', 'FileRef', 'EncodedAbsUrl']
           : undefined,
         maxPages: 50, // 100k items cap per run — well above any GLCP list
+        cursorOverride,
       });
 
       results.push(result);

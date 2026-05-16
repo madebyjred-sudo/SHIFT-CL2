@@ -150,6 +150,15 @@ export type Message = {
   /** True while a pptx tool call is in flight. UI shows an inline progress
    *  pill ("Generando con Gamma…"); replaced by pptxResult when done. */
   pptxLoading?: boolean;
+  /** Atlas's create_workspace tool result. When set, renders a card
+   *  "Abrir hoja de trabajo" + count de sources importados/fallidos. */
+  workspaceCreated?: {
+    id: string;
+    title: string;
+    url: string;
+    seeds_imported: number;
+    seeds_failed: number;
+  };
   /** Atlas-side share suggestions — optional buttons rendered below the
    *  message body (Lovable-style). The chat stream surfaces these via a
    *  `suggestion` chunk; if the backend doesn't emit them the field stays
@@ -178,7 +187,13 @@ export type Message = {
  *               /api/workspace/:id/turn endpoint for intent-routed turns.
  */
 export type ChatScope =
+  // Sesión legacy MariaDB (int id) — sigue funcionando para las sesiones de
+  // pre-mayo 2026. El backend usa sessionContextLoader contra el sistema viejo.
   | { kind: 'session'; legacy_session_id: number; label: string }
+  // Sesión nueva en Supabase (UUID). El backend (chat.ts) detecta el campo
+  // session_uuid y carga el contexto desde la tabla `sessions` + transcript_segments
+  // + metadata.resumen. SesionViewPage envía esto cuando el id detectado es UUID.
+  | { kind: 'session_uuid'; session_uuid: string; label: string }
   | {
       kind: 'workspace';
       workspace_id: string;

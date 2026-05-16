@@ -20,7 +20,9 @@ import {
   Pencil,
   Copy as CopyIcon,
   CheckCircle2,
+  ExternalLink,
 } from 'lucide-react';
+import { navigate } from '@/lib/router';
 import { PodcastModal } from '@/components/podcasts/PodcastModal';
 import { SendToWorkspaceModal } from '@/components/SendToWorkspaceModal';
 import { CentinelaHeroStrip } from '@/components/centinela/CentinelaHeroStrip';
@@ -401,7 +403,7 @@ export function AnimatedAiInput({
     addMessage(userMessage, activeSessionId);
     addMessage(assistantMessage, activeSessionId);
 
-    if (scope?.kind === 'session') setSessionScope(activeSessionId, scope);
+    if (scope?.kind === 'session' || scope?.kind === 'session_uuid') setSessionScope(activeSessionId, scope);
 
     setValue('');
     setAttachedDoc(null);
@@ -544,6 +546,53 @@ export function AnimatedAiInput({
                 { pptxResult: p, pptxLoading: false },
                 activeSessionId,
               );
+            } else if (chunk.type === 'workspace_created') {
+              // Atlas's create_workspace tool generó un workspace nuevo.
+              // Lo guardamos en el message para que el renderer muestre el
+              // card "Abrir hoja" + auto-navega si el usuario aún está en
+              // el chat (sin haber hecho otra interacción).
+              const p = chunk.payload as {
+                id: string; title: string; url: string;
+                seeds_imported: number; seeds_failed: number;
+              };
+              updateMessage(
+                assistantId,
+                { workspaceCreated: p },
+                activeSessionId,
+              );
+            } else if (chunk.type === 'docx_status') {
+              // Atlas's generate_docx tool fired — same UI affordance
+              // as pptx_status: show "generando…" pill on the message.
+              const p = chunk.payload as { status?: string };
+              if (p?.status === 'starting') {
+                updateMessage(assistantId, { pptxLoading: true }, activeSessionId);
+              } else if (p?.status === 'error') {
+                updateMessage(assistantId, { pptxLoading: false }, activeSessionId);
+              }
+            } else if (chunk.type === 'docx_ready') {
+              // Word document is ready — reuse the pptxResult card slot
+              // so the renderer shows the same "Abrir / Descargar" UI.
+              // The shape of docxAssetExport's payload mirrors PptxReadyPayload
+              // (filename + url + generationId/node_id + generatedAt).
+              const raw = chunk.payload as {
+                filename: string; url: string; node_id?: string;
+                generationId?: string; size_bytes?: number; generatedAt?: string;
+              };
+              updateMessage(
+                assistantId,
+                {
+                  pptxResult: {
+                    filename: raw.filename,
+                    url: raw.url,
+                    gammaUrl: raw.url,            // legacy alias for shared renderer
+                    generationId: raw.generationId ?? raw.node_id ?? '',
+                    cached: false,
+                    generatedAt: raw.generatedAt,
+                  },
+                  pptxLoading: false,
+                },
+                activeSessionId,
+              );
             } else if (chunk.type === 'suggestion') {
               // Atlas attached share-as suggestion buttons to this reply.
               // Cap at 3, defensively coerce kinds, ignore empties. The
@@ -603,7 +652,9 @@ export function AnimatedAiInput({
           deepInsight,
           scope: scope?.kind === 'session'
             ? { kind: 'session', legacy_session_id: scope.legacy_session_id, label: scope.label }
-            : undefined,
+            : scope?.kind === 'session_uuid'
+              ? { kind: 'session_uuid', session_uuid: scope.session_uuid, label: scope.label }
+              : undefined,
           history,
           signal: abortControllerRef.current.signal,
           onChunk: (chunk) => {
@@ -960,6 +1011,25 @@ export function AnimatedAiInput({
                                   ⬇ Descargar .pptx
                                 </a>
                               </div>
+                            )}
+                            {msg.workspaceCreated && (
+                              <a
+                                href={msg.workspaceCreated.url}
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  navigate(msg.workspaceCreated!.url);
+                                }}
+                                className="mt-3 inline-flex items-center gap-2 rounded-xl border border-cl2-burgundy/30 bg-cl2-burgundy/10 px-3.5 py-2 text-[12.5px] font-medium text-cl2-burgundy/95 hover:bg-cl2-burgundy/20 transition-colors"
+                              >
+                                <BookOpen className="w-3.5 h-3.5" />
+                                <span>Abrir “{msg.workspaceCreated.title}”</span>
+                                {msg.workspaceCreated.seeds_imported > 0 && (
+                                  <span className="text-[10.5px] text-cl2-burgundy/65">
+                                    · {msg.workspaceCreated.seeds_imported} fuente{msg.workspaceCreated.seeds_imported !== 1 ? 's' : ''}
+                                  </span>
+                                )}
+                                <ExternalLink className="w-3 h-3" />
+                              </a>
                             )}
                             {msg.confidence && (
                               <ConfidenceBadge confidence={msg.confidence} />

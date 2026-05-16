@@ -130,10 +130,39 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
         .order('tipo', { ascending: true }),
     ]);
 
+    // Pedido 16j ("algoritmo Carlos") — corremos el detector de novedades
+    // EN VIVO sobre este expediente. Cruza sil_sharepoint_raw vs
+    // sil_expediente_tramite y detecta items en SharePoint que no se
+    // reflejan en la tramitación oficial. Si hay novedades algorítmicas
+    // las mergeamos sobre las seedeadas en metadata.novedades_detectadas
+    // (de hace el seed); las del detector pisan a las hardcoded.
+    let novedadesDetectadas: unknown[] = [];
+    try {
+      const { detectNovedades } = await import('../services/noveltyDetector.js');
+      const detected = await detectNovedades(numero);
+      novedadesDetectadas = detected;
+    } catch (err) {
+      req.log?.warn('novelty_detector_failed', {
+        error: (err as Error).message,
+        numero,
+      });
+    }
+
+    // Si el detector no encontró nada vivo, conservamos lo seedeado en
+    // metadata para no mostrar la sección vacía en la demo.
+    const generalEnriched = { ...general } as Record<string, unknown>;
+    if (novedadesDetectadas.length > 0) {
+      const meta = (generalEnriched.metadata ?? {}) as Record<string, unknown>;
+      generalEnriched.metadata = {
+        ...meta,
+        novedades_detectadas: novedadesDetectadas,
+      };
+    }
+
     res.json({
       ok: true,
       expediente: {
-        general,
+        general: generalEnriched,
         tramite: tramiteRes.data ?? [],
         proponentes: proponentesRes.data ?? [],
         consultas: consultasRes.data ?? [],

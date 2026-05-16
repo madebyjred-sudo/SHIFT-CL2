@@ -154,6 +154,10 @@ export interface ExpedienteGeneral {
   tipo: string | null;
   legislatura: string | null;
   url_detalle: string;
+  // metadata jsonb — campo flexible para datos de extensión.
+  // Sprint v3: temporalmente usado para pedidos 07, 12a, 16e, 16g, 16h, 16j
+  // antes de mover a tablas dedicadas en Sprint 2.
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface ExpedienteFullData {

@@ -41,12 +41,12 @@ interface FlagDef {
 }
 
 const FLAG_DEFS: FlagDef[] = [
-  { key: 'deep_insight',     title: 'Deep Insight (Centinela)',           description: 'Botón shiny-cta en el composer para análisis profundo. Costo más alto.' },
-  { key: 'voice_query',      title: 'Consulta por voz',                    description: 'Whisper en navegador. Beta; off por default.' },
+  { key: 'deep_insight',     title: 'Análisis profundo (Centinela)',       description: 'Botón destacado en el chat para análisis profundo. Mayor costo por consulta.' },
+  { key: 'voice_query',      title: 'Consulta por voz',                    description: 'Dictado por voz en el navegador. Beta; desactivado por defecto.' },
   { key: 'exp_extract',      title: 'Extracción auto de expedientes',      description: 'Atlas detecta Exp. NN.NNN en mensajes y los precarga.' },
   { key: 'citations_force',  title: 'Citación obligatoria',                description: 'Bloquea respuestas sin al menos una cita. No tocar.' },
-  { key: 'hybrid_retrieval', title: 'Hybrid retrieval (BM25 + dense + RRF)', description: 'On por default. Combina lexical y semántico vía match_chunks_hybrid.' },
-  { key: 'graph_rag',        title: 'GraphRAG / LightRAG',                  description: 'Activa la tool query_legislative_graph. Requiere Cerebro con lightrag-hku instalado.' },
+  { key: 'hybrid_retrieval', title: 'Búsqueda híbrida',                    description: 'Activada por defecto. Combina coincidencia exacta y sentido semántico.' },
+  { key: 'graph_rag',        title: 'Búsqueda en grafo legislativo',       description: 'Activa consultas sobre relaciones entre expedientes y diputados.' },
 ];
 
 const MODEL_ROWS = [
@@ -154,7 +154,7 @@ export function ConfigSection(): React.ReactElement {
       <div className="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
         {/* Modelos */}
         <Card>
-          <CardHeader title="Modelos & runtime" meta="por agente" />
+          <CardHeader title="Modelos por agente" meta="configuración" />
           <CardBody className="flex flex-col gap-3.5">
             {MODEL_ROWS.map((m) => (
               <div key={m.agent} className="flex items-center gap-3">
@@ -180,7 +180,7 @@ export function ConfigSection(): React.ReactElement {
                   </div>
                   <div className="text-[11px] text-[#0e1745]/50 dark:text-white/50">{m.sec}</div>
                 </div>
-                <Pill kind="neutral">runtime</Pill>
+                <Pill kind="neutral">sistema</Pill>
               </div>
             ))}
           </CardBody>
@@ -189,8 +189,8 @@ export function ConfigSection(): React.ReactElement {
         {/* Feature flags */}
         <Card>
           <CardHeader
-            title="Feature flags"
-            meta={flagsState.loading ? 'cargando…' : flagsState.error ? <Pill kind="danger">error</Pill> : `live · ${Object.keys(optimistic).length}`}
+            title="Opciones del sistema"
+            meta={flagsState.loading ? 'cargando…' : flagsState.error ? <Pill kind="danger">error</Pill> : `${Object.keys(optimistic).length} activas`}
           />
           <div>
             {FLAG_DEFS.map((f) => {
@@ -239,34 +239,27 @@ export function ConfigSection(): React.ReactElement {
           </CardBody>
         </Card>
 
-        {/* Build & entorno */}
+        {/* Versión */}
         <Card>
-          <CardHeader title="Build & entorno" meta={build.isMock ? 'mock' : 'producción'} />
-          <CardBody className="font-mono text-[11.5px] leading-relaxed text-[#0e1745] dark:text-white">
-            <div>
-              <span className="text-[#0e1745]/45 dark:text-white/45">$</span> cl2 release info
-            </div>
-            <div className="mt-1.5 pl-3 text-[#0e1745]/70 dark:text-white/70">
-              <Row k="version" v={build.data?.version ?? '—'} />
-              <Row k="build" v={build.data?.build ?? '—'} />
+          <CardHeader title="Versión publicada" meta={build.isMock ? 'vista previa' : 'producción'} />
+          <CardBody className="text-[12px] leading-relaxed text-[#0e1745] dark:text-white">
+            <div className="space-y-1.5 text-[#0e1745]/75 dark:text-white/75">
+              <Row k="Versión" v={build.data?.version ?? '—'} />
               <Row
-                k="deployed"
+                k="Publicado"
                 v={
                   build.data?.deployed_at
                     ? new Date(build.data.deployed_at).toLocaleString('es-CR')
                     : '—'
                 }
               />
-              <Row k="node" v={build.data?.node ?? '—'} />
-              <Row k="region" v={build.data?.region ?? '—'} />
-              <Row k="host" v={build.data?.host ?? '—'} />
-              <Row k="locale" v={build.data?.locale ?? '—'} />
+              <Row k="Idioma" v={build.data?.locale ?? '—'} />
             </div>
             <div className="mt-3 inline-flex">
               {build.isMock ? (
-                <Pill kind="warn">build info aún no inyectado al deploy</Pill>
+                <Pill kind="warn">Información de versión pendiente</Pill>
               ) : (
-                <Pill kind="success">live</Pill>
+                <Pill kind="success">en vivo</Pill>
               )}
             </div>
           </CardBody>

@@ -49,13 +49,29 @@ import { ProponentesList } from '@/components/expediente/ProponentesList';
 import { ConsultasEntidades } from '@/components/expediente/ConsultasEntidades';
 import { LeyInfo } from '@/components/expediente/LeyInfo';
 import { DocumentosExpediente } from '@/components/expediente/DocumentosExpediente';
+import { FechasExtraidasPanel } from '@/components/expediente/FechasExtraidasPanel';
+import { SalaConstitucionalPanel } from '@/components/expediente/SalaConstitucionalPanel';
+import { ActasComisionPanel } from '@/components/expediente/ActasComisionPanel';
+import { NovedadesPanel } from '@/components/expediente/NovedadesPanel';
+import { OrdenDiaPanel } from '@/components/expediente/OrdenDiaPanel';
+import { Calendar, MessageCircle, Zap } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Props {
   numero: string; // canonical SIL format "23.511"
 }
 
-type SectionId = 'tramitacion' | 'proponentes' | 'consultas' | 'ley' | 'documentos';
+type SectionId =
+  | 'tramitacion'
+  | 'proponentes'
+  | 'consultas'
+  | 'fechas'      // pedidos 07, 16g, 16h
+  | 'sala'        // pedido 12a
+  | 'actas'       // pedido 08
+  | 'novedades'   // pedidos 16e, 16j
+  | 'orden_dia'   // pedido 16c
+  | 'ley'
+  | 'documentos';
 
 interface SectionConfig {
   id: SectionId;
@@ -137,6 +153,26 @@ export function ExpedienteDashboardPage({ numero }: Props) {
   const general = data?.general;
   const esLey = !!data?.ley;
 
+  // Datos extraídos del metadata jsonb del expediente. Estos son los pedidos
+  // 07, 08, 12a, 16e, 16g, 16h, 16j cuyas tablas dedicadas viven en
+  // migrations 0037-0040 (aplicación batch en Sprint 2). Mientras tanto la
+  // data vive en sil_expedientes.metadata como JSON para no bloquear demo.
+  const meta = (general?.metadata ?? {}) as any;
+  const fechasVigente = meta?.fechas_extraidas?.vigente;
+  const fechasHistorial = meta?.fechas_extraidas?.historial;
+  const fechasOtras = meta?.fechas_extraidas?.otras_fechas;
+  const consultasSala = meta?.consultas_sala_constitucional ?? [];
+  const audiencias = meta?.audiencias ?? [];
+  const actasComision = meta?.actas_comision ?? [];
+  const novedadesAlgoritmo = meta?.novedades_detectadas ?? [];
+  const ordenDiaApariciones = meta?.orden_dia_apariciones ?? [];
+
+  const tieneFechas = !!fechasVigente || !!fechasOtras;
+  const tieneSala = consultasSala.length > 0;
+  const tieneActas = actasComision.length > 0;
+  const tieneNovedades = audiencias.length > 0 || novedadesAlgoritmo.length > 0;
+  const tieneOrdenDia = ordenDiaApariciones.length > 0;
+
   const allSections: SectionConfig[] = [
     {
       id: 'tramitacion' as SectionId,
@@ -151,10 +187,44 @@ export function ExpedienteDashboardPage({ numero }: Props) {
       count: data?.proponentes.length,
     },
     {
+      id: 'fechas' as SectionId,
+      label: 'Fechas estimadas',
+      icon: <Calendar size={13} />,
+      hidden: !!data && !tieneFechas,
+    },
+    {
+      id: 'novedades' as SectionId,
+      label: 'Novedades',
+      icon: <Zap size={13} />,
+      count: audiencias.length + novedadesAlgoritmo.length,
+      hidden: !!data && !tieneNovedades,
+    },
+    {
+      id: 'orden_dia' as SectionId,
+      label: 'Próx. sesión',
+      icon: <Calendar size={13} />,
+      count: ordenDiaApariciones.length,
+      hidden: !!data && !tieneOrdenDia,
+    },
+    {
       id: 'consultas' as SectionId,
       label: 'Consultas',
       icon: <Building2 size={13} />,
       count: data?.consultas.length,
+    },
+    {
+      id: 'sala' as SectionId,
+      label: 'Sala IV',
+      icon: <Scale size={13} />,
+      count: consultasSala.length,
+      hidden: !!data && !tieneSala,
+    },
+    {
+      id: 'actas' as SectionId,
+      label: 'Actas',
+      icon: <MessageCircle size={13} />,
+      count: actasComision.length,
+      hidden: !!data && !tieneActas,
     },
     {
       id: 'ley' as SectionId,
@@ -357,6 +427,28 @@ export function ExpedienteDashboardPage({ numero }: Props) {
               )}
               {activeSection === 'documentos' && (
                 <DocumentosExpediente documentos={data.documentos} />
+              )}
+              {activeSection === 'fechas' && (
+                <FechasExtraidasPanel
+                  vigente={fechasVigente}
+                  historial={fechasHistorial}
+                  otrasFechas={fechasOtras}
+                />
+              )}
+              {activeSection === 'sala' && (
+                <SalaConstitucionalPanel resoluciones={consultasSala} />
+              )}
+              {activeSection === 'actas' && (
+                <ActasComisionPanel actas={actasComision} />
+              )}
+              {activeSection === 'novedades' && (
+                <NovedadesPanel
+                  audiencias={audiencias}
+                  novedades={novedadesAlgoritmo}
+                />
+              )}
+              {activeSection === 'orden_dia' && (
+                <OrdenDiaPanel apariciones={ordenDiaApariciones} />
               )}
             </motion.div>
           )}

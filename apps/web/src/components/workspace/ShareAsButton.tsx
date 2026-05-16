@@ -29,13 +29,22 @@ export interface ShareAsKindMeta {
   mark: string;
   label: string;
   sublabel: string;
+  /** Si true, el botón se renderiza grayed-out y el click no dispara nada.
+   *  Usado para esconder formatos que aún no están listos para clientes
+   *  (e.g. carrusel social y docx tienen bugs conocidos a 2026-05-11 — los
+   *  re-habilitamos cuando arreglemos el flow). */
+  comingSoon?: boolean;
 }
 
+// Para el demo de hoy (2026-05-11): solo Podcast (ElevenLabs) + PPT (Gamma)
+// funcionan end-to-end. Carrusel y Documento quedan visibles pero
+// deshabilitados con el badge "Próximamente" — se re-activan post-demo
+// cuando arreglemos los crashes específicos de cada flow.
 export const SHARE_AS_KINDS: ShareAsKindMeta[] = [
-  { kind: 'carousel',      icon: LayersIcon,        mark: '◉', label: 'Carrusel social',     sublabel: 'LinkedIn · IG · X · cuadrado' },
   { kind: 'pptx_asset',    icon: PresentationIcon,  mark: '▣', label: 'Presentación PPT',    sublabel: '16:9 para audiencia presencial' },
-  { kind: 'docx_asset',    icon: FileText,          mark: '∎', label: 'Documento',           sublabel: 'A4 para envío por email' },
   { kind: 'podcast_asset', icon: AudioLines,        mark: '♪', label: 'Podcast',             sublabel: 'Audio narrado del board' },
+  { kind: 'carousel',      icon: LayersIcon,        mark: '◉', label: 'Carrusel social',     sublabel: 'LinkedIn · IG · X · cuadrado', comingSoon: true },
+  { kind: 'docx_asset',    icon: FileText,          mark: '∎', label: 'Documento',           sublabel: 'A4 para envío por email',        comingSoon: true },
 ];
 
 /** Lookup helper — used by callers that receive a kind string and need
@@ -94,18 +103,33 @@ export function ShareAsButton({ onPick, generating }: Props) {
             <button
               key={k.kind}
               onClick={() => {
+                if (k.comingSoon) return;
                 setOpen(false);
                 onPick(k);
               }}
-              className="w-full flex items-start gap-3 px-4 py-2.5 text-left hover:bg-cl2-burgundy/[0.05] transition-colors"
+              disabled={k.comingSoon}
+              className={cn(
+                'w-full flex items-start gap-3 px-4 py-2.5 text-left transition-colors',
+                k.comingSoon
+                  ? 'opacity-45 cursor-not-allowed'
+                  : 'hover:bg-cl2-burgundy/[0.05]'
+              )}
+              title={k.comingSoon ? 'Próximamente — versión 2.0' : undefined}
             >
               <div className="w-8 h-8 rounded-lg bg-cl2-burgundy/10 flex items-center justify-center shrink-0">
                 <span className="font-display italic text-cl2-burgundy text-[14px] leading-none">{k.mark}</span>
               </div>
-              <div className="min-w-0">
-                <p className="font-display italic text-[13.5px] text-[#0e1745] dark:text-white leading-tight">
-                  {k.label}
-                </p>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <p className="font-display italic text-[13.5px] text-[#0e1745] dark:text-white leading-tight">
+                    {k.label}
+                  </p>
+                  {k.comingSoon && (
+                    <span className="text-[9px] font-mono uppercase tracking-[0.16em] px-1.5 py-0.5 rounded bg-[#0e1745]/[0.06] dark:bg-white/[0.08] text-[#0e1745]/60 dark:text-white/60">
+                      Próximamente
+                    </span>
+                  )}
+                </div>
                 <p className="text-[10.5px] font-mono uppercase tracking-[0.12em] text-[#0e1745]/45 dark:text-white/40 mt-0.5 truncate">
                   {k.sublabel}
                 </p>

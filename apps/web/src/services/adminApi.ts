@@ -64,7 +64,12 @@ export interface AdminSummary {
   chunks: number;
   sessions: number;
   expedientes: number;
+  /** Sesiones con status='pending_review' — esperan aprobación humana. */
   pending_transcripciones: number;
+  /** Sesiones con status pending o transcript_not_ready — pipeline aún corriendo. */
+  sessions_pending_processing: number;
+  /** Correcciones LLM con human_review='pending'. */
+  pending_corrections: number;
   watchlist_total: number;
 }
 
@@ -149,10 +154,16 @@ export interface AuditEntry {
 export interface AdminUser {
   id: string;
   email: string;
+  full_name?: string | null;
+  avatar_url?: string | null;
   created_at: string;
   last_sign_in_at: string | null;
   role: 'admin' | 'operador' | 'editor' | 'lector' | null;
+  /** 'pending' | 'active' | 'rejected' | 'suspended' desde user_access.
+   *  Mantengo string genérico para no romper callers que esperan los
+   *  valores legacy ('activo'/'invitado'/'solicitud'). */
   status: string;
+  approved_at?: string | null;
 }
 
 export interface AdminWorker {

@@ -113,17 +113,57 @@ export function DocumentosExpediente({ documentos }: Props) {
     );
   }
 
-  // Group by tipo.group
+  // Group by tipo.group. Orden importa: "Textos" primero porque ahí vive
+  // el texto sustitutivo, que es la versión VIGENTE del proyecto (pedido
+  // 16k del cliente — Lexa también prioriza sustitutivo sobre original).
+  const GROUP_ORDER = ['Textos', 'Dictámenes', 'Mociones art. 137', 'Mociones', 'Informes', 'Otros'];
   const groups = new Map<string, ExpedienteDocumentoFull[]>();
   for (const doc of documentos) {
     const g = getTipo(doc.tipo).group;
     if (!groups.has(g)) groups.set(g, []);
     groups.get(g)!.push(doc);
   }
+  // Reordenar siguiendo GROUP_ORDER
+  const orderedGroups: [string, ExpedienteDocumentoFull[]][] = [];
+  for (const g of GROUP_ORDER) {
+    if (groups.has(g)) orderedGroups.push([g, groups.get(g)!]);
+  }
+  for (const [g, docs] of groups.entries()) {
+    if (!GROUP_ORDER.includes(g)) orderedGroups.push([g, docs]);
+  }
+
+  // Banner si hay texto sustitutivo — el cliente quiere saber EN LA UI
+  // que ese es el texto VIGENTE del proyecto, no el original. Lexa ya lo
+  // sabe (renderExpedienteFullForLlm lo prioriza), pero el consultor que
+  // mira la ficha también debe verlo.
+  const sustitutivos = documentos.filter((d) => d.tipo === 'texto_sustitutivo');
+  const sustitutivoVigente = sustitutivos.length > 0
+    ? [...sustitutivos].sort((a, b) => (b.fecha ?? '').localeCompare(a.fecha ?? ''))[0]
+    : null;
 
   return (
     <div className="space-y-4">
-      {Array.from(groups.entries()).map(([group, docs]) => (
+      {sustitutivoVigente && (
+        <div className="rounded-xl border-l-4 border-blue-500/70 border-y border-r border-blue-500/20 bg-blue-500/[0.04] px-4 py-3">
+          <div className="flex items-start gap-2.5">
+            <div className="mt-0.5 inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-500 text-white text-[10px] font-bold">
+              ★
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-blue-700 dark:text-blue-300 mb-0.5">
+                Texto vigente del proyecto
+              </div>
+              <p className="text-[12.5px] text-[#0e1745]/80 dark:text-white/80 leading-snug">
+                Existe texto sustitutivo aprobado por la comisión el{' '}
+                <span className="font-medium">{fmtDate(sustitutivoVigente.fecha)}</span>.
+                Es la versión vigente del proyecto — el texto original quedó superseded.
+                Lexa y Atlas responden basándose en este sustitutivo, no en el original.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+      {orderedGroups.map(([group, docs]) => (
         <div key={group}>
           <h3 className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[#0e1745]/40 dark:text-white/40 mb-2 px-1">
             {group} ({docs.length})

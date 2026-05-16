@@ -28,11 +28,26 @@ export type ChatChunk =
   | { type: 'workspace_action'; payload: WorkspaceActionPayload }
   | { type: 'pptx_status'; payload: { status: 'starting' | 'polling' | 'error'; code?: string; detail?: string } }
   | { type: 'pptx_ready'; payload: PptxReadyPayload }
+  // docx_*: Atlas's generate_docx tool path (Word editable, separate
+  // from generate_asset). Reuses the same card UI on render.
+  | { type: 'docx_status'; payload: { status: 'starting' | 'error'; code?: string; detail?: string } }
+  | { type: 'docx_ready'; payload: DocxReadyPayload }
   // Atlas-side share suggestion chips (Lovable-style). When the user
   // talks about social/LinkedIn/decks/etc., the agent can attach 1-3
   // suggestions to its reply. Frontend renders them inline; click =
   // opens the ShareAs options modal pre-selected to that kind.
-  | { type: 'suggestion'; payload: ChatSuggestionPayload };
+  | { type: 'suggestion'; payload: ChatSuggestionPayload }
+  // Atlas's create_workspace tool result. El frontend muestra un card
+  // "Abrir hoja" y opcionalmente puede auto-navegar al canvas.
+  | { type: 'workspace_created'; payload: WorkspaceCreatedPayload };
+
+export interface WorkspaceCreatedPayload {
+  id: string;
+  title: string;
+  url: string;
+  seeds_imported: number;
+  seeds_failed: number;
+}
 
 export interface ChatSuggestionPayload {
   suggestions: Array<{
@@ -48,6 +63,15 @@ export interface PptxReadyPayload {
   gammaUrl: string;
   generationId: string;
   cached: boolean;
+  generatedAt?: string;
+}
+
+export interface DocxReadyPayload {
+  filename: string;
+  url: string;            // GCS signed URL (TTL ~7d)
+  size_bytes?: number;
+  node_id?: string | null;
+  generationId?: string;  // alias of node_id for shared rendering
   generatedAt?: string;
 }
 
@@ -97,11 +121,14 @@ export async function streamChat(opts: StreamChatOptions): Promise<void> {
   const token = await getAuthToken();
 
   // Forward the scope to the BFF.
-  // - session scope → legacy_session_id (drives sessionContextLoader)
-  // - workspace scope → workspace_id (unlocks Atlas's generate_presentation tool)
+  // - session scope (legacy)  → legacy_session_id (drives sessionContextLoader)
+  // - session_uuid (Supabase) → session_uuid (drives nuevo loader Gemini-era)
+  // - workspace scope         → workspace_id (unlocks Atlas's generate_presentation tool)
   const scopePayload =
     opts.scope?.kind === 'session'
       ? { legacy_session_id: opts.scope.legacy_session_id }
+      : opts.scope?.kind === 'session_uuid'
+      ? { session_uuid: opts.scope.session_uuid }
       : opts.scope?.kind === 'workspace'
       ? { workspace_id: opts.scope.workspace_id }
       : undefined;

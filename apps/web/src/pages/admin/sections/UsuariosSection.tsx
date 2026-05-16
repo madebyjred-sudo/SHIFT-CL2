@@ -29,6 +29,7 @@ import {
   useAdminFetch,
   type AdminUser,
 } from '@/services/adminApi';
+import { approveUser, rejectUser } from '@/services/accessApi';
 import { useToast } from '../Toast';
 
 const ROLES = ['admin', 'operador', 'editor', 'lector'] as const;
@@ -42,9 +43,17 @@ export function UsuariosSection(): React.ReactElement {
   const [busy, setBusy] = useState<Set<string>>(new Set());
 
   const items = users.data?.items ?? [];
-  const active = items.filter((u) => u.status === 'activo').length;
+  // Compat: aceptar tanto el shape nuevo (user_access: pending/active/...) como
+  // el legacy (activo/invitado/solicitud) hasta que el legacy desaparezca.
+  const isActive = (u: AdminUser) => u.status === 'active' || u.status === 'activo';
+  const isPending = (u: AdminUser) => u.status === 'pending' || u.status === 'solicitud';
+  const isRejected = (u: AdminUser) => u.status === 'rejected' || u.status === 'suspended';
+  const active = items.filter(isActive).length;
   const invited = items.filter((u) => u.status === 'invitado').length;
-  const requests = items.filter((u) => u.status === 'solicitud').length;
+  const requests = items.filter(isPending).length;
+  const rejected = items.filter(isRejected).length;
+  const pendingUsers = items.filter(isPending);
+  const otherUsers = items.filter((u) => !isPending(u));
 
   const setBusyFor = (id: string, on: boolean) =>
     setBusy((s) => {
@@ -53,11 +62,11 @@ export function UsuariosSection(): React.ReactElement {
       return out;
     });
 
-  const onApprove = async (u: AdminUser) => {
+  const onApprove = async (u: AdminUser, role: 'lector' | 'editor' | 'operador' = 'lector') => {
     setBusyFor(u.id, true);
     try {
-      await patchUserRole(u.id, 'lector');
-      notify({ kind: 'success', text: `${u.email} aprobado como lector` });
+      await approveUser(u.id, role);
+      notify({ kind: 'success', text: `${u.email} aprobado como ${role}` });
       void users.refetch();
     } catch (err) {
       notify({ kind: 'error', text: 'No se pudo aprobar', detail: (err as Error).message });
@@ -76,9 +85,7 @@ export function UsuariosSection(): React.ReactElement {
     if (!ok) return;
     setBusyFor(u.id, true);
     try {
-      // No real "reject" call; we use the audit endpoint via patchUserRole
-      // with role='rejected' so the row gets an explicit decision.
-      await patchUserRole(u.id, 'rejected');
+      await rejectUser(u.id);
       notify({ kind: 'success', text: `${u.email} rechazado` });
       void users.refetch();
     } catch (err) {
@@ -128,15 +135,53 @@ export function UsuariosSection(): React.ReactElement {
         }
       />
 
+      {/* KPI "Sesiones · 7 días" removido (post-audit 2026-05-10):
+          siempre mostraba "—" porque no hay query real. Mejor ocultarlo. */}
       <div className="mb-5 grid grid-cols-1 gap-3.5 sm:grid-cols-3">
-        <KPI label="Usuarios activos" value={String(active)} delta={`${active} vs ${invited} invitados`} deltaDir="flat" />
+        <KPI label="Usuarios activos" value={String(active)} delta={`${invited} invitados`} deltaDir="flat" />
         <KPI label="Solicitudes pendientes" value={String(requests)} delta={requests > 0 ? 'requieren acción' : 'cola al día'} deltaDir={requests > 0 ? 'down' : 'flat'} />
-        <KPI label="Sesiones · 7 días" value="—" delta="métrica pendiente" deltaDir="flat" />
+        <KPI label="Rechazados / suspendidos" value={String(rejected)} delta={rejected > 0 ? 'sin acceso' : '—'} deltaDir="flat" />
       </div>
+
+      {/* Cola de pendientes — sección destacada cuando hay solicitudes */}
+      {pendingUsers.length > 0 && (
+        <div className="mb-5 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] p-4">
+          <div className="mb-3 flex items-center gap-2">
+            <span className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-amber-700 dark:text-amber-300">
+              Pendientes de aprobación
+            </span>
+            <Pill kind="warn">{pendingUsers.length}</Pill>
+          </div>
+          <div className="flex flex-col gap-2">
+            {pendingUsers.map((u) => (
+              <div key={u.id} className="flex items-center gap-3 rounded-lg border border-amber-500/15 bg-white dark:bg-white/[0.04] px-3 py-2">
+                <Avatar initials={initialsFor(u.email)} color={colorFor(u.email)} />
+                <div className="flex-1 min-w-0">
+                  <div className="text-[12.5px] font-semibold text-[#0e1745] dark:text-white truncate">
+                    {u.full_name || u.email.split('@')[0]}
+                  </div>
+                  <div className="font-mono text-[11px] text-[#0e1745]/55 dark:text-white/55 truncate">{u.email}</div>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <ActionButton variant="approve" size="sm" onClick={() => void onApprove(u, 'lector')} disabled={busy.has(u.id)}>
+                    Aprobar como lector
+                  </ActionButton>
+                  <ActionButton variant="quiet" size="sm" onClick={() => void onApprove(u, 'editor')} disabled={busy.has(u.id)} title="Aprobar como editor">
+                    Editor
+                  </ActionButton>
+                  <ActionButton variant="reject" size="sm" onClick={() => void onReject(u)} disabled={busy.has(u.id)}>
+                    Rechazar
+                  </ActionButton>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <AdminTable<AdminUser>
         rowKey={(u) => u.id}
-        rows={items}
+        rows={otherUsers}
         empty={
           users.loading
             ? <span className="text-[#0e1745]/55 dark:text-white/55">Cargando equipo…</span>
@@ -410,9 +455,10 @@ function roleKind(role: string): PillKind {
 }
 
 function statusKind(status: string): PillKind {
-  if (status === 'activo') return 'success';
+  if (status === 'active' || status === 'activo') return 'success';
   if (status === 'invitado') return 'warn';
-  if (status === 'solicitud') return 'danger';
+  if (status === 'pending' || status === 'solicitud') return 'warn';
+  if (status === 'rejected' || status === 'suspended') return 'danger';
   if (status === 'inactivo') return 'neutral';
   return 'neutral';
 }
