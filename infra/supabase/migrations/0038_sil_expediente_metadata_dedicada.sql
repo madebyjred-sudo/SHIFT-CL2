@@ -166,6 +166,8 @@ create index if not exists sil_orden_dia_futuras_idx
   where fecha_sesion >= current_date;
 
 alter table sil_expediente_orden_dia_apariciones enable row level security;
+drop policy if exists "read orden dia apariciones" on sil_expediente_orden_dia_apariciones;
+drop policy if exists "service writes orden dia apariciones" on sil_expediente_orden_dia_apariciones;
 create policy "read orden dia apariciones" on sil_expediente_orden_dia_apariciones
   for select to authenticated using (true);
 create policy "service writes orden dia apariciones" on sil_expediente_orden_dia_apariciones
