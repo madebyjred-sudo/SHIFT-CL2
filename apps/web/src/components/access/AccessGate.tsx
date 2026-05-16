@@ -9,11 +9,12 @@
  *   • network failure → degrade to "active" (don't lock the user out for a
  *     transient API hiccup; the BFF middleware still gates writes)
  *
- * Cache: result lives in component state. On mount → fetch. The user's
- * session shouldn't change status mid-session frequently; if a manual
- * refresh is needed they can hit ⌘R.
+ * Refresh strategy: re-fetcheamos en (a) mount, (b) window focus, y (c) cada
+ * 60 segundos en background. Esto cubre el caso del admin que aprueba a un
+ * user en otra pestaña — el user no necesita hacer logout/login para tomar
+ * el role nuevo, basta con volver a la pestaña.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useSupabaseStore } from '@/store/useSupabaseStore';
 import { fetchMe, type AccessStatus, type AccessRole } from '@/services/accessApi';
 import { PendingApprovalScreen } from './PendingApprovalScreen';
@@ -26,34 +27,64 @@ interface AccessState {
   email: string | null;
 }
 
+const REFRESH_INTERVAL_MS = 60_000;
+
 export function AccessGate({ children }: { children: React.ReactNode }) {
   const { user, logout } = useSupabaseStore();
   const [access, setAccess] = useState<AccessState>({ status: 'loading', role: null, email: null });
 
-  useEffect(() => {
-    let cancelled = false;
+  // Re-utilizable: refetch sin reiniciar al estado loading (refresh silencioso).
+  const refresh = useCallback(async (isInitial: boolean) => {
     if (!user) return;
-    (async () => {
-      try {
-        const me = await fetchMe();
-        if (cancelled) return;
-        if (!me) {
-          // 401 — token expirado o inválido. Forzar logout para que vuelva
-          // al flow de Google sign-in (no a una pantalla rota).
-          setAccess({ status: 'error', role: null, email: null });
-          return;
-        }
-        setAccess({ status: me.status, role: me.role, email: me.email });
-      } catch (err) {
-        // Network/server error — degradamos a 'active' para no bloquear al
-        // user por un hiccup. El BFF sigue siendo el gate real para escritura.
-        // eslint-disable-next-line no-console
-        console.error('AccessGate error, degrading to active:', err);
-        if (!cancelled) setAccess({ status: 'active', role: 'lector', email: user.email ?? null });
+    try {
+      const me = await fetchMe();
+      if (!me) {
+        // 401 — token expirado o inválido. NO degradar a 'lector' (eso oculta
+        // permisos reales). Marcar error y dejar al user ver children con role
+        // null — la app muestra fallback adecuado. Si pasa repetido, el user
+        // hace logout manual.
+        setAccess({ status: 'error', role: null, email: null });
+        return;
       }
+      setAccess({ status: me.status, role: me.role, email: me.email });
+    } catch (err) {
+      // Network/server error — solo degradamos en el INITIAL load para no
+      // bloquear al user por un hiccup. En refresh silencioso ignoramos.
+      if (isInitial) {
+        // eslint-disable-next-line no-console
+        console.error('AccessGate initial fetch error, degrading to active:', err);
+        setAccess({ status: 'active', role: 'lector', email: user.email ?? null });
+      }
+      // En silent refresh ignoramos el error y mantenemos el estado anterior.
+    }
+  }, [user]);
+
+  // Initial fetch
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    (async () => {
+      if (cancelled) return;
+      await refresh(true);
     })();
     return () => { cancelled = true; };
-  }, [user]);
+  }, [user, refresh]);
+
+  // Refresh on window focus (cubre admin-aprueba-en-otra-pestaña).
+  useEffect(() => {
+    if (!user) return;
+    const onFocus = () => { void refresh(false); };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [user, refresh]);
+
+  // Refresh periódico cada 60s (cubre cambio de role mientras la pestaña
+  // está abierta sin perder foco).
+  useEffect(() => {
+    if (!user) return;
+    const id = setInterval(() => { void refresh(false); }, REFRESH_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [user, refresh]);
 
   if (access.status === 'loading') {
     return (

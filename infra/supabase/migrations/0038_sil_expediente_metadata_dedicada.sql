@@ -55,6 +55,8 @@ create index if not exists sil_audiencias_proximas_idx
   where fecha >= current_date;
 
 alter table sil_expediente_audiencias enable row level security;
+drop policy if exists "read audiencias" on sil_expediente_audiencias;
+drop policy if exists "service writes audiencias" on sil_expediente_audiencias;
 create policy "read audiencias" on sil_expediente_audiencias
   for select to authenticated using (true);
 create policy "service writes audiencias" on sil_expediente_audiencias
@@ -84,6 +86,8 @@ create index if not exists sil_actas_expediente_idx
   on sil_expediente_actas_indexadas (expediente_id, fecha_sesion desc);
 
 alter table sil_expediente_actas_indexadas enable row level security;
+drop policy if exists "read actas" on sil_expediente_actas_indexadas;
+drop policy if exists "service writes actas" on sil_expediente_actas_indexadas;
 create policy "read actas" on sil_expediente_actas_indexadas
   for select to authenticated using (true);
 create policy "service writes actas" on sil_expediente_actas_indexadas
@@ -121,6 +125,8 @@ create index if not exists sil_consultas_sala_decision_idx
   where decision in ('inconstitucional', 'inconstitucional_parcial', 'con_lugar');
 
 alter table sil_expediente_consultas_sala enable row level security;
+drop policy if exists "read consultas sala" on sil_expediente_consultas_sala;
+drop policy if exists "service writes consultas sala" on sil_expediente_consultas_sala;
 create policy "read consultas sala" on sil_expediente_consultas_sala
   for select to authenticated using (true);
 create policy "service writes consultas sala" on sil_expediente_consultas_sala

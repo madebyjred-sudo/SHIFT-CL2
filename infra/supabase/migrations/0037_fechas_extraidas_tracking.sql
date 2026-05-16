@@ -60,8 +60,10 @@ create or replace view sil_expediente_fechas_vigentes as
   where superseded_by is null
   order by expediente_id, campo, extracted_at desc;
 
--- RLS
+-- RLS — idempotente (drop si existe + recreate, para soportar re-aplicación)
 alter table sil_expediente_fechas_extraidas enable row level security;
+drop policy if exists "read fechas" on sil_expediente_fechas_extraidas;
+drop policy if exists "service writes fechas" on sil_expediente_fechas_extraidas;
 create policy "read fechas" on sil_expediente_fechas_extraidas
   for select to authenticated using (true);
 create policy "service writes fechas" on sil_expediente_fechas_extraidas
