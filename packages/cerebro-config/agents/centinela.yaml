@@ -176,16 +176,17 @@ tools:
   - name: confidence_estimate
     type: native
     description: Score 0-100 calculado server-side desde citations + similitud
-  # Declared only — implementation deferred (votaciones table not seeded yet).
-  - name: compare_votes
-    type: sql
-    table: votaciones
-    description: "Próximamente: comparativa de votos por fracción/período"
-    status: declared_only
-  - name: alert_subscribe
-    type: native
-    description: "Próximamente: suscribir tema y recibir alerta"
-    status: declared_only
+  # Weekend Refactor Wave 1 (2026-05-16): removidas `compare_votes` y
+  # `alert_subscribe` — declaradas hace meses pero nunca tuvieron
+  # dispatcher en `openRouterClient.ts`. Sin dispatcher el modelo emite
+  # `tool_use` que no resuelve nada (no-op silencioso) + ofusca el catálogo
+  # real de herramientas que Centinela puede usar.
+  #
+  # Si en el futuro alguno se necesita:
+  #   compare_votes  → requiere migrar `votaciones` table primero (tabla
+  #                    aún no seedeada — sería pedido cliente concreto).
+  #   alert_subscribe → conceptual; Centinela MVP usa watchlist + cron, no
+  #                    suscripciones runtime por chat.
 
 response_contract:
   must_show_confidence: true

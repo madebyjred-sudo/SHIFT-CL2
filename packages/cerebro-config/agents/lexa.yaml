@@ -223,13 +223,23 @@ tools:
     source: supabase_pgvector
     table: legislative_chunks
     embedding_model: text-embedding-3-large
+  # `cite_source` declarada sin dispatcher — pendiente Wave 2 Track B-2.
+  # Cuando se implemente: forced-citation tool que devuelve cita formateada
+  # con link al expediente/transcript/RAL. Alto valor para deep_research
+  # mode (CoVe ya hace verification, citation completa el contrato).
   - name: cite_source
     type: native
-    description: Devuelve cita formateada con link a fuente original
-  - name: query_metadata
+    description: "Pending Wave 2: devuelve cita formateada con link a fuente original"
+    status: declared_only
+  # Weekend Refactor Wave 1 (2026-05-16): renombrada `query_metadata` →
+  # `query_legislative_graph` para alinear con el dispatcher real en
+  # openRouterClient.ts. El typo histórico hacía que el modelo emitiera
+  # tool_use con un nombre que no resolvía a nada.
+  - name: query_legislative_graph
     type: sql
     table: sessions
     allowed_columns: [id, fecha, comision, tipo, video_url, transcript_url]
+    description: Consulta metadata legislativa (sesiones, comisiones, expedientes referenciados).
   # SIL tools — keyword search over expedientes + detail lookup + semantic
   # corpus search. Lexa uses these whenever the user asks about projects of
   # law, expedientes, or argumentos legislativos that aren't transcribed
