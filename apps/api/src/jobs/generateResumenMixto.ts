@@ -406,10 +406,14 @@ async function loadExpedienteData(
 
   if (general.error || !general.data) return null;
   const g = general.data as Record<string, unknown>;
+  // `resumen` NO es columna dedicada en sil_expedientes — vive en `extras`
+  // jsonb si el SIL lo expone. Fallback a null si no hay nada. Fix 2026-05-16.
+  const extras = (g.extras ?? {}) as Record<string, unknown>;
+  const resumenFromExtras = typeof extras.resumen === 'string' ? (extras.resumen as string) : null;
   return {
     numero,
     titulo: (g.titulo as string | null) ?? null,
-    resumen: (g.resumen as string | null) ?? null,
+    resumen: resumenFromExtras,
     tipo: (g.tipo as string | null) ?? null,
     proponente: (g.proponente as string | null) ?? null,
     estado: (g.estado as string | null) ?? null,

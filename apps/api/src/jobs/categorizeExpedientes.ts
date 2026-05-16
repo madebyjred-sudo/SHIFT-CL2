@@ -107,6 +107,11 @@ interface CategoriaRow {
 interface ExpedienteRow {
   numero: string;
   titulo: string | null;
+  /** Resumen extraído de `extras` jsonb (no es columna dedicada en
+   *  sil_expedientes — fix 2026-05-16). El SIL web-scraper guarda un
+   *  resumen del expediente en `extras.resumen` si el campo está visible
+   *  en la página del SIL. Si no hay, el LLM categoriza solo con título
+   *  + proponente + tipo (suficiente para la mayoría de casos). */
   resumen: string | null;
   tipo: string | null;
   proponente: string | null;
@@ -302,9 +307,13 @@ async function loadCandidates(
   scope: 'watchlist' | 'all',
   limit: number | undefined,
 ): Promise<ExpedienteRow[]> {
+  // NO hay columna `resumen` en `sil_expedientes`. El resumen vive en
+  // `extras` jsonb si el SIL lo expone. Seleccionamos `extras` completo
+  // y extraemos en JS. Fix 2026-05-16 — el código original asumía una
+  // columna que nunca existió.
   let query = sb
     .from('sil_expedientes')
-    .select('numero, titulo, resumen, tipo, proponente')
+    .select('numero, titulo, extras, tipo, proponente')
     .not('titulo', 'is', null);
 
   if (scope === 'watchlist') {
@@ -316,7 +325,19 @@ async function loadCandidates(
 
   const { data, error } = await query;
   if (error) throw new Error(`loadCandidates: ${error.message}`);
-  return (data ?? []) as ExpedienteRow[];
+
+  // Mapear `extras.resumen` (si existe) al campo `resumen` de la row.
+  return (data ?? []).map((r: Record<string, unknown>) => {
+    const extras = (r.extras ?? {}) as Record<string, unknown>;
+    const resumen = typeof extras.resumen === 'string' ? extras.resumen : null;
+    return {
+      numero: r.numero as string,
+      titulo: r.titulo as string | null,
+      resumen,
+      tipo: r.tipo as string | null,
+      proponente: r.proponente as string | null,
+    };
+  });
 }
 
 /**
