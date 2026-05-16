@@ -14,7 +14,7 @@
  * y la síntesis de múltiples fuentes son criterios subjetivos.
  *
  * Modelo:
- *   - Default: 'openrouter/anthropic/claude-3.7-sonnet' (mejor calidad
+ *   - Default: 'anthropic/claude-sonnet-4.6' (mejor calidad
  *     para narrativa con citas). Fallback configurable.
  *   - Override: env CL2_EDITORIAL_RESUMEN_MODEL.
  *
@@ -74,7 +74,7 @@ export type LlmResumenCaller = (args: {
 // ── Constantes ───────────────────────────────────────────────────────────────
 
 const DEFAULT_MODEL =
-  process.env.CL2_EDITORIAL_RESUMEN_MODEL ?? 'openrouter/anthropic/claude-3.7-sonnet';
+  process.env.CL2_EDITORIAL_RESUMEN_MODEL ?? 'anthropic/claude-sonnet-4.6';
 const PROMPT_VERSION = 'v1';
 const REFRESH_DAYS_DEFAULT = 7;
 const BATCH_SIZE = 5; // resumen tarda más → menos paralelo

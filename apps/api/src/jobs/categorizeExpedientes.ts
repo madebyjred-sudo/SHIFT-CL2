@@ -17,7 +17,7 @@
  *   5. Upsert por (expediente_id, categoria_id). Idempotente.
  *
  * Modelo:
- *   - Default: 'openrouter/anthropic/claude-3.5-haiku' (barato; clasificación
+ *   - Default: 'anthropic/claude-haiku-4.5' (barato; clasificación
  *     no requiere razonamiento profundo).
  *   - Override: env CL2_EDITORIAL_CAT_MODEL.
  *
@@ -70,7 +70,7 @@ export type LlmJsonCaller = (args: {
 // ── Constantes ───────────────────────────────────────────────────────────────
 
 const DEFAULT_MODEL =
-  process.env.CL2_EDITORIAL_CAT_MODEL ?? 'openrouter/anthropic/claude-3.5-haiku';
+  process.env.CL2_EDITORIAL_CAT_MODEL ?? 'anthropic/claude-haiku-4.5';
 const BATCH_SIZE = 10;
 const FRESHNESS_DAYS_DEFAULT = 7;
 const OR_TIMEOUT_MS = 60_000;

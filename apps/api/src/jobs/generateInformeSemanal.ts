@@ -72,7 +72,7 @@ export type LlmInformeCaller = (args: {
 // ── Constantes ───────────────────────────────────────────────────────────────
 
 const DEFAULT_MODEL =
-  process.env.CL2_EDITORIAL_INFORME_MODEL ?? 'openrouter/anthropic/claude-3.7-sonnet';
+  process.env.CL2_EDITORIAL_INFORME_MODEL ?? 'anthropic/claude-sonnet-4.6';
 const OR_TIMEOUT_MS = 90_000;
 const OR_RETRY_ATTEMPTS = 2;
 const OR_RETRY_BASE_MS = 1000;
