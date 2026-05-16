@@ -46,16 +46,16 @@ test.describe('@feature @sprint-3 @api Editorial — DB shape', () => {
 });
 
 test.describe('@feature @sprint-3 @api Editorial — endpoints', () => {
-  test('GET /api/informes-semanales con admin → 200 + lista (puede estar vacía)', async () => {
+  test('GET /api/informes-semanales con admin → 200 + items array', async () => {
     const s = await mintToken('madebyjred@gmail.com');
-    const res = await apiCall<{ ok: boolean; informes: unknown[] }>(
+    const res = await apiCall<{ ok: boolean; items: unknown[] }>(
       'GET',
       '/api/informes-semanales',
       { token: s.access_token, base: 'web' },
     );
     const body = assert200(res);
     expect(body.ok).toBe(true);
-    expect(body.informes).toBeInstanceOf(Array);
+    expect(body.items).toBeInstanceOf(Array);
   });
 
   test('GET /api/expedientes/23.511/editorial responde shape (resumen o vacío si no se generó)', async () => {
