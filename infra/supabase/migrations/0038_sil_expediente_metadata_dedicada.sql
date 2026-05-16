@@ -50,9 +50,13 @@ create table if not exists sil_expediente_audiencias (
 create index if not exists sil_audiencias_expediente_idx
   on sil_expediente_audiencias (expediente_id, fecha desc);
 
-create index if not exists sil_audiencias_proximas_idx
-  on sil_expediente_audiencias (fecha)
-  where fecha >= current_date;
+-- Index para barrido global de "audiencias futuras" sin filtro de expediente.
+-- NO se puede usar predicate `where fecha >= current_date` (PostgreSQL exige
+-- funciones IMMUTABLE en predicados, y current_date no lo es). Index full
+-- sobre fecha cubre el caso — la query agrega `where fecha >= current_date`
+-- y PostgreSQL skippea las filas viejas con el index.
+create index if not exists sil_audiencias_fecha_idx
+  on sil_expediente_audiencias (fecha);
 
 alter table sil_expediente_audiencias enable row level security;
 drop policy if exists "read audiencias" on sil_expediente_audiencias;
@@ -161,9 +165,11 @@ create table if not exists sil_expediente_orden_dia_apariciones (
 create index if not exists sil_orden_dia_expediente_idx
   on sil_expediente_orden_dia_apariciones (expediente_id, fecha_sesion desc);
 
-create index if not exists sil_orden_dia_futuras_idx
-  on sil_expediente_orden_dia_apariciones (fecha_sesion)
-  where fecha_sesion >= current_date;
+-- Index para barrido global de "sesiones próximas" sin filtro de expediente.
+-- Mismo motivo que sil_audiencias_fecha_idx: no se puede usar predicate
+-- con current_date (no es IMMUTABLE en PostgreSQL).
+create index if not exists sil_orden_dia_fecha_idx
+  on sil_expediente_orden_dia_apariciones (fecha_sesion);
 
 alter table sil_expediente_orden_dia_apariciones enable row level security;
 drop policy if exists "read orden dia apariciones" on sil_expediente_orden_dia_apariciones;
