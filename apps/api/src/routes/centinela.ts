@@ -177,6 +177,44 @@ centinelaInternalRouter.post('/similar-detect', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/internal/centinela/novelty-scan
+ *
+ * Sprint 2 Track I — cron 30 min que corre noveltyDetector sobre cada
+ * expediente en watchlist activa y persiste novedades nuevas a
+ * `centinela_eventos` (con dedup_key). Reemplaza el detect-on-read del
+ * endpoint /full por una tabla pre-populated.
+ *
+ * Cloud Scheduler reference:
+ *   gcloud scheduler jobs create http cl2-novelty-scan \
+ *     --schedule='*\/30 * * * *' --time-zone='America/Costa_Rica' \
+ *     --uri="https://<service>/api/internal/centinela/novelty-scan" \
+ *     --http-method=POST \
+ *     --headers="X-Internal-Trigger=$INTERNAL_TRIGGER_SECRET"
+ */
+centinelaInternalRouter.post('/novelty-scan', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  try {
+    // Import lazy para evitar coupling fuerte con el job module
+    const { runNoveltyScan } = await import('../jobs/noveltyScan.js');
+    const result = await runNoveltyScan();
+    logger.info('centinela_internal_novelty_scan_complete', {
+      users: result.users,
+      expedientes: result.expedientes,
+      novedades_new: result.novedades_new,
+      novedades_skipped_dup: result.novedades_skipped_dup,
+      errors: result.errors,
+      duration_ms: result.duration_ms,
+    });
+    res.json({ ok: true, started_at: new Date().toISOString(), result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_novelty_scan_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
 // ── /api/admin/centinela router ───────────────────────────────────────────────
 
 export const centinelaAdminRouter = Router();
