@@ -220,10 +220,30 @@ async function migrateOne(numero: string, meta: Row): Promise<void> {
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  // Filtrar server-side por las 5 keys jsonb del Sprint v3.
+  // supabase-js limita a 1000 rows default; si hacemos `.not('metadata','is',null)`
+  // tray hasta 1000 rows random (de los 21.620+ expedientes) — el filtro JS
+  // posterior puede no incluir al expediente que queremos migrar.
+  // Filtrar por `metadata->><key>` IS NOT NULL en server reduce a solo los rows
+  // con datos Sprint v3 (debería ser ~handful).
+  //
+  // Combinamos 5 filtros con OR usando .or():
+  //   metadata->fechas_extraidas not null,
+  //   metadata->audiencias not null,
+  //   etc.
+  const orFilter = [
+    'metadata->fechas_extraidas.not.is.null',
+    'metadata->audiencias.not.is.null',
+    'metadata->actas_comision.not.is.null',
+    'metadata->consultas_sala_constitucional.not.is.null',
+    'metadata->orden_dia_apariciones.not.is.null',
+  ].join(',');
+
   let q = sb
     .from('sil_expedientes')
     .select('numero, metadata')
-    .not('metadata', 'is', null);
+    .or(orFilter)
+    .limit(5000);  // safety cap, no debería superar las decenas en práctica
   if (expedienteFilter) q = q.eq('numero', expedienteFilter);
 
   const { data: rows, error } = await q;
@@ -232,7 +252,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Filter rows that actually have payload to migrate
+  // Re-filtro JS por si el operador jsonb se comporta raro (defensa).
   const withPayload = (rows ?? []).filter((r: Row) => {
     const m = r.metadata ?? {};
     return !!(
