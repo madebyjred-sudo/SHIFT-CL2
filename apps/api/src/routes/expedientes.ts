@@ -180,21 +180,67 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
         .order('fecha_sesion', { ascending: false })),
     ]);
 
-    // Pedido 16j ("algoritmo Carlos") — corremos el detector de novedades
-    // EN VIVO sobre este expediente. Cruza sil_sharepoint_raw vs
-    // sil_expediente_tramite y detecta items en SharePoint que no se
-    // reflejan en la tramitación oficial. Si hay novedades algorítmicas
-    // las mergeamos sobre las seedeadas en metadata.novedades_detectadas
-    // (de hace el seed); las del detector pisan a las hardcoded.
+    // Pedido 16j ("algoritmo Carlos") — fuente principal: `centinela_eventos`
+    // poblada por el cron Sprint 2 Track I (`runNoveltyScan`). La tabla
+    // tiene una fila por (user_id, dedup_key) — sólo levantamos las del
+    // user actual que cubren este expediente.
+    //
+    // Fallback: si la tabla no tiene rows para este expediente+user (porque
+    // el cron aún no corrió, o porque es un expediente nuevo que recién
+    // entró a watchlist), llamamos detectNovedades(numero) live como hoy.
+    // Esto preserva el contrato del endpoint mientras el cron alcanza el
+    // estado estable.
+    //
+    // Shape de salida (novedades_detectadas[]) se mantiene idéntico para
+    // backward-compat con la UI; sólo cambia la fuente.
+    const NOVELTY_TIPOS = [
+      'mocion_137_no_reflejada_en_tramite',
+      'consulta_177_no_reflejada_en_tramite',
+      'acta_sin_evento_tramite',
+      'mocion_segundo_dia_sin_primer_dia',
+    ] as const;
+
     let novedadesDetectadas: unknown[] = [];
+    let novedadesSource: 'centinela_eventos' | 'detector_live' | 'none' = 'none';
+
     try {
-      const { detectNovedades } = await import('../services/noveltyDetector.js');
-      const detected = await detectNovedades(numero);
-      novedadesDetectadas = detected;
+      const { data: persistedRows } = await supClientRaw
+        .from('centinela_eventos')
+        .select('event_type, payload, priority, detected_at, source_url')
+        .eq('expediente_id', numero)
+        .eq('user_id', userId)
+        .in('event_type', NOVELTY_TIPOS as unknown as string[])
+        .order('detected_at', { ascending: false });
+
+      if (persistedRows && persistedRows.length > 0) {
+        // Reconstituir el shape NovedadDetectada desde la fila persistida.
+        // El payload jsonb tiene descripcion/algoritmo/confidence/fuentes/
+        // fecha_deteccion — la UI espera todos esos campos top-level.
+        novedadesDetectadas = persistedRows.map((row: any) => {
+          const p = (row.payload ?? {}) as Record<string, unknown>;
+          return {
+            tipo: row.event_type,
+            expediente_numero: numero,
+            descripcion: p.descripcion,
+            algoritmo: p.algoritmo,
+            confidence: p.confidence,
+            fecha_deteccion: p.fecha_deteccion ?? row.detected_at,
+            fuentes: p.fuentes,
+          };
+        });
+        novedadesSource = 'centinela_eventos';
+      } else {
+        // Fallback: detector live (mismo flujo de Sprint v3).
+        const { detectNovedades } = await import('../services/noveltyDetector.js');
+        const detected = await detectNovedades(numero);
+        novedadesDetectadas = detected;
+        novedadesSource = detected.length > 0 ? 'detector_live' : 'none';
+      }
     } catch (err) {
       req.log?.warn('novelty_detector_failed', {
         error: (err as Error).message,
         numero,
+        user_id: userId,
       });
     }
 
@@ -258,8 +304,10 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
       ? ordenDiaRes
       : (meta.orden_dia_apariciones ?? []);
 
-    // Novedades: el detector live es la fuente de verdad; metadata es solo
-    // fallback para demo cuando la prod no tiene SharePoint completo cargado.
+    // Novedades: orden de prioridad
+    //   1. centinela_eventos persistidos por el cron noveltyScan (Track I).
+    //   2. detector live como fallback de compatibilidad (cron aún no corrió).
+    //   3. metadata.novedades_detectadas seedeada (demo data).
     const novedadesFinales = novedadesDetectadas.length > 0
       ? novedadesDetectadas
       : (meta.novedades_detectadas ?? []);
@@ -287,7 +335,7 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
           actas: actasRes.length > 0 ? 'tabla_dedicada' : 'metadata_jsonb',
           sala: salaRes.length > 0 ? 'tabla_dedicada' : 'metadata_jsonb',
           orden_dia: ordenDiaRes.length > 0 ? 'tabla_dedicada' : 'metadata_jsonb',
-          novedades: novedadesDetectadas.length > 0 ? 'detector_live' : 'metadata_jsonb',
+          novedades: novedadesDetectadas.length > 0 ? novedadesSource : 'metadata_jsonb',
         },
       },
     });

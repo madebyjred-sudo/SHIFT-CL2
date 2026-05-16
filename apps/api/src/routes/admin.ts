@@ -19,6 +19,7 @@ import { writeNeuronFile } from '../services/cerebroNeuron.js';
 import { adminFeedbackRouter } from './feedback.js';
 import { listTranscripciones, type LegacyTranscripcion } from '../services/legacyCl2Client.js';
 import { crawlList } from '../services/sharePointCrawler.js';
+import { runNoveltyScan } from '../jobs/noveltyScan.js';
 
 const adminRouter = Router();
 
@@ -1414,6 +1415,47 @@ adminRouter.post('/crawler/run/:list_id', async (req, res) => {
   });
 
   res.json({ ok: true, job_id: jobId, list_id: listId, started_at: new Date().toISOString() });
+});
+
+// ─── Novelty scan — manual trigger (Sprint 2 Track I) ───────────────
+//
+// POST /api/admin/novelty/run-now
+//
+// Corre runNoveltyScan() sincrónico (no en background) y devuelve el
+// resultado. Sólo admin/operador (el role guard de adminRouter ya lo
+// cubre). En prod este job lo dispara Cloud Scheduler cada 30 min vía
+// otro endpoint con secreto; éste es para ops/diagnóstico.
+adminRouter.post('/novelty/run-now', async (req, res) => {
+  try {
+    const startedAt = new Date().toISOString();
+    const result = await runNoveltyScan();
+    await auditFromReq(req, {
+      verb: 'corrió scan de novedades',
+      resource: 'noveltyScan',
+      resource_kind: 'system',
+      result: result.errors > 0 ? 'error' : 'ok',
+      metadata: {
+        users: result.users,
+        expedientes: result.expedientes,
+        novedades_new: result.novedades_new,
+        novedades_skipped_dup: result.novedades_skipped_dup,
+        errors: result.errors,
+        duration_ms: result.duration_ms,
+      },
+    });
+    res.json({ ok: true, started_at: startedAt, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('admin/novelty/run-now failed', { error: message });
+    await auditFromReq(req, {
+      verb: 'falló scan de novedades',
+      resource: 'noveltyScan',
+      resource_kind: 'system',
+      result: 'error',
+      metadata: { error: message },
+    });
+    res.status(500).json({ ok: false, error: message });
+  }
 });
 
 // Boot — log a one-time line so the operator can see the audit_log
