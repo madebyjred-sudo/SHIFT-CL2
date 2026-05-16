@@ -153,19 +153,20 @@ export function ExpedienteDashboardPage({ numero }: Props) {
   const general = data?.general;
   const esLey = !!data?.ley;
 
-  // Datos extraídos del metadata jsonb del expediente. Estos son los pedidos
-  // 07, 08, 12a, 16e, 16g, 16h, 16j cuyas tablas dedicadas viven en
-  // migrations 0037-0040 (aplicación batch en Sprint 2). Mientras tanto la
-  // data vive en sil_expedientes.metadata como JSON para no bloquear demo.
+  // Sprint 2 Track H — los datos del Sprint v3 ahora vienen como keys top-level
+  // del endpoint /full. El BFF hace el merge tabla dedicada + fallback metadata,
+  // así que el frontend NO necesita conocer el origen. Mantengo el fallback a
+  // metadata por defensa (si en algún momento el BFF degrada).
   const meta = (general?.metadata ?? {}) as any;
-  const fechasVigente = meta?.fechas_extraidas?.vigente;
-  const fechasHistorial = meta?.fechas_extraidas?.historial;
-  const fechasOtras = meta?.fechas_extraidas?.otras_fechas;
-  const consultasSala = meta?.consultas_sala_constitucional ?? [];
-  const audiencias = meta?.audiencias ?? [];
-  const actasComision = meta?.actas_comision ?? [];
-  const novedadesAlgoritmo = meta?.novedades_detectadas ?? [];
-  const ordenDiaApariciones = meta?.orden_dia_apariciones ?? [];
+  const fechasShape = data?.fechas_extraidas ?? meta?.fechas_extraidas ?? null;
+  const fechasVigente = fechasShape?.vigente;
+  const fechasHistorial = fechasShape?.historial ?? meta?.fechas_extraidas?.historial;
+  const fechasOtras = fechasShape?.otras_fechas ?? meta?.fechas_extraidas?.otras_fechas;
+  const consultasSala = data?.consultas_sala_constitucional ?? meta?.consultas_sala_constitucional ?? [];
+  const audiencias = data?.audiencias ?? meta?.audiencias ?? [];
+  const actasComision = data?.actas_comision ?? meta?.actas_comision ?? [];
+  const novedadesAlgoritmo = data?.novedades_detectadas ?? meta?.novedades_detectadas ?? [];
+  const ordenDiaApariciones = data?.orden_dia_apariciones ?? meta?.orden_dia_apariciones ?? [];
 
   const tieneFechas = !!fechasVigente || !!fechasOtras;
   const tieneSala = consultasSala.length > 0;

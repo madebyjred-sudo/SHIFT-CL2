@@ -160,6 +160,83 @@ export interface ExpedienteGeneral {
   metadata?: Record<string, unknown> | null;
 }
 
+// ─── Sprint v3 — paneles extra del expediente ────────────────────────────────
+// Los datos canónicos viven en tablas dedicadas (migrations 0037 + 0038)
+// con fallback transparente a `general.metadata.*` cuando la migration aún
+// no se aplicó (entorno de dev/preview). El BFF hace el merge.
+
+export interface FechaExtraidaVigente {
+  campo: string;
+  valor_fecha: string;
+  valor_texto_original?: string;
+  visual_marker?: string;
+  fuente_documento_url?: string;
+  fuente_pagina?: number | null;
+  extraction_method?: string;
+  extraction_confidence?: number | null;
+}
+
+export interface FechasExtraidasShape {
+  vigente?: FechaExtraidaVigente;
+  historial?: Array<{ valor_fecha: string; detectado: string; razon: string }>;
+  otras_fechas?: Record<string, unknown>;
+}
+
+export interface Audiencia {
+  fecha: string;
+  hora?: string;
+  comision: string;
+  asistente_nombre: string;
+  asistente_cargo?: string;
+  asistente_organizacion?: string;
+  posicion_estimada?: string;
+}
+
+export interface ActaIndexada {
+  acta_numero: number;
+  comision: string;
+  fecha_sesion: string;
+  acta_pdf_url?: string;
+  url?: string;  // alias legacy de metadata jsonb
+  speakers: Array<{
+    role: string;
+    nombre: string;
+    timestamp_aprox: string;
+    texto: string;
+  }>;
+}
+
+export interface ConsultaSalaConst {
+  numero_resolucion: string;
+  fecha_resolucion: string;
+  fecha_consulta?: string;
+  decision: string;
+  por_tanto_extracto: string;
+  magistrados: string[];
+  voto_completo_url?: string;
+}
+
+export interface OrdenDiaAparicion {
+  fecha_sesion: string;
+  hora?: string;
+  numero_sesion?: number;
+  tipo_sesion?: 'ordinaria' | 'extraordinaria' | 'mixta';
+  capitulo: 'capitulo_primero' | 'capitulo_segundo' | 'capitulo_tercero' | 'sin_clasificar';
+  capitulo_titulo?: string;
+  debate: 'primer_debate' | 'segundo_debate' | 'tercer_debate' | 'mocion_orden' | 'sin_clasificar';
+  orden_pdf_url?: string;
+  contexto_extracto?: string;
+}
+
+export interface NovedadDetectada {
+  fecha_deteccion: string;
+  tipo: string;
+  descripcion: string;
+  algoritmo: string;
+  confidence: number;
+  fuentes?: unknown;
+}
+
 export interface ExpedienteFullData {
   general: ExpedienteGeneral;
   tramite: TramiteEvento[];
@@ -167,6 +244,17 @@ export interface ExpedienteFullData {
   consultas: Consulta[];
   ley: LeyInfo | null;
   documentos: ExpedienteDocumentoFull[];
+
+  // ── Sprint v3 — top-level keys, merge tablas dedicadas + fallback metadata
+  fechas_extraidas?: FechasExtraidasShape | null;
+  audiencias?: Audiencia[];
+  actas_comision?: ActaIndexada[];
+  consultas_sala_constitucional?: ConsultaSalaConst[];
+  orden_dia_apariciones?: OrdenDiaAparicion[];
+  novedades_detectadas?: NovedadDetectada[];
+
+  // Diagnóstico (opcional, útil en admin)
+  _source?: Record<string, 'tabla_dedicada' | 'metadata_jsonb' | 'detector_live'>;
 }
 
 /**

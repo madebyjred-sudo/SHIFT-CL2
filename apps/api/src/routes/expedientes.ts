@@ -98,7 +98,27 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
     const numero: string = general.numero as string; // canonical "23.511" form
 
     // Fetch all detail tables in parallel — empty array if no rows.
-    const [tramiteRes, proponentesRes, consultasRes, leyRes, documentosRes] = await Promise.all([
+    //
+    // Sprint 2 Track H: además de las 5 tablas core (tramite, proponentes,
+    // consultas, ley, documentos), intentamos leer de las tablas DEDICADAS
+    // del Sprint v3 (migrations 0037 + 0038). Si la migration aún no se
+    // aplicó en este ambiente, el `.from(...)` devuelve error `relation does
+    // not exist` — lo capturamos y dejamos los datos vacíos. El fallback al
+    // `metadata` jsonb pasa más abajo si las tablas estaban vacías Y el
+    // expediente tiene metadata seedeada (data demo).
+    const safeQuery = async <T>(p: PromiseLike<{ data: T[] | null; error: any }>): Promise<T[]> => {
+      try {
+        const r = await p;
+        if (r.error) return [];
+        return r.data ?? [];
+      } catch { return []; }
+    };
+
+    const [
+      tramiteRes, proponentesRes, consultasRes, leyRes, documentosRes,
+      // Sprint v3 — tablas dedicadas (0037 + 0038)
+      fechasRes, audienciasRes, actasRes, salaRes, ordenDiaRes,
+    ] = await Promise.all([
       supClientRaw
         .from('sil_expediente_tramite')
         .select('*')
@@ -128,6 +148,36 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
         .select('*')
         .eq('expediente_id', numero)
         .order('tipo', { ascending: true }),
+
+      // ── Sprint v3 dedicated tables (graceful degradation si 0037+0038 no aplicadas) ──
+      safeQuery(supClientRaw
+        .from('sil_expediente_fechas_vigentes')  // VIEW de 0037
+        .select('*')
+        .eq('expediente_id', numero)),
+
+      safeQuery(supClientRaw
+        .from('sil_expediente_audiencias')
+        .select('*')
+        .eq('expediente_id', numero)
+        .order('fecha', { ascending: true })),
+
+      safeQuery(supClientRaw
+        .from('sil_expediente_actas_indexadas')
+        .select('*')
+        .eq('expediente_id', numero)
+        .order('fecha_sesion', { ascending: false })),
+
+      safeQuery(supClientRaw
+        .from('sil_expediente_consultas_sala')
+        .select('*')
+        .eq('expediente_id', numero)
+        .order('fecha_resolucion', { ascending: false })),
+
+      safeQuery(supClientRaw
+        .from('sil_expediente_orden_dia_apariciones')
+        .select('*')
+        .eq('expediente_id', numero)
+        .order('fecha_sesion', { ascending: false })),
     ]);
 
     // Pedido 16j ("algoritmo Carlos") — corremos el detector de novedades
@@ -148,26 +198,97 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
       });
     }
 
-    // Si el detector no encontró nada vivo, conservamos lo seedeado en
-    // metadata para no mostrar la sección vacía en la demo.
-    const generalEnriched = { ...general } as Record<string, unknown>;
-    if (novedadesDetectadas.length > 0) {
-      const meta = (generalEnriched.metadata ?? {}) as Record<string, unknown>;
-      generalEnriched.metadata = {
-        ...meta,
-        novedades_detectadas: novedadesDetectadas,
-      };
-    }
+    // ── Sprint 2 Track H — Merge tablas dedicadas + fallback metadata jsonb ──
+    //
+    // Política: si la tabla dedicada tiene datos para este expediente, esos
+    // mandan. Si está vacía Y el expediente tiene metadata.<key> seedeada,
+    // ese es el fallback (data demo / pre-migration). Cuando el script
+    // migrate-metadata-to-dedicated.ts corra una vez, las tablas dedicadas
+    // quedan con todos los datos y el fallback puede borrarse.
+    const meta = (general?.metadata ?? {}) as Record<string, any>;
+
+    // Helper para vista de fechas extraídas — la VIEW devuelve filas planas;
+    // el frontend espera shape { vigente: {...}, historial: [...], otras_fechas: {...} }.
+    // Si la tabla 0037 está vacía, usamos `metadata.fechas_extraidas` tal cual.
+    const fechasExtraidas = fechasRes.length > 0
+      ? (() => {
+          const byCampo = Object.fromEntries(fechasRes.map((f: any) => [f.campo, f]));
+          const dictamen = byCampo['fecha_dictamen_estimada'];
+          return {
+            vigente: dictamen ? {
+              campo: dictamen.campo,
+              valor_fecha: dictamen.valor_fecha,
+              valor_texto_original: dictamen.valor_texto_original,
+              visual_marker: dictamen.visual_marker,
+              fuente_documento_url: dictamen.fuente_documento_url,
+              fuente_pagina: dictamen.fuente_pagina,
+              extraction_method: dictamen.extraction_method,
+              extraction_confidence: dictamen.extraction_confidence,
+            } : undefined,
+            historial: [], // historial detallado: 0037 lo soporta pero requiere query separada
+            otras_fechas: {
+              fecha_cuatrienal: byCampo['fecha_cuatrienal']?.valor_fecha,
+              vence_subcomision: byCampo['vence_subcomision']?.valor_fecha,
+            },
+          };
+        })()
+      : (meta.fechas_extraidas ?? null);
+
+    const audiencias = audienciasRes.length > 0
+      ? audienciasRes
+      : (meta.audiencias ?? []);
+
+    const actasComision = actasRes.length > 0
+      ? actasRes
+      : (meta.actas_comision ?? []);
+
+    const consultasSalaConst = salaRes.length > 0
+      ? salaRes.map((r: any) => ({
+          numero_resolucion: r.numero_resolucion,
+          fecha_resolucion: r.fecha_resolucion,
+          fecha_consulta: r.fecha_consulta,
+          decision: r.decision,
+          por_tanto_extracto: r.por_tanto_extracto,
+          magistrados: r.magistrados,
+          voto_completo_url: r.voto_completo_url,
+        }))
+      : (meta.consultas_sala_constitucional ?? []);
+
+    const ordenDiaApariciones = ordenDiaRes.length > 0
+      ? ordenDiaRes
+      : (meta.orden_dia_apariciones ?? []);
+
+    // Novedades: el detector live es la fuente de verdad; metadata es solo
+    // fallback para demo cuando la prod no tiene SharePoint completo cargado.
+    const novedadesFinales = novedadesDetectadas.length > 0
+      ? novedadesDetectadas
+      : (meta.novedades_detectadas ?? []);
 
     res.json({
       ok: true,
       expediente: {
-        general: generalEnriched,
+        general, // metadata sigue presente en general para backward-compat
         tramite: tramiteRes.data ?? [],
         proponentes: proponentesRes.data ?? [],
         consultas: consultasRes.data ?? [],
         ley: leyRes.data ?? null,
         documentos: documentosRes.data ?? [],
+        // Sprint v3 — keys top-level, fuente: tablas dedicadas con fallback metadata
+        fechas_extraidas: fechasExtraidas,
+        audiencias,
+        actas_comision: actasComision,
+        consultas_sala_constitucional: consultasSalaConst,
+        orden_dia_apariciones: ordenDiaApariciones,
+        novedades_detectadas: novedadesFinales,
+        // Diagnóstico de fuente — útil en dev/admin para saber qué se sirvió
+        _source: {
+          fechas: fechasRes.length > 0 ? 'tabla_dedicada' : 'metadata_jsonb',
+          audiencias: audienciasRes.length > 0 ? 'tabla_dedicada' : 'metadata_jsonb',
+          actas: actasRes.length > 0 ? 'tabla_dedicada' : 'metadata_jsonb',
+          sala: salaRes.length > 0 ? 'tabla_dedicada' : 'metadata_jsonb',
+          orden_dia: ordenDiaRes.length > 0 ? 'tabla_dedicada' : 'metadata_jsonb',
+          novedades: novedadesDetectadas.length > 0 ? 'detector_live' : 'metadata_jsonb',
+        },
       },
     });
   } catch (err) {
