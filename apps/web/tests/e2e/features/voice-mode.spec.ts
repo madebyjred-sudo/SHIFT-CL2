@@ -47,31 +47,31 @@ test.describe('@feature @sprint-3 Voice mode UI', () => {
     await page.goto('/');
     await page.waitForLoadState('networkidle', { timeout: 15_000 });
 
-    // El mic button existe en AnimatedAiInput
-    const micButton = page.locator('button[aria-label*="micrófono"], button[aria-label*="voice"], [data-testid="voice-input-button"]').first();
-    if ((await micButton.count()) === 0) {
-      test.skip(true, 'Mic button no localizable — selector necesita data-testid');
-      return;
-    }
+    // El mic button tiene data-testid="voice-input-button" (agregado 2026-05-16
+    // para hacer este test estable).
+    const micButton = page.locator('[data-testid="voice-input-button"]').first();
+    await expect(micButton).toBeVisible({ timeout: 8_000 });
 
-    // Long-press: mousedown → wait 600ms → mouseup
+    // Long-press: pointerdown → wait 600ms → pointerup (el handler usa
+    // onPointerDown/Up, no mouse — diferencia en Playwright)
     const box = await micButton.boundingBox();
-    if (!box) {
-      test.skip(true, 'Mic button no tiene bounding box');
-      return;
-    }
+    if (!box) throw new Error('mic button no tiene bounding box');
 
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-    await page.mouse.down();
+    // Dispatch pointer events directamente (más fiable que mouse)
+    await micButton.dispatchEvent('pointerdown', { pointerType: 'mouse' });
     await page.waitForTimeout(600);
-    await page.mouse.up();
+    await micButton.dispatchEvent('pointerup', { pointerType: 'mouse' });
 
     // El modal debería aparecer
-    const modal = page.locator('[role="dialog"], [data-testid="voice-converse-modal"]').first();
+    const modal = page.locator('[data-testid="voice-converse-modal"]');
     await expect(modal).toBeVisible({ timeout: 3_000 });
 
-    // Botón X cierra
-    const closeBtn = modal.locator('button[aria-label*="cerrar"], button[aria-label*="close"]').first();
+    // Verificar que es full-screen (z-100 + inset-0)
+    const modalClass = await modal.getAttribute('class');
+    expect(modalClass).toMatch(/z-\[100\]|fixed inset-0/);
+
+    // Botón X cierra (aria-label "cerrar" o similar)
+    const closeBtn = modal.locator('button[aria-label*="cerrar" i], button[aria-label*="close" i]').first();
     if ((await closeBtn.count()) > 0) {
       await closeBtn.click();
       await expect(modal).toBeHidden({ timeout: 2_000 });

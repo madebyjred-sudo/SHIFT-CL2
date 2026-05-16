@@ -307,6 +307,7 @@ export function VoiceConverseModal({ open, onClose }: VoiceConverseModalProps): 
         role="dialog"
         aria-modal="true"
         aria-label="Modo voz con Lexa"
+        data-testid="voice-converse-modal"
       >
         {/* Close button */}
         <button

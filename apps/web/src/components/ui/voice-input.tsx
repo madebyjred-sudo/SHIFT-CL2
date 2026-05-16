@@ -283,6 +283,7 @@ export function VoiceInput({
     <div className={cn("flex items-center", className)}>
       <motion.button
         type="button"
+        data-testid="voice-input-button"
         onClick={handleClick}
         onPointerDown={handlePointerDown}
         onPointerUp={handlePointerUp}
