@@ -22,6 +22,11 @@ import { firePeajeIngest } from '../services/peajeClient.js';
 import { getApprovedRag } from '../services/puntoMedioClient.js';
 import { getOverride as getAgentOverride } from '../services/agentOverrides.js';
 import { recordAgentCall } from '../services/agentStats.js';
+import { tryPreLLMDispatch } from '../services/preLLMDispatcher.js';
+
+// Wave 2 post-sample 2026-05-17: doctrine LLM-vs-algoritmo materialized as
+// pre-LLM dispatcher. Disable via env if needed (rollback).
+const PRELLM_DISPATCH_ENABLED = process.env.CEREBRO_PRELLM_DISPATCH_ENABLED !== 'false';
 
 /**
  * Convert an upstream/internal error into a user-friendly Spanish message
@@ -102,6 +107,35 @@ chatRouter.post('/stream', async (req, res) => {
   const send = (chunk: CerebroStreamChunk | { type: string; payload?: unknown }) => {
     res.write(`data: ${JSON.stringify(chunk)}\n\n`);
   };
+
+  // ── Pre-LLM dispatcher (doctrine LLM-vs-algoritmo 2026-05-17) ──
+  // Try to answer algorithmically before paying for an LLM call. Only
+  // triggers on high-confidence pattern matches (e.g. "¿cuántos días
+  // para dictaminar un expediente urgente?"). Falls through to LLM
+  // when no pattern matches.
+  if (PRELLM_DISPATCH_ENABLED) {
+    try {
+      const dispatch = await tryPreLLMDispatch(body.query, body.agent_id);
+      if (dispatch.handled && dispatch.response) {
+        req.log.info('prellm_dispatch_hit', {
+          capability: dispatch.capability_used,
+          rule_id: dispatch.rule_id,
+          latency_ms: dispatch.latency_ms,
+          agent_id: body.agent_id,
+        });
+        // Emit response as a single chunk + close stream cleanly.
+        send({ type: 'meta', payload: { capability: dispatch.capability_used, source: 'prellm_dispatcher' } });
+        send({ type: 'token', payload: dispatch.response });
+        send({ type: 'done', payload: { reason: 'algorithmic_answer', rule_id: dispatch.rule_id } });
+        res.end();
+        return;
+      }
+    } catch (err) {
+      // Dispatcher failure is non-fatal — fall to LLM.
+      req.log.warn('prellm_dispatch_error', { error: (err as Error).message });
+    }
+  }
+
   const agent = getAgent(body.agent_id);
   const deepInsight = body.deep_insight ?? false;
   const modelUsed =
