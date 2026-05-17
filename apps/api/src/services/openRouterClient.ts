@@ -806,11 +806,27 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // Si el user es anónimo (public demo) NO mandamos user_id ni enable_memory
   // — Cerebro acepta requests sin memoria, y el adapter NO requiere realm
   // cuando memoria está off.
+  //
+  // Reasoning flags (H3 plan-cierre 2026-05-17). Gateway shipped:
+  //   - enable_auto_route: routea Haiku para queries triviales, Sonnet
+  //     para complejas. Default ON; flip CL2_AUTO_ROUTE_ENABLED=false
+  //     para forzar el modelo declarado por agent YAML.
+  //   - enable_cove: chain-of-verification para cazar alucinaciones.
+  //     SOLO en deep_insight (= mode=deep_research en plan) — el smoke
+  //     2026-05-17 cazó "RAL" expandiéndose mal a "Reglamento de la
+  //     Administración de Justicia" en lugar de "Reglamento de la
+  //     Asamblea Legislativa". Demasiado caro para chat normal.
+  //   - enable_reflexion: off en runtime; sampled offline al 5% para
+  //     análisis post-deploy. Cerebro decide via reflexion_rate.
   const userEmail = args.user_email ?? null;
   const cerebroExtras = {
     tenant: 'cl2',
     app_id: 'cl2',
     trace_label: `cl2:chat:${args.agent_id}${args.deep_insight ? ':di' : ''}`,
+    enable_auto_route: process.env.CL2_AUTO_ROUTE_ENABLED !== 'false',
+    enable_cove: args.deep_insight === true,
+    enable_reflexion: false,
+    reflexion_rate: 0.05,
     ...(userEmail
       ? { realm: 'cl2', user_id: userEmail, enable_memory: true }
       : {}),
