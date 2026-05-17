@@ -25,6 +25,15 @@ import { generateAndWait, GammaApiError } from '../services/gammaApi.js';
 
 export const workspaceRouter = Router();
 
+// ─── Cerebro Gateway endpoint ─────────────────────────────────────────
+// Weekend Refactor Wave 2 piece (2026-05-17) — Track B-2: close 5
+// workspace.ts bypasses to OpenRouter directo. Toda llamada LLM ahora
+// va por Cerebro `/v1/chat/completions` (OAI-compat) → quota check +
+// usage ledger + cost logging + cache cross-app + PII scrub policy.
+// Bearer = CEREBRO_API_KEY (attribuye al app_id='cl2' en peaje_apps_keys).
+const CEREBRO_BASE = process.env.CEREBRO_BASE_URL ?? 'https://shift-cerebro-production.up.railway.app';
+const CEREBRO_CHAT_URL = `${CEREBRO_BASE}/v1/chat/completions`;
+
 // ─── Supabase singleton ───────────────────────────────────────────────
 let _supa: SupabaseClient | null = null;
 function supa(): SupabaseClient {
@@ -1983,8 +1992,8 @@ workspaceRouter.post('/:id/transform', async (req, res) => {
   if (!(action in TRANSFORM_SYSTEMS)) { res.status(400).json({ ok: false, error: 'invalid_action' }); return; }
   if (action === 'custom' && !instruction) { res.status(400).json({ ok: false, error: 'instruction_required' }); return; }
 
-  const orKey = process.env.OPENROUTER_API_KEY;
-  if (!orKey) { res.status(500).json({ ok: false, error: 'openrouter_not_configured' }); return; }
+  const cerebroKey = process.env.CEREBRO_API_KEY;
+  if (!cerebroKey) { res.status(500).json({ ok: false, error: 'cerebro_not_configured' }); return; }
 
   // Daily quota — workspace.* prefix shares the cap with architect/turn.
   if ((await requireQuota(userId, 'workspace.transform', res)) === 'denied') return;
@@ -2008,11 +2017,11 @@ workspaceRouter.post('/:id/transform', async (req, res) => {
 
   try {
     const t0 = Date.now();
-    const upstream = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    const upstream = await fetch(CEREBRO_CHAT_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${orKey}`,
+        'Authorization': `Bearer ${cerebroKey}`,
         'HTTP-Referer': 'https://cl2.shift.ai',
         'X-Title': 'CL2 - Hoja Transform',
       },
@@ -2176,8 +2185,8 @@ async function runArchitect(workspaceId: string, prompt: string): Promise<{
   summary: string;
   ms: number;
 }> {
-  const orKey = process.env.OPENROUTER_API_KEY;
-  if (!orKey) throw new Error('openrouter_not_configured');
+  const cerebroKey = process.env.CEREBRO_API_KEY;
+  if (!cerebroKey) throw new Error('cerebro_not_configured');
 
   // ── Pre-fetch SIL data (Option A — anti-hallucination) ──────────────
   // If the user mentioned expediente numbers in their prompt, look them up
@@ -2238,11 +2247,11 @@ async function runArchitect(workspaceId: string, prompt: string): Promise<{
 
   // Call OpenRouter — non-streaming, JSON mode.
   const t0 = Date.now();
-  const upstream = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+  const upstream = await fetch(CEREBRO_CHAT_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${orKey}`,
+      'Authorization': `Bearer ${cerebroKey}`,
       'HTTP-Referer': 'https://cl2.shift.ai',
       'X-Title': 'CL2 - Hojas Arquitecta',
     },
@@ -2353,8 +2362,8 @@ workspaceRouter.post('/:id/architect', async (req, res) => {
   if ((await requireQuota(userId, 'workspace.architect', res)) === 'denied') return;
   void logAiCall(userId, 'workspace.architect', { prompt_len: prompt.length });
 
-  const orKey = process.env.OPENROUTER_API_KEY;
-  if (!orKey) { res.status(500).json({ ok: false, error: 'openrouter_not_configured' }); return; }
+  const cerebroKey = process.env.CEREBRO_API_KEY;
+  if (!cerebroKey) { res.status(500).json({ ok: false, error: 'cerebro_not_configured' }); return; }
 
   try {
     const result = await runArchitect(id, prompt);
@@ -2440,8 +2449,8 @@ workspaceRouter.post('/:id/turn', async (req, res) => {
   const { id } = req.params;
   if (!await ownedWorkspace(userId, id, res)) return;
 
-  const orKey = process.env.OPENROUTER_API_KEY;
-  if (!orKey) { res.status(500).json({ ok: false, error: 'openrouter_not_configured' }); return; }
+  const cerebroKey = process.env.CEREBRO_API_KEY;
+  if (!cerebroKey) { res.status(500).json({ ok: false, error: 'cerebro_not_configured' }); return; }
 
   const query: string         = String(req.body?.query ?? '').trim();
   const mode: string          = String(req.body?.mode ?? 'auto');
@@ -2532,11 +2541,11 @@ NO incluyas prosa. Solo el objeto JSON.`;
     ].join('\n');
 
     try {
-      const clf = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      const clf = await fetch(CEREBRO_CHAT_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${orKey}`,
+          'Authorization': `Bearer ${cerebroKey}`,
           'HTTP-Referer': 'https://cl2.shift.ai',
           'X-Title': 'CL2 - Turn Classifier',
         },
@@ -2854,11 +2863,11 @@ NO incluyas prosa. Solo el objeto JSON.`;
 
     try {
       const t0 = Date.now();
-      const upstream = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      const upstream = await fetch(CEREBRO_CHAT_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${orKey}`,
+          'Authorization': `Bearer ${cerebroKey}`,
           'HTTP-Referer': 'https://cl2.shift.ai',
           'X-Title': 'CL2 - Turn Edit Selected',
         },
@@ -2925,11 +2934,11 @@ NO incluyas prosa. Solo el objeto JSON.`;
 
     try {
       const t0 = Date.now();
-      const upstream = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      const upstream = await fetch(CEREBRO_CHAT_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${orKey}`,
+          'Authorization': `Bearer ${cerebroKey}`,
           'HTTP-Referer': 'https://cl2.shift.ai',
           'X-Title': 'CL2 - Turn Edit By Match',
         },
