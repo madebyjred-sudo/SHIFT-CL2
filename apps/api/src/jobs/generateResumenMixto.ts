@@ -81,7 +81,8 @@ const BATCH_SIZE = 5; // resumen tarda más → menos paralelo
 const OR_TIMEOUT_MS = 120_000; // 2 min, narrativa larga
 const OR_RETRY_ATTEMPTS = 2;
 const OR_RETRY_BASE_MS = 1000;
-const OR_BASE = 'https://openrouter.ai/api/v1';
+// Wave 2 piece 3 (2026-05-17): Cerebro Gateway route. Was openrouter.ai/api/v1.
+const OR_BASE = (process.env.CEREBRO_BASE_URL ?? 'https://shift-cerebro-production.up.railway.app') + '/v1';
 const MAX_OUTPUT_TOKENS = 1200;
 
 // ── Supabase lazy client ─────────────────────────────────────────────────────
@@ -207,8 +208,8 @@ async function defaultLlmCall(args: {
   userPrompt: string;
   model: string;
 }): Promise<{ content: string; tokens_in: number; tokens_out: number }> {
-  const orKey = process.env.OPENROUTER_API_KEY ?? '';
-  if (!orKey) throw new Error('OPENROUTER_API_KEY not set');
+  const orKey = process.env.CEREBRO_API_KEY ?? '';
+  if (!orKey) throw new Error('CEREBRO_API_KEY not set');
 
   return withRetry(
     async () => {

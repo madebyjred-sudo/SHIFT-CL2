@@ -285,8 +285,8 @@ async function runLlmReview(
   segments: Array<{ id: string; segment_idx: number; start_seconds: number; end_seconds: number; text: string }>,
   opts: { model: string; timeoutMs: number },
 ): Promise<{ llm_run_id: string; corrections_inserted: number }> {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) throw new Error('OPENROUTER_API_KEY not set');
+  const apiKey = process.env.CEREBRO_API_KEY;
+  if (!apiKey) throw new Error('CEREBRO_API_KEY not set');
 
   const llm_run_id = randomUUID();
   const label = `transcript:review:${session.id}`;

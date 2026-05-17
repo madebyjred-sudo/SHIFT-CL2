@@ -62,8 +62,8 @@ export interface ScriptArgs {
  * generation costs real OpenRouter credits, so we don't auto-retry).
  */
 export async function generatePodcastScript(args: ScriptArgs): Promise<PodcastScript> {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) throw new Error('OPENROUTER_API_KEY not set');
+  const apiKey = process.env.CEREBRO_API_KEY;
+  if (!apiKey) throw new Error('CEREBRO_API_KEY not set');
 
   const lexa = getAgent('lexa');
   if (!lexa) throw new Error('lexa agent not found');
@@ -303,8 +303,8 @@ const ENHANCE_MAX_LEN = 140;
 const ENHANCE_MODEL = process.env.PODCAST_ENHANCE_MODEL ?? 'deepseek/deepseek-v4-flash';
 
 export async function enhancePodcastPrompt(rawPrompt: string): Promise<string> {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) throw new Error('OPENROUTER_API_KEY not set');
+  const apiKey = process.env.CEREBRO_API_KEY;
+  if (!apiKey) throw new Error('CEREBRO_API_KEY not set');
 
   const trimmed = rawPrompt.replace(/\s+/g, ' ').trim().slice(0, ENHANCE_MAX_LEN);
   if (!trimmed) throw new Error('empty prompt');

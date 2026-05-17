@@ -136,8 +136,8 @@ interface GenerateArgs {
   options?: AssetGenerationOptions;
 }
 
-// ─── OpenRouter call (same pattern as runArchitect; non-streaming JSON mode) ─
-const OR_BASE = 'https://openrouter.ai/api/v1';
+// ─── Cerebro Gateway call (Wave 2 piece 3 2026-05-17; was openrouter.ai/api/v1) ─
+const OR_BASE = (process.env.CEREBRO_BASE_URL ?? 'https://shift-cerebro-production.up.railway.app') + '/v1';
 const OR_TIMEOUT_MS = 90_000;
 const OR_RETRY_ATTEMPTS = 2;
 const OR_RETRY_BASE_MS = 800;
@@ -387,8 +387,8 @@ async function callOpenRouterJson(args: {
   userPrompt: string;
   model?: string;
 }): Promise<string> {
-  const orKey = process.env.OPENROUTER_API_KEY ?? '';
-  if (!orKey) throw new Error('OPENROUTER_API_KEY not set');
+  const orKey = process.env.CEREBRO_API_KEY ?? '';
+  if (!orKey) throw new Error('CEREBRO_API_KEY not set');
 
   return withRetry(async () => {
     const res = await withTimeout(
