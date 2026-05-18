@@ -34,6 +34,10 @@ type MockResult = { data: unknown; error: unknown };
 // Tracks what .insert() was called with so tests can assert on it
 const _insertCalls: unknown[] = [];
 let _selectResult: MockResult = { data: [], error: null };
+// `_dedupResult` controls what isDuplicateByFechaTipoTitle sees — separate
+// from `_selectResult` (which fetchExistingVideoIds uses) so a test can have
+// "vid002 already exists by video_id" without breaking the title-dedup path.
+let _dedupResult: MockResult = { data: [], error: null };
 let _insertResult: MockResult = { data: [{ id: 'new-session-uuid' }], error: null };
 
 vi.mock('@supabase/supabase-js', () => {
@@ -41,20 +45,42 @@ vi.mock('@supabase/supabase-js', () => {
     // The supabase query builder is a fluent chain. We build a proxy that
     // returns itself for every method except the terminal ones (.single(),
     // implicit awaits) that resolve with data/error.
+    // Track which query path is being built so the thenable can resolve to
+    // the right mock data set. `dedup` is for queries that filter by metadata
+    // jsonb path (isDuplicateByFechaTipoTitle, refreshZeroDurationsRecent);
+    // `list` is the default for fetchExistingVideoIds. `.from()` resets the
+    // intent so consecutive queries on the same shared chain don't bleed.
+    let intent: 'list' | 'dedup' = 'list';
     const chain: Record<string, (...args: unknown[]) => unknown> = {
-      from:   () => chain,
+      from:   () => { intent = 'list'; return chain; },
       select: () => chain,
       insert: (row: unknown) => {
         _insertCalls.push(row);
         return chain;
       },
+      update: () => chain,
       in:     () => chain,
+      eq:     () => chain,
+      neq:    () => chain,
+      gte:    () => chain,
+      lte:    () => chain,
+      not:    () => chain,
+      is:     () => chain,
+      // `.filter()` is only used by dedup + refreshZero queries (metadata->>jsonb path).
+      filter: () => { intent = 'dedup'; return chain; },
+      limit:  () => chain,
+      order:  () => chain,
       single: () => Promise.resolve(_insertResult),
-      // Make the chain itself thenable (for await supa().from(...).select(...).in(...))
-      then:   (...args: unknown[]) =>
-                Promise.resolve(_selectResult).then(args[0] as Parameters<Promise<MockResult>['then']>[0]),
-      catch:  (...args: unknown[]) =>
-                Promise.resolve(_selectResult).catch(args[0] as Parameters<Promise<MockResult>['catch']>[0]),
+      // Make the chain itself thenable. Route to _dedupResult when filter()
+      // was called, otherwise to _selectResult.
+      then:   (...args: unknown[]) => {
+        const result = intent === 'dedup' ? _dedupResult : _selectResult;
+        return Promise.resolve(result).then(args[0] as Parameters<Promise<MockResult>['then']>[0]);
+      },
+      catch:  (...args: unknown[]) => {
+        const result = intent === 'dedup' ? _dedupResult : _selectResult;
+        return Promise.resolve(result).catch(args[0] as Parameters<Promise<MockResult>['catch']>[0]);
+      },
       ...overrides,
     };
     return chain;
@@ -88,7 +114,12 @@ import { syncYoutubeChannel, _parseTitleMeta, _channelIdCache, parseIsoDurationT
  * We use videoPublishedAt for the "publishedAt" field in the normalised
  * VideoMeta, so this fixture sets both to the same value for simplicity.
  */
-function makeVideo(videoId: string, title: string, publishedAt = '2026-04-24T10:00:00Z') {
+// Default publishedAt is "yesterday" — keeps tests inside the 7-day discovery
+// window regardless of when the suite runs. Hard-coded 2026-04 dates fell out
+// of the window when run weeks after they were written.
+const RECENT_PUBLISHED_AT = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+
+function makeVideo(videoId: string, title: string, publishedAt = RECENT_PUBLISHED_AT) {
   return {
     snippet: {
       publishedAt,
@@ -241,10 +272,12 @@ describe('syncYoutubeChannel', () => {
   });
 
   // ── Test 2: Title parse failure → inserts with parsed:null ──────────────────
-  it('inserts with metadata.parsed=null when title cannot be parsed, errors counter NOT incremented', async () => {
-    // A title that matches none of our regex patterns
+  it('inserts with metadata.parsed=null when title matches filter but date cannot be parsed, errors counter NOT incremented', async () => {
+    // Title matches `isLegislativeSession` (has "Sesión Plenaria") so it
+    // survives the filter, but lacks a parseable date → metadata.parsed=null.
+    // Verifica que parse-fail interno ≠ skip-by-filter.
     const videos = [
-      makeVideo('vid999', 'Transmisión en vivo - evento especial'),
+      makeVideo('vid999', 'Sesión Plenaria — evento especial sin fecha clara'),
     ];
 
     _selectResult = { data: [], error: null };
@@ -268,12 +301,17 @@ describe('syncYoutubeChannel', () => {
     expect(inserted.youtube_video_id).toBe('vid999');
     expect(inserted.status).toBe('pending');
     expect(inserted.source).toBe('youtube');
+    // "Sesión Plenaria" matches the filter, so tipo gets classified as 'plenario'
+    // (parseTipoFromTitle is more permissive than the discovery filter).
+    expect(inserted.tipo).toBe('plenario');
+    // But the date is unparseable, so fecha+comision stay null.
     expect(inserted.fecha).toBeNull();
     expect(inserted.comision).toBeNull();
-    expect(inserted.tipo).toBeNull();
     const metadata = inserted.metadata as Record<string, unknown>;
-    expect(metadata.raw_title).toBe('Transmisión en vivo - evento especial');
-    expect(metadata.parsed).toBeNull();
+    expect(metadata.raw_title).toBe('Sesión Plenaria — evento especial sin fecha clara');
+    // parsed is non-null because tipo was extracted (truthy) — schema reflects
+    // partial success.
+    expect(metadata.parsed).not.toBeNull();
   });
 
   // ── Test 3: Title parse failure increments errors only on DB failure ─────────

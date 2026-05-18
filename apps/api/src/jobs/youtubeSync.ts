@@ -175,6 +175,61 @@ interface ParsedTitleMeta {
   sesion_num: number | null;  // N° extracted from title, if present
 }
 
+// ── Legislative-session title filter ─────────────────────────────────────────
+//
+// El canal @AsambleaCRC publica TODO: plenarios, comisiones, noticias,
+// entrevistas, traspasos, curiosidades. Si dejamos pasar todo, el listado
+// `/sesiones` se llena de ruido (verificado 2026-05-18: 108 noticias entraron
+// como `tipo=NULL` y se mezclaron con plenarios reales).
+//
+// Esta lista de regex acepta SOLO sesiones legislativas legítimas. Si un título
+// no matchea ninguno, lo descartamos al ingest. Lo elegimos como whitelist
+// estricta (no blacklist) porque el set de tipos noticia es abierto: hoy son
+// "Curiosidades", mañana puede ser cualquier otro formato editorial.
+//
+// Los patrones son intencionalmente permisivos en mayúsculas/tildes y orden de
+// palabras, pero EXIGEN palabras-ancla que sólo aparecen en sesiones:
+//   - Plenario: "Plenario Legislativo" o "Sesión Plenaria" (formato viejo CR
+//     todavía usado) o "Sesión {Ordinaria|Extraordinaria|Solemne}"
+//   - Comisión: "Comisión {Permanente|Especial|Plena|Investigadora|Mixta|
+//     Ordinaria|de|sobre|para}" — exige qualifier directo para evitar
+//     "Anuncian integración de las 3 Comisiones..." (noticia)
+//   - "Sesión Legislativa" como catch-all suave
+//
+// Cualquier título sin esos anchors va a `youtube_skip_non_session` log y no
+// llega a la tabla `sessions`.
+const PLENARIO_TITLE_RE        = /\b(?:plenario\s+legislativo|sesi[oó]n\s+plenaria)\b/i;
+const SESION_TIPO_RE           = /\bsesi[oó]n\s+(?:ordinaria|extraordinaria|solemne|legislativa)\b/i;
+const COMISION_TITLE_RE        = /\bcomisi[oó]n\s+(?:permanente|especial|plena|investigadora|mixta|ordinaria|de\b|sobre\b|para\b)/i;
+
+/**
+ * True if `title` matches a known legislative-session pattern.
+ *
+ * Whitelist by design: we'd rather miss an occasional session with an unusual
+ * title (re-runnable: edit the regex and re-discover) than admit hundreds of
+ * news/event uploads as sessions.
+ *
+ * Validated 2026-05-18 against 258 filas prod:
+ *   - Acepta: "Plenario Legislativo, Sesión Ordinaria #10, …" (formato actual),
+ *     "Sesión Plenaria N°47 - …" (formato viejo CR), "Comisión Permanente
+ *     Ordinaria de Asuntos Económicos", "Comisión Especial de la Provincia de
+ *     Puntarenas", "Comisión de Hacienda".
+ *   - Rechaza: "Asamblea Legislativa Noticias …", "Anuncian integración de las
+ *     3 Comisiones …", "Costa Rica escribe una nueva página política …",
+ *     "Curiosidades de la Asamblea …", "Entrevista a/con …", "Transmisión
+ *     especial: Traspaso de Poderes".
+ *
+ * Exported for unit testing.
+ */
+export function isLegislativeSession(title: string): boolean {
+  if (!title) return false;
+  return (
+    PLENARIO_TITLE_RE.test(title) ||
+    SESION_TIPO_RE.test(title) ||
+    COMISION_TITLE_RE.test(title)
+  );
+}
+
 // ── Title parsing ─────────────────────────────────────────────────────────────
 
 // Spanish month names → zero-padded month number.
@@ -569,6 +624,120 @@ async function fetchExistingVideoIds(videoIds: string[]): Promise<Set<string>> {
 }
 
 /**
+ * Check if a session with the same (fecha, tipo, raw_title) already exists.
+ *
+ * Caso de uso: YouTube sube DOS videos para la misma sesión real — uno como
+ * livestream (con duration_seconds eventualmente correcto) y otro como upload
+ * recortado/post-procesado (a veces con dur=0 o dur menor). El dedup por
+ * `youtube_video_id` no caza estos casos porque los IDs son distintos.
+ *
+ * Estrategia: si ya hay una fila con misma fecha + tipo + raw_title en
+ * `sessions` (cualquier status excepto rejected), descartamos el video nuevo.
+ * Mantenemos la fila vieja porque generalmente ya tiene transcript_segments
+ * indexados; reemplazarla rompería la cadena.
+ *
+ * Si parsed.fecha o parsed.tipo es null, retornamos false (no dedup posible
+ * sin esos campos — caería al fallback de inserción + filtro de tipo NULL).
+ */
+async function isDuplicateByFechaTipoTitle(
+  fecha: string | null,
+  tipo: 'plenario' | 'comision' | 'extraordinaria' | null,
+  rawTitle: string,
+): Promise<boolean> {
+  if (!fecha || !tipo || !rawTitle) return false;
+
+  const { data, error } = await supa()
+    .from('sessions')
+    .select('id, status')
+    .eq('fecha', fecha)
+    .eq('tipo', tipo)
+    .neq('status', 'rejected')
+    .filter('metadata->>raw_title', 'eq', rawTitle)
+    .limit(1);
+
+  if (error) {
+    // No queremos romper el sync por un error de query — logueamos y
+    // permitimos el insert (si hay duplicado real lo cazará el siguiente run).
+    logger.warn('youtube_sync_dedup_query_failed', {
+      fecha,
+      tipo,
+      error: error.message,
+    });
+    return false;
+  }
+
+  return (data ?? []).length > 0;
+}
+
+/**
+ * Re-fetch duration from YouTube for sessions creadas en últimas 48h con
+ * `metadata.duration_seconds = 0`.
+ *
+ * Caso: cuando el cron corre justo después de un livestream, YouTube todavía
+ * devuelve `contentDetails.duration = "P0D"` y nuestro `parseIsoDurationToSeconds`
+ * devuelve 0. La duración real aparece minutos/horas después. Sin este refresh,
+ * `duration_seconds = 0` queda permanente y el frontend muestra "0 mins".
+ *
+ * Ventana de 48h: cubre el típico delay de YouTube en publicar la duración
+ * (que suele resolverse en <12h pero hemos visto casos a >24h en plenarios
+ * largos). Más allá de 48h asumimos que el video se quedó así por una razón
+ * estructural (ej. todavía es livestream activo) y no insistimos.
+ *
+ * Costo: 1 quota unit por batch de 50 IDs. Si hay 0 candidatos, no se llama
+ * a YouTube.
+ */
+async function refreshZeroDurationsRecent(apiKey: string): Promise<void> {
+  const cutoff = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
+
+  const { data, error } = await supa()
+    .from('sessions')
+    .select('id, youtube_video_id, metadata')
+    .gte('created_at', cutoff)
+    .not('youtube_video_id', 'is', null)
+    .filter('metadata->>duration_seconds', 'eq', '0');
+
+  if (error) {
+    logger.warn('youtube_sync_refresh_zero_dur_query_failed', { error: error.message });
+    return;
+  }
+
+  type Row = { id: string; youtube_video_id: string; metadata: Record<string, unknown> | null };
+  const candidates = (data ?? []) as Row[];
+  if (candidates.length === 0) {
+    logger.info('youtube_sync_refresh_zero_dur_no_candidates', {});
+    return;
+  }
+
+  const videoIds = candidates.map((c) => c.youtube_video_id);
+  const durationMap = await fetchVideoDurations(videoIds, apiKey);
+
+  let updated = 0;
+  for (const c of candidates) {
+    const secs = durationMap.get(c.youtube_video_id);
+    if (!secs || secs <= 0) continue;
+    const newMeta = { ...(c.metadata ?? {}), duration_seconds: secs };
+    const { error: upErr } = await supa()
+      .from('sessions')
+      .update({ metadata: newMeta })
+      .eq('id', c.id);
+    if (upErr) {
+      logger.warn('youtube_sync_refresh_zero_dur_update_failed', {
+        sessionId: c.id,
+        videoId: c.youtube_video_id,
+        error: upErr.message,
+      });
+      continue;
+    }
+    updated++;
+  }
+
+  logger.info('youtube_sync_refresh_zero_dur_complete', {
+    candidates: candidates.length,
+    updated,
+  });
+}
+
+/**
  * Insert a new session row for a YouTube video.
  *
  * Structure follows the spec:
@@ -669,6 +838,20 @@ export async function syncYoutubeChannel(opts?: {
   // This prevents drift: a job running at 3am vs 11pm doesn't differ in coverage.
   publishedAfter.setUTCHours(0, 0, 0, 0);
 
+  // ── 3b. Refresh duration_seconds=0 en sesiones recientes (livestreams) ──────
+  // YouTube devuelve `contentDetails.duration = "P0D"` mientras un livestream
+  // está activo o recién terminado, así que muchas sesiones quedan con
+  // duration_seconds=0. Al inicio de cada corrida, re-consultamos YouTube para
+  // las creadas en las últimas 48h y actualizamos cuando ya tiene duración real.
+  // Esto es independiente del discovery — corre antes para refrescar lo que ya
+  // está en DB.
+  await refreshZeroDurationsRecent(apiKey).catch((err) => {
+    // Non-fatal: no rompemos el sync si esto falla. Logueamos y seguimos.
+    logger.warn('youtube_sync_refresh_zero_durations_failed', {
+      error: (err as Error)?.message ?? String(err),
+    });
+  });
+
   // ── 4. List recent uploads via playlistItems.list ───────────────────────────
   const videos = await listChannelUploads(channelId, publishedAfter, apiKey);
   const found = videos.length;
@@ -678,21 +861,72 @@ export async function syncYoutubeChannel(opts?: {
     return { found: 0, new: 0, skipped: 0, errors: 0, videoIds: { new: [], skipped: [], errored: [] } };
   }
 
+  // ── 4a. Filtrar por título: SOLO sesiones legislativas ───────────────────────
+  // Cualquier upload que no matchee `isLegislativeSession()` se descarta acá
+  // (noticias, entrevistas, traspasos, curiosidades). Logueamos cada descarte
+  // para auditoría — si el filtro se vuelve demasiado estricto y descarta una
+  // sesión real, vamos a verlo en los logs y ajustar el regex.
+  const filteredVideos: VideoMeta[] = [];
+  const skippedNonSession: Array<{ videoId: string; title: string }> = [];
+  for (const v of videos) {
+    if (isLegislativeSession(v.title)) {
+      filteredVideos.push(v);
+    } else {
+      skippedNonSession.push({ videoId: v.videoId, title: v.title });
+      logger.info('youtube_skip_non_session', { videoId: v.videoId, title: v.title });
+    }
+  }
+  if (skippedNonSession.length > 0) {
+    logger.info('youtube_sync_filter_summary', {
+      total: videos.length,
+      kept: filteredVideos.length,
+      skipped_non_session: skippedNonSession.length,
+    });
+  }
+
   // ── 4b. Fetch video durations via videos.list?part=contentDetails ────────────
   // Cost: 1 quota unit (negligible). Must be called before the diff so the map
   // is available when constructing each new session's metadata.
-  const allVideoIds = videos.map((v) => v.videoId);
+  const allVideoIds = filteredVideos.map((v) => v.videoId);
   const durationMap = await fetchVideoDurations(allVideoIds, apiKey);
 
   // ── 5. Diff against existing sessions ───────────────────────────────────────
+  // Doble dedup:
+  //  - por youtube_video_id (caso normal: re-run del cron sobre el mismo video)
+  //  - por (fecha + tipo + raw_title) (caso live+recorte: YouTube sube 2 videos
+  //    distintos para la misma sesión real, uno como live stream y otro como
+  //    upload recortado — dedup por video_id no los caza)
   const existingIds = await fetchExistingVideoIds(allVideoIds);
 
-  const toInsert = videos.filter((v) => !existingIds.has(v.videoId));
-  const skippedIds = allVideoIds.filter((id) => existingIds.has(id));
+  const duplicateByTitle: VideoMeta[] = [];
+  const toInsert: VideoMeta[] = [];
+  for (const v of filteredVideos) {
+    if (existingIds.has(v.videoId)) continue; // YA cuenta como skip por video_id
+    const parsedForDedup = parseTitleMeta(v.title);
+    const isDup = await isDuplicateByFechaTipoTitle(parsedForDedup.fecha, parsedForDedup.tipo, v.title);
+    if (isDup) {
+      duplicateByTitle.push(v);
+      logger.info('youtube_dedup_skip_by_title', {
+        videoId: v.videoId,
+        title: v.title,
+        fecha: parsedForDedup.fecha,
+        tipo: parsedForDedup.tipo,
+      });
+      continue;
+    }
+    toInsert.push(v);
+  }
+
+  const skippedIds = [
+    ...filteredVideos.filter((v) => existingIds.has(v.videoId)).map((v) => v.videoId),
+    ...duplicateByTitle.map((v) => v.videoId),
+  ];
 
   logger.info('youtube_sync_diff', {
     found,
-    existing: existingIds.size,
+    filtered_out: skippedNonSession.length,
+    existing_by_video_id: existingIds.size,
+    duplicate_by_title: duplicateByTitle.length,
     toInsert: toInsert.length,
   });
 
@@ -771,4 +1005,9 @@ export async function syncYoutubeChannel(opts?: {
 // These internal functions are exported for unit testing only. They are NOT
 // part of the stable public API. The `_` prefix signals this convention.
 // Callers outside tests should use syncYoutubeChannel only.
-export { parseTitleMeta as _parseTitleMeta, _channelIdCache };
+export {
+  parseTitleMeta as _parseTitleMeta,
+  _channelIdCache,
+  isDuplicateByFechaTipoTitle as _isDuplicateByFechaTipoTitle,
+  refreshZeroDurationsRecent as _refreshZeroDurationsRecent,
+};
