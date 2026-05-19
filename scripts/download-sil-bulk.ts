@@ -268,10 +268,17 @@ async function fetchTargets(): Promise<ExpRow[]> {
 }
 
 async function alreadyHasDocs(expedienteId: number): Promise<boolean> {
+  // Solo contamos docs "útiles" — los que tienen texto extraído. Los que
+  // están stuck en status='parsed' con text_chars=0 son PDFs que fallaron
+  // la extracción (escaneados sin OCR, encriptados, corruptos). Los
+  // tratamos como "no tiene docs" para que el bulk los re-intente con OCR
+  // en una nueva corrida. Caso real: exp 25.591 quedó en parsed/text=0
+  // desde 2026-05-12 y bloqueaba un slot del top-20 cada corrida.
   const { count } = await supa
     .from('sil_documentos')
     .select('id', { count: 'exact', head: true })
-    .eq('expediente_id', expedienteId);
+    .eq('expediente_id', expedienteId)
+    .gt('text_chars', 0);
   return (count ?? 0) > 0;
 }
 
@@ -306,9 +313,36 @@ async function processExpediente(exp: ExpRow, stats: Stats): Promise<void> {
   }
 
   try {
-    const r1 = await searchByNumber(session, exp.id);
+    let r1 = await searchByNumber(session, exp.id);
     session = r1.session;
-    if (!r1.detail) { stats.skipped += 1; return; }
+
+    // Retry path: el índice de búsqueda del SIL a veces no surface
+    // expedientes recientes (caso confirmado 2026-05-18: 25.593-25.597
+    // recién insertados por silDiscovery NO aparecían en search inmediato,
+    // a pesar de tener detail page funcional). Ante un null detail,
+    // refrescamos sesión y reintentamos UNA vez antes de skipear.
+    if (!r1.detail) {
+      console.warn(`[exp ${exp.numero}] search returned no detail — retrying with fresh session`);
+      try {
+        const fresh = await createSession();
+        const r1b = await searchByNumber(fresh, exp.id);
+        session = r1b.session;
+        if (r1b.detail) {
+          r1 = r1b;
+        }
+      } catch (retryErr) {
+        console.warn(`[exp ${exp.numero}] retry search failed: ${(retryErr as Error).message}`);
+      }
+    }
+
+    if (!r1.detail) {
+      // Después del retry sigue vacío — marcamos como skip y logueamos
+      // (antes era silent, escondía expedientes nuevos atrapados en el
+      // gap entre detail page disponible y search index actualizado).
+      stats.skipped += 1;
+      console.warn(`[exp ${exp.numero}] skipped: SIL search returned no detail (search index lag)`);
+      return;
+    }
 
     const r2 = await selectExpedienteDetail(session, exp.id);
     session = r2.session;
@@ -499,7 +533,11 @@ async function processExpediente(exp: ExpRow, stats: Stats): Promise<void> {
     if (stats.expedientes_processed % 10 === 0) forceGc();
   } catch (err) {
     stats.errors += 1;
-    console.warn(`[exp ${exp.numero}] fatal: ${(err as Error).message}`);
+    const msg = (err as Error).message ?? String(err);
+    console.warn(`[exp ${exp.numero}] fatal: ${msg}`);
+    // Continuamos al siguiente — el driver loop ya consume el next del queue
+    // sin que un fatal de UN expediente bote el batch entero. Confirmado en
+    // log 2026-05-18: 25.587 con 500 en search no debe bloquear 25.593-25.597.
   }
 }
 
