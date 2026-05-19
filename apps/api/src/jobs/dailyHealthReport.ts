@@ -96,7 +96,11 @@ function supa(): SupabaseClient {
 // ── Helpers ───────────────────────────────────────────────────────────
 
 async function rowCount(table: string, filter?: (q: any) => any): Promise<number> {
-  let q = supa().from(table).select('id', { count: 'exact', head: true });
+  // Usamos '*' como el column expression para count(*) porque algunas tablas
+  // tienen primary key compuesto (e.g. sil_expediente_proponentes con
+  // (expediente_id, firma_orden) — no hay columna 'id'). PostgREST acepta
+  // '*' como atajo a count(*) sin importar el schema.
+  let q = supa().from(table).select('*', { count: 'exact', head: true });
   if (filter) q = filter(q);
   const { count, error } = await q;
   if (error) {
@@ -174,21 +178,25 @@ export async function runDailyHealthReport(): Promise<DailyHealthResult> {
   const legislativeChunks: number | null = null;
 
   // ── Freshness en paralelo ───────────────────────────────────────
+  // sil_expediente_proponentes no tiene timestamp column — la usabamos via
+  // PK pero PK es text (e.g. "25.432") y el sort DESC daba "97" que rompía
+  // el insert al timestamptz. Mejor dejar null aquí; el "último update" de
+  // proponentes en realidad está en sil_expedientes.scraped_at (el cron de
+  // enrich actualiza ambos juntos).
   const [
     silExpScrape,
     silDocCreate,
-    silPropUpdate,
     sessCreate,
     segCreate,
     cenEvDetect,
   ] = await Promise.all([
     lastTimestamp('sil_expedientes', 'scraped_at'),
     lastTimestamp('sil_documentos', 'created_at'),
-    lastTimestamp('sil_expediente_proponentes', 'expediente_id'), // PK como proxy (no hay updated_at)
     lastTimestamp('sessions', 'created_at'),
     lastTimestamp('transcript_segments', 'created_at'),
     lastTimestamp('centinela_eventos', 'detected_at'),
   ]);
+  const silPropUpdate: string | null = silExpScrape; // proxy: enrich update sil_exp + proponentes juntas
 
   const snapshot: HealthSnapshot = {
     taken_at: new Date().toISOString(),
