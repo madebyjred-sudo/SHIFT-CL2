@@ -41,6 +41,8 @@ import {
   type ExpedienteEnriched,
   type ProponenteFirmante,
 } from '../services/silWebFormsClient.js';
+import { findAdministracionByDate } from '../services/costaRicaAdministraciones.js';
+import { findDiputado } from '../services/diputadosLookup.js';
 import { parseOrdenDia } from '../services/ordenDiaSectionParser.js';
 import { logger } from '../services/logger.js';
 
@@ -67,37 +69,73 @@ export interface EnrichResult {
 /**
  * Persiste el set de firmantes del expediente.
  *
- * Acepta tanto la forma rica (`ProponenteFirmante[]` con apellidos +
- * nombre + administracion + fraccion) como la legacy (`string[]` con
- * apellidos solamente). Cuando viene la rica, persiste todos los campos.
+ * Acepta `ProponenteFirmante[]` (apellidos + nombre + administracion +
+ * fraccion). Para iniciativas del Poder Ejecutivo el SIL solo serializa
+ * "PODER" en apellidos — sin admin, sin fecha. Si pasamos
+ * `fechaPresentacion`, derivamos la administración correspondiente del
+ * mapping local de presidentes CR (`costaRicaAdministraciones.ts`).
  *
  * Antes del fix 2026-05-18 esta función recibía solo `string[]` y dejaba
  * administracion y fraccion siempre null — bug confirmado en prod sobre
  * 322 expedientes con rows pero 0 con admin/fraccion populados.
  */
-function persistProponentes(
+async function persistProponentes(
   s: SupabaseClient,
   expedienteId: string,
   proponentesFull: ProponenteFirmante[],
+  fechaPresentacion: string | null,
 ): Promise<{ count: number }> {
-  return (async () => {
-    // Borrar set existente para idempotencia
-    await s.from('sil_expediente_proponentes').delete().eq('expediente_id', expedienteId);
-    if (proponentesFull.length === 0) return { count: 0 };
-    const rows = proponentesFull.map((p, idx) => ({
+  // Borrar set existente para idempotencia
+  await s.from('sil_expediente_proponentes').delete().eq('expediente_id', expedienteId);
+  if (proponentesFull.length === 0) return { count: 0 };
+
+  // Mapping local de presidentes CR — para los casos Poder Ejecutivo donde
+  // el SIL solo dice "PODER".
+  const adminMatch = fechaPresentacion ? findAdministracionByDate(fechaPresentacion) : null;
+
+  // Resolver cada firmante en paralelo contra el catálogo `diputados`
+  // (cache in-memory en diputadosLookup, sin pegadas extra al DB después
+  // del primer load).
+  const rows = await Promise.all(proponentesFull.map(async (p, idx) => {
+    const isPoderEjecutivo = /^PODER( EJECUTIVO)?$/i.test(p.apellidos.trim());
+
+    // Para iniciativas parlamentarias intentamos enriquecer con el
+    // catálogo `diputados` (apellidos + fecha_presentacion → nombre +
+    // fracción + provincia). Si el SIL ya nos dio nombre/fraccion no
+    // sobreescribimos.
+    let nombreResolved: string | null = p.nombre;
+    let fraccionResolved: string | null = p.fraccion;
+
+    if (!isPoderEjecutivo) {
+      const dip = await findDiputado(s, p.apellidos, fechaPresentacion);
+      if (dip) {
+        if (!nombreResolved) nombreResolved = dip.nombre;
+        if (!fraccionResolved) fraccionResolved = dip.fraccion;
+      }
+    }
+
+    // Para Poder Ejecutivo, llenamos admin + partido del presidente.
+    const administracion = p.administracion ?? (isPoderEjecutivo && adminMatch ? adminMatch.apellidos : null);
+    const fraccionFinal = fraccionResolved ?? (isPoderEjecutivo && adminMatch ? adminMatch.partido : null);
+
+    // diputado_nombre = "Apellidos Nombre" cuando ambos existen.
+    // Para PODER, queda "PODER" suelto.
+    const diputadoNombre = nombreResolved
+      ? `${p.apellidos} ${nombreResolved}`.trim()
+      : p.apellidos;
+
+    return {
       expediente_id: expedienteId,
       firma_orden: idx + 1,
-      // diputado_nombre combina apellidos + nombre cuando el SIL los expone
-      // como columnas separadas. Si solo hay apellidos, queda el apellido
-      // suelto (caso PODER EJECUTIVO).
-      diputado_nombre: p.nombre ? `${p.apellidos} ${p.nombre}`.trim() : p.apellidos,
-      administracion: p.administracion,
-      fraccion: p.fraccion,
-    }));
-    const { error } = await s.from('sil_expediente_proponentes').insert(rows);
-    if (error) throw new Error(`insert proponentes ${expedienteId}: ${error.message}`);
-    return { count: rows.length };
-  })();
+      diputado_nombre: diputadoNombre,
+      administracion,
+      fraccion: fraccionFinal,
+    };
+  }));
+
+  const { error } = await s.from('sil_expediente_proponentes').insert(rows);
+  if (error) throw new Error(`insert proponentes ${expedienteId}: ${error.message}`);
+  return { count: rows.length };
 }
 
 async function persistComisiones(
@@ -579,9 +617,16 @@ export async function enrichExpediente(
 
     // Persistir proponentes (full replace) — usa la forma rica con
     // apellidos + nombre + administracion + fraccion cuando el SIL los
-    // expone. Para iniciativas del Poder Ejecutivo, apellidos="PODER
-    // EJECUTIVO" + administracion="<presidente>" + (nombre/fraccion null).
-    const propRes = await persistProponentes(s, numero, enriched.proponentesFull);
+    // expone. Para iniciativas del Poder Ejecutivo, persistProponentes
+    // hace lookup contra el mapping de presidentes CR usando
+    // fechaPresentacion → fila queda como apellidos="PODER" +
+    // administracion="<APELLIDOS DEL PRESIDENTE>" + fraccion="<partido>".
+    const propRes = await persistProponentes(
+      s,
+      numero,
+      enriched.proponentesFull,
+      enriched.fechaPresentacion,
+    );
     await persistComisiones(s, numero, enriched.comisiones);
 
     // Persistir documentos (parseando los grids del detail HTML)
