@@ -621,11 +621,24 @@ export async function enrichExpediente(
     // hace lookup contra el mapping de presidentes CR usando
     // fechaPresentacion → fila queda como apellidos="PODER" +
     // administracion="<APELLIDOS DEL PRESIDENTE>" + fraccion="<partido>".
+    //
+    // Fallback: si el postback no expuso fecha_presentacion (algunos
+    // expedientes recientes vienen sin esa label), usamos la fecha que
+    // silDiscovery ya guardó en DB. Sin fecha el mapping no resuelve.
+    let fechaParaProponentes: string | null = enriched.fechaPresentacion;
+    if (!fechaParaProponentes) {
+      const { data: existingRow } = await s
+        .from('sil_expedientes')
+        .select('fecha_presentacion')
+        .eq('numero', numero)
+        .maybeSingle();
+      fechaParaProponentes = (existingRow?.fecha_presentacion as string | null) ?? null;
+    }
     const propRes = await persistProponentes(
       s,
       numero,
       enriched.proponentesFull,
-      enriched.fechaPresentacion,
+      fechaParaProponentes,
     );
     await persistComisiones(s, numero, enriched.comisiones);
 
