@@ -32,6 +32,9 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { syncCentinelaWatchlist } from '../jobs/centinelaSilSync.js';
 import { scrapeAgenda } from '../jobs/agendaScrape.js';
 import { detectSimilarExpedientes } from '../jobs/centinelaSimilarDetect.js';
+import { runSilDiscovery } from '../jobs/silDiscovery.js';
+import { enrichExpedientesBulk } from '../jobs/silEnrichExpediente.js';
+import { createClient as createSupaClient } from '@supabase/supabase-js';
 import { getUserFromRequest, getUserIdFromRequest, type AuthedUser } from '../services/auth.js';
 import { logger } from '../services/logger.js';
 import { insertAndDispatch } from '../services/centinelaNotifier.js';
@@ -112,6 +115,108 @@ centinelaInternalRouter.post('/sil-sync', async (req, res) => {
   } catch (err) {
     const message = (err as Error)?.message ?? String(err);
     req.log?.error('centinela_internal_sil_sync_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/sil-enrich
+ *
+ * Llamado por Cloud Scheduler cada hora. Para cada expediente sin proponentes
+ * registrados (entre los más recientes), llama al SIL WebForms y persiste el
+ * enriched data (proponentes con orden, comisiones, fechas oficiales, gaceta,
+ * número de ley, etc.). Procesa hasta N expedientes por run para no exceder
+ * el timeout de 600s de Cloud Run.
+ *
+ * Cloud Scheduler reference:
+ *   gcloud scheduler jobs create http centinela-sil-enrich \
+ *     --schedule='0 * * * *' --time-zone='America/Costa_Rica' \
+ *     --uri="https://<service>/api/internal/centinela/sil-enrich" \
+ *     --http-method=POST \
+ *     --headers="X-Internal-Trigger=$INTERNAL_TRIGGER_SECRET"
+ *
+ * Body opcional: { limit?: number, min_id?: number }
+ *   - limit: máximo de expedientes a procesar (default 80, cabe en 600s)
+ *   - min_id: solo procesar expedientes con id >= min_id (default 25000 = recientes)
+ */
+centinelaInternalRouter.post('/sil-enrich', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  const body = (req.body ?? {}) as { limit?: number; min_id?: number };
+  const limit = Math.min(Math.max(body.limit ?? 80, 1), 200);
+  const minId = body.min_id ?? 25000;
+
+  try {
+    const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supaKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!supaUrl || !supaKey) throw new Error('supabase env missing');
+    const s = createSupaClient(supaUrl, supaKey, { auth: { persistSession: false, autoRefreshToken: false } });
+
+    // Targets: expedientes con id >= min_id que NO tienen proponentes aún
+    const { data: withProp } = await s.from('sil_expediente_proponentes').select('expediente_id');
+    const enrichedSet = new Set((withProp ?? []).map((r) => r.expediente_id as string));
+
+    const { data: candidates } = await s
+      .from('sil_expedientes')
+      .select('numero, id')
+      .gte('id', minId)
+      .order('id', { ascending: false })
+      .limit(limit * 5); // sobre-pedimos porque algunos ya están enriched
+
+    const targets = (candidates ?? [])
+      .filter((r) => !enrichedSet.has(r.numero as string))
+      .slice(0, limit)
+      .map((r) => r.numero as string);
+
+    if (targets.length === 0) {
+      res.json({ ok: true, result: { enriched: 0, message: 'no targets — all up to date' } });
+      return;
+    }
+
+    const result = await enrichExpedientesBulk(s, targets, { politenessMs: 700 });
+    logger.info('centinela_internal_sil_enrich_complete', {
+      ...result,
+      processed: targets.length,
+      remaining_estimate: Math.max(0, (candidates?.length ?? 0) - enrichedSet.size - targets.length),
+    });
+    res.json({ ok: true, result, processed: targets.length });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_sil_enrich_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/sil-discovery
+ *
+ * Llamado por Cloud Scheduler diariamente. Descubre expedientes nuevos
+ * presentados en la Asamblea desde el último ingest (busca números
+ * consecutivos arriba del max actual en DB).
+ *
+ * Cloud Scheduler reference:
+ *   gcloud scheduler jobs create http centinela-sil-discovery \
+ *     --schedule='0 7 * * *' --time-zone='America/Costa_Rica' \
+ *     --uri="https://<service>/api/internal/centinela/sil-discovery" \
+ *     --http-method=POST \
+ *     --headers="X-Internal-Trigger=$INTERNAL_TRIGGER_SECRET"
+ */
+centinelaInternalRouter.post('/sil-discovery', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  try {
+    const result = await runSilDiscovery();
+    logger.info('centinela_internal_sil_discovery_complete', {
+      discovered: result.discovered_count,
+      empty: result.empty_count,
+      failed: result.failed_count,
+      starting_numero: result.starting_numero,
+      ending_numero: result.ending_numero,
+    });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_sil_discovery_failed', { error: message });
     res.status(500).json({ ok: false, error: message });
   }
 });
@@ -214,6 +319,163 @@ centinelaInternalRouter.post('/novelty-scan', async (req, res) => {
     res.status(500).json({ ok: false, error: message });
   }
 });
+
+/**
+ * POST /api/internal/centinela/daily-health-report
+ *
+ * Llamado por Cloud Scheduler una vez al día a las 6am CR. Captura un
+ * snapshot del estado del backend (counts, freshness por tabla, alertas
+ * por freshness threshold) y lo persiste en `cl2_daily_health`.
+ *
+ * Por qué existe: agregar 1 query timeseries en lugar de revisar logs
+ * job por job para ver si algo se rompió silenciosamente. Ver
+ * `dailyHealthReport.ts` para el contrato completo.
+ *
+ * Body: ninguno. Devuelve { ok, result: { status, alerts, snapshot_id, ... } }.
+ */
+centinelaInternalRouter.post('/daily-health-report', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  try {
+    const { runDailyHealthReport } = await import('../jobs/dailyHealthReport.js');
+    const result = await runDailyHealthReport();
+    logger.info('centinela_internal_daily_health_complete', {
+      status: result.status,
+      alerts_count: result.alerts.length,
+      duration_ms: result.duration_ms,
+      snapshot_id: result.snapshot_id,
+    });
+    res.json({ ok: true, started_at: new Date().toISOString(), result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_daily_health_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/llm-enrich-docs
+ *
+ * Llamado por Cloud Scheduler cada 30 min. Procesa un batch de docs SIL sin
+ * resumen/POR TANTO/decisión vía LLM (Haiku 4.5 vía OpenRouter). Page size
+ * bajo (50) para no triggerar PostgreSQL statement timeout. Cost por batch:
+ * ~$0.30. Si bg backfill cubre los 22K primero, el cron solo procesa los
+ * nuevos docs que entran al sistema (~ centavos/día).
+ *
+ * Body opcional: { limit?: number, dry_run?: bool, tipo?: string[] }
+ */
+centinelaInternalRouter.post('/llm-enrich-docs', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+  const body = (req.body ?? {}) as { limit?: number; dry_run?: boolean; tipo?: string[] };
+  const limit = Math.min(Math.max(body.limit ?? 100, 1), 500);
+  try {
+    const { runLlmEnrichDocs } = await import('../jobs/llmEnrichDocs.js');
+    const result = await runLlmEnrichDocs({
+      limit,
+      dry_run: body.dry_run ?? false,
+      tipo_filter: body.tipo,
+      concurrency: 5,
+    });
+    logger.info('centinela_internal_llm_enrich_complete', { ...result, requested_limit: limit });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_llm_enrich_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/categorize-expedientes
+ *
+ * Diario 4am. Clasifica expedientes nuevos/desactualizados en N de las 51
+ * categorías canónicas CL2 vía LLM. Sprint 3 Track P.
+ */
+centinelaInternalRouter.post('/categorize-expedientes', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+  try {
+    const { runCategorizeExpedientes } = await import('../jobs/categorizeExpedientes.js');
+    const result = await runCategorizeExpedientes({});
+    logger.info('centinela_internal_categorize_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_categorize_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/resumen-mixto
+ *
+ * Diario 5am. Genera resumen editorial 3-párrafos por expediente (contexto,
+ * posturas, próximos pasos) vía LLM. Sprint 3 Track P.
+ */
+centinelaInternalRouter.post('/resumen-mixto', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+  try {
+    const { runGenerateResumenes } = await import('../jobs/generateResumenMixto.js');
+    const result = await runGenerateResumenes({});
+    logger.info('centinela_internal_resumen_mixto_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_resumen_mixto_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/informe-semanal
+ *
+ * Lunes 6am. Genera informe semanal por cada user con watchlist activa.
+ * Sprint 3 Track P.
+ */
+centinelaInternalRouter.post('/informe-semanal', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+  try {
+    const { runGenerateInformesSemanales } = await import('../jobs/generateInformeSemanal.js');
+    const result = await runGenerateInformesSemanales({});
+    logger.info('centinela_internal_informe_semanal_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_informe_semanal_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/ingest-transcript-chunks
+ *
+ * Cada 30 min. Detecta sesiones plenarias con `transcript_segments` pero SIN
+ * chunks en `legislative_chunks` (delta-only), las agrupa en bloques de
+ * ~3000 chars, genera embeddings vía Vertex e inserta a la tabla — para que
+ * Lexa pueda citar lo que se dijo en sesiones nuevas.
+ *
+ * Body opcional: { limit_sessions?: number } (default 8, max 50)
+ */
+centinelaInternalRouter.post('/ingest-transcript-chunks', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+  const body = (req.body ?? {}) as { limit_sessions?: number };
+  try {
+    const { runIngestTranscriptChunks } = await import('../jobs/ingestTranscriptChunks.js');
+    const result = await runIngestTranscriptChunks({ limit_sessions: body.limit_sessions });
+    logger.info('centinela_internal_ingest_transcripts_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_ingest_transcripts_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// NOTA: download-sil-docs y ingest-ral-chunks no tienen scheduler (a hoy).
+// Para download-sil-docs: el script `download-sil-bulk.ts` necesita ejecutarse
+// como Cloud Run Job (no HTTP service) por OOM y permissions GCS. Manual por
+// ahora: `npm run download:sil:bulk`. Pendiente: migrarlo a Cloud Run Job +
+// Scheduler para automatización completa.
+// Para ingest-ral-chunks: Reglamento estable, manual con `npm run ingest:ral`.
 
 // ── /api/admin/centinela router ───────────────────────────────────────────────
 
