@@ -92,6 +92,13 @@ async function persistProponentes(
   // Mapping local de presidentes CR — para los casos Poder Ejecutivo donde
   // el SIL solo dice "PODER".
   const adminMatch = fechaPresentacion ? findAdministracionByDate(fechaPresentacion) : null;
+  logger.info('persist_proponentes_start', {
+    expedienteId,
+    fechaPresentacion,
+    proponentesFullCount: proponentesFull.length,
+    adminMatchApellidos: adminMatch?.apellidos ?? null,
+    firstProponenteApellidos: proponentesFull[0]?.apellidos ?? null,
+  });
 
   // Resolver cada firmante en paralelo contra el catálogo `diputados`
   // (cache in-memory en diputadosLookup, sin pegadas extra al DB después
