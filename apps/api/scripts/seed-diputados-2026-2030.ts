@@ -52,7 +52,13 @@ const DIPUTADOS: ReadonlyArray<Diputado> = [
   { nombreCompleto: 'Stephan Brunner Neibig', fraccion: 'Partido Pueblo Soberano', fraccionCorta: 'PPS', provincia: 'San José', curul: 3, notas: 'Primer Vicepresidente de la República 2022-2025. Economista.' },
   { nombreCompleto: 'Mayuli del Carmen Ortega Guzmán', fraccion: 'Partido Pueblo Soberano', fraccionCorta: 'PPS', provincia: 'San José', curul: 4 },
   { nombreCompleto: 'Gonzalo Alberto Ramírez Zamora', fraccion: 'Partido Pueblo Soberano', fraccionCorta: 'PPS', provincia: 'San José', curul: 5, notas: 'Diputado 2014-2018 (PRC). Pastor evangélico y abogado.' },
-  { nombreCompleto: 'Anna Katharina Müller Castro', fraccion: 'Partido Pueblo Soberano', fraccionCorta: 'PPS', provincia: 'San José', curul: 6, notas: 'Ministra de Educación Pública 2022-2025.' },
+  // Wikipedia tenía "Anna Katharina Müller Castro" pero el SIL (fuente
+  // canónica del Tribunal Supremo de Elecciones + Asamblea) la serializa
+  // como "MULLER MARIN KATHERINE" — apellido materno Marín, no Castro.
+  // Corrección verificada con CL2 Consultoría 2026-05-19.
+  // El canonicalize() ya normaliza Müller→MULLER (strip diacríticos), así
+  // que tanto "Müller Marín" como "MULLER MARIN" del SIL matchean.
+  { nombreCompleto: 'Katherine Müller Marín', fraccion: 'Partido Pueblo Soberano', fraccionCorta: 'PPS', provincia: 'San José', curul: 6, notas: 'Ministra de Educación Pública 2022-2025.' },
   { nombreCompleto: 'Antonio Barzuna Thompson', fraccion: 'Partido Pueblo Soberano', fraccionCorta: 'PPS', provincia: 'San José', curul: 7 },
   { nombreCompleto: 'Sadie Esmeralda Britton González', fraccion: 'Partido Pueblo Soberano', fraccionCorta: 'PPS', provincia: 'San José', curul: 8 },
   { nombreCompleto: 'Álvaro Ramírez Bogantes', fraccion: 'Partido Liberación Nacional', fraccionCorta: 'PLN', provincia: 'San José', curul: 9, notas: 'Jefe de fracción PLN. Candidato a vicepresidente PLN 2022.' },
