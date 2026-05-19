@@ -32,12 +32,15 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { logger } from '../services/logger.js';
 
+// Umbrales de freshness — calibrados con el patrón real de la Asamblea CR
+// (sesiona Lun-Jue, fin de semana sin sesión). Si una tabla no recibe
+// updates por más de X horas, levantamos warning.
 const FRESHNESS_THRESHOLDS_HOURS = {
   sil_expedientes_scrape: 36,         // discovery + sync diarios; 36h tolerancia weekend
   sil_documentos_create: 36,          // bulk-download diario
-  sessions_create: 7 * 24,            // sesiones cada plenario, máx ~7d sin uno
-  transcript_segments_create: 7 * 24, // transcript después de session
-  centinela_eventos_detect: 7 * 24,   // depends on legislative activity
+  sessions_create: 72,                // Lun→Jue, máx 3 días sin nuevo plenario en semana hábil
+  transcript_segments_create: 72,     // transcript después de session
+  centinela_eventos_detect: 72,       // novedades cada vez que cambia un expediente watched
 } as const;
 
 interface HealthSnapshot {
@@ -305,6 +308,41 @@ export async function runDailyHealthReport(): Promise<DailyHealthResult> {
         table: name,
       });
     }
+  }
+
+  // Check de errores en jobs internos en las últimas 24h: si vemos rows con
+  // ai_call_log.error_message en últimas 24h o errores específicos en
+  // tablas conocidas, agregamos info. Heurística simple — alerts más
+  // sofisticadas requieren cruce con Cloud Logging.
+  try {
+    const { count: errorCount } = await s
+      .from('ai_call_log')
+      .select('*', { count: 'exact', head: true })
+      .gte('created_at', since24h)
+      .not('error_message', 'is', null);
+    if ((errorCount ?? 0) > 0) {
+      alerts.push({
+        level: 'warning',
+        code: 'llm_errors_24h',
+        message: `${errorCount} llamadas LLM con error en últimas 24h (revisar ai_call_log.error_message)`,
+        value: errorCount,
+      });
+    }
+  } catch {
+    // si ai_call_log no tiene error_message column, ignoramos
+  }
+
+  // Match rate de proponentes: si la diferencia entre proponentes total y
+  // proponentes con fracción está creciendo (más rows nuevas no enrich),
+  // es señal de que el enricher está atrasado o pausado.
+  const proponentesGap = silProponentes - silProponentesConFraccion;
+  if (proponentesGap > 100) {
+    alerts.push({
+      level: 'info',
+      code: 'proponentes_enrich_lag',
+      message: `${proponentesGap} proponentes sin fracción asignada (target: seedear más cuatrienios)`,
+      value: proponentesGap,
+    });
   }
 
   const errors = alerts.filter((a) => a.level === 'error').length;
