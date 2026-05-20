@@ -237,6 +237,42 @@ centinelaInternalRouter.post('/sil-enrich', async (req, res) => {
 });
 
 /**
+ * POST /api/internal/centinela/detect-bold-fechas
+ *
+ * Pedido 16g del cliente CL2: detectar si una "fecha estimada de
+ * dictamen" extraída del texto plano aparece EN NEGRITA en el DOCX
+ * original. La negrita es señal de que el analista del SIL marcó esa
+ * fecha como definitiva.
+ *
+ * Body opcional: { limit?: number, force_recheck?: boolean }
+ */
+centinelaInternalRouter.post('/detect-bold-fechas', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  const body = (req.body ?? {}) as { limit?: number; force_recheck?: boolean };
+
+  try {
+    const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supaKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!supaUrl || !supaKey) throw new Error('supabase env missing');
+    const s = createSupaClient(supaUrl, supaKey, { auth: { persistSession: false, autoRefreshToken: false } });
+
+    const { detectBoldFechasBulk } = await import('../jobs/detectBoldFechas.js');
+    const result = await detectBoldFechasBulk(s, {
+      limit: body.limit,
+      forceRecheck: body.force_recheck === true,
+    });
+
+    logger.info('centinela_internal_detect_bold_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_detect_bold_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
  * POST /api/internal/centinela/scan-mociones
  *
  * Pedido 11 / 11bis del cliente CL2: alerta cuando se presenta una
