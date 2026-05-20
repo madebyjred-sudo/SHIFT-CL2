@@ -237,6 +237,60 @@ centinelaInternalRouter.post('/sil-enrich', async (req, res) => {
 });
 
 /**
+ * POST /api/internal/centinela/extract-fechas-dictamen
+ *
+ * Pedido 07 / 16g / 16h del cliente CL2.
+ *
+ * Corre el extractor de "fecha estimada de dictamen" sobre los documentos
+ * del SIL (sil_documentos.text_extracted) y persiste a
+ * sil_expediente_fechas_extraidas con campo='fecha_dictamen_estimada'.
+ * Si la fecha cambió respecto a la vigente, marca la previa como
+ * superseded_by → la nueva (chain histórico — Pedido 16h).
+ *
+ * Body opcional: { limit?: number, since?: string, force_reextract?: boolean,
+ *                  expediente_filter?: string[] }
+ *   - limit: máximo de docs a procesar (default 500, cap 2000)
+ *   - since: ISO date — solo docs creados después
+ *   - force_reextract: ignora caché y re-procesa docs ya intentados
+ *   - expediente_filter: lista de numeros (ej. ['23.511', '24.982'])
+ *     para procesar SOLO esos
+ */
+centinelaInternalRouter.post('/extract-fechas-dictamen', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  const body = (req.body ?? {}) as {
+    limit?: number;
+    since?: string;
+    force_reextract?: boolean;
+    expediente_filter?: string[];
+  };
+  const limit = Math.min(Math.max(body.limit ?? 500, 1), 2000);
+
+  try {
+    const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supaKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!supaUrl || !supaKey) throw new Error('supabase env missing');
+    const s = createSupaClient(supaUrl, supaKey, { auth: { persistSession: false, autoRefreshToken: false } });
+
+    const { extractFechasDictamenBulk } = await import('../jobs/extractFechasDictamen.js');
+
+    const result = await extractFechasDictamenBulk(s, {
+      limit,
+      since: body.since,
+      forceReextract: body.force_reextract === true,
+      expedienteFilter: body.expediente_filter,
+    });
+
+    logger.info('centinela_internal_extract_fechas_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_extract_fechas_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
  * POST /api/internal/centinela/sil-discovery
  *
  * Llamado por Cloud Scheduler diariamente. Descubre expedientes nuevos
