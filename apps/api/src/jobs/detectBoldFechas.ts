@@ -150,8 +150,12 @@ export async function detectBoldFechasBulk(
     duration_ms: 0,
   };
 
-  // Procesar con concurrency 3.
-  const CONCURRENCY = 3;
+  // Procesar SECUENCIAL — un DOCX a la vez. Concurrency 3 saturaba
+  // memory (2-15MB por DOCX × 3 + mammoth runtime = ~100MB peak) y
+  // crasheaba la instancia de Cloud Run con 503. El orchestrator
+  // Python distribuye en muchas llamadas chicas en lugar de pocas
+  // concurrentes.
+  const CONCURRENCY = 1;
   const queue = [...rows] as FechaRow[];
   const workers: Promise<void>[] = [];
 
