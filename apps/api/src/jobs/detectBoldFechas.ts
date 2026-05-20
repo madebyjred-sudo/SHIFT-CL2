@@ -166,31 +166,43 @@ export async function detectBoldFechasBulk(
         if (!row) break;
         result.examined++;
 
-        if (!row.valor_texto_original) {
-          result.no_doc_found++;
-          continue;
-        }
-
-        const gcsPath = await findSourceDocGcsPath(s, row);
-        if (!gcsPath) {
-          result.no_doc_found++;
-          continue;
-        }
-
-        const detect = await detectBoldFecha(gcsPath, row.valor_texto_original, row.valor_fecha);
-        if (detect.bold) {
-          const { error: updErr } = await s
-            .from('sil_expediente_fechas_extraidas')
-            .update({ visual_marker: 'bold' })
-            .eq('id', row.id);
-          if (updErr) {
-            logger.warn('detect_bold_update_failed', { rowId: row.id, error: updErr.message });
-            result.failed++;
-          } else {
-            result.bold_marked++;
+        // Try/catch defensivo POR ROW — sin esto, un error en un solo
+        // DOCX (mammoth crash, GCS timeout, OOM en un acta gigante) tira
+        // toda la request y Cloud Run devuelve 503 al caller.
+        try {
+          if (!row.valor_texto_original) {
+            result.no_doc_found++;
+            continue;
           }
-        } else {
-          result.no_bold++;
+
+          const gcsPath = await findSourceDocGcsPath(s, row);
+          if (!gcsPath) {
+            result.no_doc_found++;
+            continue;
+          }
+
+          const detect = await detectBoldFecha(gcsPath, row.valor_texto_original, row.valor_fecha);
+          if (detect.bold) {
+            const { error: updErr } = await s
+              .from('sil_expediente_fechas_extraidas')
+              .update({ visual_marker: 'bold' })
+              .eq('id', row.id);
+            if (updErr) {
+              logger.warn('detect_bold_update_failed', { rowId: row.id, error: updErr.message });
+              result.failed++;
+            } else {
+              result.bold_marked++;
+            }
+          } else {
+            result.no_bold++;
+          }
+        } catch (err) {
+          logger.warn('detect_bold_row_failed', {
+            rowId: row.id,
+            expediente: row.expediente_id,
+            error: (err as Error).message,
+          });
+          result.failed++;
         }
       }
     })());
