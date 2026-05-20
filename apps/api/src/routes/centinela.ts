@@ -237,6 +237,43 @@ centinelaInternalRouter.post('/sil-enrich', async (req, res) => {
 });
 
 /**
+ * POST /api/internal/centinela/scan-mociones
+ *
+ * Pedido 11 / 11bis del cliente CL2: alerta cuando se presenta una
+ * moción en un expediente del watchlist. Corre cada 30min (Cloud
+ * Scheduler) o on-demand.
+ *
+ * Body opcional: { since?: string, limit?: number }
+ *   - since: ISO timestamp — solo mociones scraped después. Default = hace 24h.
+ *   - limit: cap de mociones (default 500).
+ */
+centinelaInternalRouter.post('/scan-mociones', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  const body = (req.body ?? {}) as { since?: string; limit?: number };
+
+  try {
+    const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supaKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!supaUrl || !supaKey) throw new Error('supabase env missing');
+    const s = createSupaClient(supaUrl, supaKey, { auth: { persistSession: false, autoRefreshToken: false } });
+
+    const { scanMocionesParaAlertas } = await import('../jobs/mocionAlertScan.js');
+    const result = await scanMocionesParaAlertas(s, {
+      since: body.since,
+      limit: body.limit,
+    });
+
+    logger.info('centinela_internal_scan_mociones_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_scan_mociones_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
  * POST /api/internal/centinela/extract-fechas-dictamen
  *
  * Pedido 07 / 16g / 16h del cliente CL2.
