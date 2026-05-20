@@ -49,6 +49,25 @@ describe('fechaDictamenExtractor', () => {
       expect(c?.pattern_id).toBe('fecha_para_dictaminar');
     });
 
+    // Variantes encontradas en docs reales del SIL (2026-05-20 audit):
+    it('extracts "Fecha para dictaminar el 08 de agosto de 2024."', () => {
+      const text = 'Fecha para dictaminar el 08 de agosto de 2024. No se le presentó trámite';
+      const c = extractPrimaryFechaDictamen(text);
+      expect(c?.valor_fecha).toBe('2024-08-08');
+    });
+
+    it('extracts "fecha para dictaminar el expediente en discusión hasta el 16 de junio de 2023"', () => {
+      const text = 'la comisión amplió la fecha para dictaminar el expediente en discusión hasta el 16 de junio de 2023 mediante Moción';
+      const c = extractPrimaryFechaDictamen(text);
+      expect(c?.valor_fecha).toBe('2023-06-16');
+    });
+
+    it('extracts "Fecha para dictaminar el 16 de abril de 2024."', () => {
+      const text = 'Por el plazo otorgado por la moción 137. Fecha para dictaminar el 16 de abril de 2024.';
+      const c = extractPrimaryFechaDictamen(text);
+      expect(c?.valor_fecha).toBe('2024-04-16');
+    });
+
     it('extracts "fecha tentativa de dictamen: 30-jun-2026"', () => {
       const text = 'fecha tentativa de dictamen: 30-jun-2026';
       const c = extractPrimaryFechaDictamen(text);

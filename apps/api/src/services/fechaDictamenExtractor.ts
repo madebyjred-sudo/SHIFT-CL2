@@ -135,6 +135,16 @@ interface PatternDef {
   confidence: number;
 }
 
+// Conector flexible entre "fecha…dictamen[ar]" y la fecha en sí. Acepta:
+//   - ":" / "-" / "." con espacios
+//   - "el", "del", "de", "para el", "hasta el", "antes del"
+//   - "el expediente en discusión hasta el", etc.
+// Lazy quantifier ({0,100}?) para no comerse la fecha durante backtrack.
+// Esto evita las 12 variantes de prefijo que el SIL escribe (Carlos las
+// vio una vez como "Fecha para dictaminar:" y otra como "Fecha para
+// dictaminar el expediente en discusión hasta el ...").
+const CONNECTOR = '(?:[^.\\n]{0,100}?)';
+
 // Fragmento de fecha en español — se compone en cada patrón porque
 // JavaScript no soporta backreferences a sub-grupos nombrados entre regex.
 // El grupo captura es siempre `(?<fecha>...)`.
@@ -156,7 +166,7 @@ const PATTERNS: PatternDef[] = [
   {
     id: 'fecha_estimada_canonical',
     re: new RegExp(
-      `(?:^|[\\.\\s\\:])fecha\\s+estimada\\s+(?:de\\s+)?dictamen(?:\\s*[:\\.\\-]\\s*|\\s+del?\\s+|\\s+)${FECHA_FRAG}`,
+      `(?:^|[\\.\\s\\:])fecha\\s+estimada\\s+(?:de\\s+)?dictamen${CONNECTOR}${FECHA_FRAG}`,
       'gi',
     ),
     confidence: 0.95,
@@ -165,7 +175,7 @@ const PATTERNS: PatternDef[] = [
   {
     id: 'fecha_tentativa',
     re: new RegExp(
-      `(?:^|[\\.\\s\\:])fecha\\s+tentativa\\s+(?:de\\s+)?dictamen(?:\\s*[:\\.\\-]\\s*|\\s+del?\\s+|\\s+)${FECHA_FRAG}`,
+      `(?:^|[\\.\\s\\:])fecha\\s+tentativa\\s+(?:de\\s+)?dictamen${CONNECTOR}${FECHA_FRAG}`,
       'gi',
     ),
     confidence: 0.92,
@@ -174,7 +184,7 @@ const PATTERNS: PatternDef[] = [
   {
     id: 'fecha_para_dictaminar',
     re: new RegExp(
-      `(?:^|[\\.\\s\\:])fecha\\s+para\\s+dictaminar(?:\\s*[:\\.\\-]\\s*|\\s+del?\\s+|\\s+)${FECHA_FRAG}`,
+      `(?:^|[\\.\\s\\:])fecha\\s+para\\s+dictaminar${CONNECTOR}${FECHA_FRAG}`,
       'gi',
     ),
     confidence: 0.88,
@@ -201,7 +211,7 @@ const PATTERNS: PatternDef[] = [
   {
     id: 'deadline_dictamen',
     re: new RegExp(
-      `(?:^|[\\.\\s])deadline\\s+(?:para\\s+)?(?:el\\s+)?dictamen(?:\\s*[:\\.\\-]\\s*|\\s+del?\\s+|\\s+)${FECHA_FRAG}`,
+      `(?:^|[\\.\\s])deadline\\s+(?:para\\s+)?(?:el\\s+)?dictamen${CONNECTOR}${FECHA_FRAG}`,
       'gi',
     ),
     confidence: 0.65,
