@@ -173,7 +173,14 @@ async function persistComisiones(
 /**
  * Reemplaza el set de documentos del expediente con la lista descubierta
  * en el detail panel. Solo metadata (titulo/fecha/tipo) — la descarga del
- * PDF queda para el bulk downloader que ya existe.
+ * PDF/DOCX está en la tabla legacy `sil_documentos` (bulk downloader).
+ *
+ * **Cruce con sil_documentos** (fix 2026-05-20):
+ *   La tabla legacy `sil_documentos` ya tiene 22k+ docs descargados a GCS
+ *   con `status='embedded'`. Si hay match por (expediente_id integer, tipo),
+ *   copiamos `gcs_path` → `storage_path` y `status='embedded'` → `embed_status='done'`
+ *   al insertar. Sin esto, el frontend muestra "Pendiente de indexar"
+ *   para docs que SÍ están descargados (race condition entre las 2 tablas).
  */
 async function persistDocumentos(
   s: SupabaseClient,
@@ -183,17 +190,40 @@ async function persistDocumentos(
 ): Promise<number> {
   await s.from('sil_expediente_documentos').delete().eq('expediente_id', expedienteId);
   if (docs.length === 0) return 0;
-  const rows = docs.map((d) => ({
-    expediente_id: expedienteId,
-    tipo: d.tipo,
-    titulo: d.titulo,
-    fecha: d.fecha,
-    // URL del detail del SIL — el frontend redirige acá para descargar.
-    url: `https://consultassil3.asamblea.go.cr/frmConsultaProyectos.aspx?expediente=${expedienteNum}`,
-    storage_path: null,
-    embed_status: 'pending',
-    raw: { source: 'sil_webforms_enrich', grid: d.grid, index: d.index },
-  }));
+
+  // ── Lookup en sil_documentos (legacy) para tomar gcs_path + status ─────
+  // sil_documentos.expediente_id es INTEGER referenciando sil_expedientes.id.
+  // expedienteNum es el integer (e.g. 25552). 1 query para todos los tipos.
+  const { data: legacyDocs } = await s
+    .from('sil_documentos')
+    .select('tipo, gcs_path, status')
+    .eq('expediente_id', expedienteNum);
+  const legacyByTipo = new Map<string, { gcs_path: string | null; status: string | null }>();
+  for (const ld of legacyDocs ?? []) {
+    legacyByTipo.set(ld.tipo as string, {
+      gcs_path: ld.gcs_path as string | null,
+      status: ld.status as string | null,
+    });
+  }
+
+  const rows = docs.map((d) => {
+    const legacy = legacyByTipo.get(d.tipo);
+    const embedStatus = legacy?.status === 'embedded' ? 'done'
+      : legacy?.status === 'parsed' ? 'in_progress'
+      : legacy?.status === 'error' ? 'failed'
+      : 'pending';
+    return {
+      expediente_id: expedienteId,
+      tipo: d.tipo,
+      titulo: d.titulo,
+      fecha: d.fecha,
+      // URL del detail del SIL — el frontend redirige acá para descargar.
+      url: `https://consultassil3.asamblea.go.cr/frmConsultaProyectos.aspx?expediente=${expedienteNum}`,
+      storage_path: legacy?.gcs_path ?? null,
+      embed_status: embedStatus,
+      raw: { source: 'sil_webforms_enrich', grid: d.grid, index: d.index },
+    };
+  });
   const { error } = await s.from('sil_expediente_documentos').insert(rows);
   if (error) throw new Error(`insert docs ${expedienteId}: ${error.message}`);
   return rows.length;
