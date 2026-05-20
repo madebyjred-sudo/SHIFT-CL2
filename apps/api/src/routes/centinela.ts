@@ -192,9 +192,24 @@ centinelaInternalRouter.post('/sil-enrich', async (req, res) => {
         .slice(0, limit)
         .map((r) => r.numero as string);
     } else {
-      // Modo default: enrich inicial — expedientes SIN proponentes.
-      const { data: withProp } = await s.from('sil_expediente_proponentes').select('expediente_id');
-      const enrichedSet = new Set((withProp ?? []).map((r) => r.expediente_id as string));
+      // Modo default: enrich inicial — expedientes SIN TRAMITACIÓN.
+      //
+      // Por qué cambiamos de "sin proponentes" a "sin tramite" (2026-05-20):
+      // Un backfill manual previo (script Python) llenó proponentes para
+      // 9,659 expedientes históricos pero NO procesó las otras 7 tablas
+      // (tramite, audiencias, documentos, consultas, fechas, actas,
+      // orden_dia). El filtro viejo "sin proponentes" hacía que el
+      // enricher SKIPEARA esos 9,659 — solo procesaba los nuevos. Result:
+      // 99%+ de expedientes históricos sin tramitación visible para el
+      // cliente.
+      //
+      // El nuevo filtro "sin tramite" garantiza que cualquier expediente
+      // sin la tabla central de tramitación entra al pipeline. El enricher
+      // es idempotente (DELETE+INSERT en todas las tablas), así que
+      // re-procesar uno con proponentes no rompe nada — solo agrega las
+      // 7 tablas restantes.
+      const { data: withTramite } = await s.from('sil_expediente_tramite').select('expediente_id');
+      const enrichedSet = new Set((withTramite ?? []).map((r) => r.expediente_id as string));
 
       const { data: candidates } = await s
         .from('sil_expedientes')
