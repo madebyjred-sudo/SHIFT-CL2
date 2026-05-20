@@ -403,6 +403,71 @@ export interface ExpedienteEnriched {
    */
   proponentesFull: ProponenteFirmante[];
   comisiones: Array<{ organo: string; fecha: string | null }>;
+  /**
+   * Consultas formales a entidades técnicas (pestaña Consultas del SIL).
+   * Pedido 04 del cliente: el grvConsultas viene ya en el mismo HTML del
+   * Select$0 — sin postback nuevo. Cada fila es una consulta a una entidad
+   * (CNAA, ANAI, UNED, BCCR, Procuraduría, una Municipalidad…) en una
+   * sesión de un órgano dado. NO trae el PDF de la respuesta — eso requiere
+   * un Select$N adicional sobre el grid (out of scope para el enricher
+   * bulk; lo deja como `documento_url=null` que el frontend marcará como
+   * "respuesta pendiente").
+   *
+   * Limitación: el grid pagina a 10 filas. Expedientes con más consultas
+   * (23.511 tiene 100+) capturan solo las primeras 10. El frontend muestra
+   * disclaimer + link al SIL oficial para ver el resto.
+   */
+  consultas: ConsultaEntidad[];
+  /**
+   * Versiones del texto sustitutivo (Pedido 16k). Cada fila del
+   * `grvTextoSustitutivo` es una versión: id_documento + fecha. El grid
+   * está en el mismo HTML del Select$0 — no requiere postback aparte.
+   * La descarga del DOCX/PDF de cada versión es Select$N sobre el grid
+   * (out of scope para el enricher bulk — el frontend muestra la lista
+   * con link al SIL oficial). Ordenado por fecha ASC; la última fila es
+   * la versión vigente.
+   */
+  textosSustitutivos: TextoSustitutivoVersion[];
+}
+
+/**
+ * Consulta formal a una entidad técnica. El SIL la registra cuando una
+ * comisión / el Plenario manda un oficio pidiéndole criterio a una entidad
+ * sobre el expediente (BCCR, Procuraduría, ministerio, municipalidad, gremio).
+ *
+ * idConsulta es el "Id_Consulta" del SIL — útil para dedup cross-corrida
+ * incluso si el SIL re-pagina. organo es el órgano que mandó la consulta
+ * (PLENARIO, AMBIENTE (ÁREA IV), …). fechaSolicitud es la fecha del oficio.
+ * sesion es el número de sesión del órgano donde se acordó la consulta
+ * (puede venir vacío cuando el SIL no lo expone). entidad es el destinatario.
+ *
+ * fechaRespuesta / tipoRespuesta / urlRespuesta NO vienen en el grid — solo
+ * aparecen si hacemos Select$N que abre el PDF de respuesta. Esa segunda
+ * etapa NO está en este parser; se queda en null y un job aparte (P04
+ * follow-up) hace el postback para los expedientes activos.
+ */
+export interface ConsultaEntidad {
+  idConsulta: string;
+  organo: string;
+  fechaSolicitud: string;        // ISO YYYY-MM-DD
+  sesion: string | null;
+  entidad: string;
+}
+
+/**
+ * Una versión del texto sustitutivo del proyecto (Pedido 16k del cliente).
+ * El SIL incluye el grid `grvTextoSustitutivo` en el mismo HTML del detail
+ * panel. Cada fila es una versión sucesiva — para expedientes muy debatidos
+ * suele haber 1-3 versiones.
+ *
+ * idDocumento es el id_servicio del SIL (estable cross-corrida). fecha es
+ * la fecha de presentación de esa versión. NO descargamos el DOCX/PDF
+ * aquí; el grid expone un botón Select$N que dispara la descarga — fuera
+ * de scope del enricher bulk.
+ */
+export interface TextoSustitutivoVersion {
+  idDocumento: string;
+  fecha: string;                 // ISO YYYY-MM-DD
 }
 
 /**
@@ -633,6 +698,11 @@ export function parseEnrichedDetail(html: string, expedienteNum: number): Expedi
     }
   });
 
+  // Pedido 04 (Consultas) + 16k (Texto Sustitutivo): ambos grids están en
+  // el mismo HTML del Select$0 — no necesitamos postbacks adicionales.
+  const consultas = parseConsultasFromDetail(html);
+  const textosSustitutivos = parseTextosSustitutivosFromDetail(html);
+
   return {
     numero: formatExpedienteNumber(expedienteNum),
     numeroNum: expedienteNum,
@@ -652,7 +722,83 @@ export function parseEnrichedDetail(html: string, expedienteNum: number): Expedi
     proponentes,
     proponentesFull,
     comisiones,
+    consultas,
+    textosSustitutivos,
   };
+}
+
+// ─── Consultas (grvConsultas — Pedido 04) ───────────────────────────────────
+// El SIL expone "Consultas a entidades" como grid `grvConsultas` con
+// columnas [Id_Consulta, (select-btn), Órgano, Fecha solicitud,
+// Sesión solicitud, Entidad]. Cada fila es una consulta formal mandada por
+// un órgano (PLENARIO o comisión) a una entidad técnica.
+//
+// El grid pagina a 10 filas — el enricher captura solo la primera página.
+// Para expedientes con 100+ consultas (23.511) eso significa solo top-10
+// más recientes. El frontend muestra disclaimer + link al SIL oficial.
+// Paginación completa requeriría 10× postbacks por expediente — rate-limit
+// prohibitivo a escala. (Alternativa futura: scrapear paginas on-demand
+// solo para los watchlisted del cliente.)
+
+export function parseConsultasFromDetail(html: string): ConsultaEntidad[] {
+  const $ = cheerio.load(html);
+  const out: ConsultaEntidad[] = [];
+  const rows = $('[id$="grvConsultas"] tr').filter((_, el) => $(el).find('td').length > 1);
+  rows.each((_, tr) => {
+    const tds = $(tr).find('td');
+    const cellTexts = tds
+      .map((_i, td) => ($(td).text() ?? '').replace(/\s+/g, ' ').trim())
+      .get();
+    // Layout esperado (6 celdas): [Id_Consulta][select-btn][Órgano]
+    //                              [Fecha solicitud][Sesión][Entidad]
+    if (cellTexts.length < 6) return;
+    const idConsulta = cellTexts[0];
+    // Header del grid se serializa como `<th>` que cheerio NO matchea como
+    // `td` — pero por defensa filtramos por id numérico.
+    if (!/^\d+$/.test(idConsulta)) return;
+    // cellTexts[1] es la celda con el botón "Seleccionar" (frecuentemente
+    // vacía o con un &nbsp; cuando el SIL no expone respuesta).
+    const organo = cellTexts[2];
+    const fechaRaw = cellTexts[3];
+    const sesion = cellTexts[4] && cellTexts[4] !== ' ' ? cellTexts[4] : null;
+    const entidad = cellTexts[5];
+    const fechaSolicitud = parseSilDate(fechaRaw);
+    if (!organo || !fechaSolicitud || !entidad) return;
+    if (organo.length > 80 || entidad.length > 250) return;
+    out.push({
+      idConsulta,
+      organo,
+      fechaSolicitud,
+      sesion,
+      entidad,
+    });
+  });
+  return out;
+}
+
+// ─── Texto Sustitutivo (grvTextoSustitutivo — Pedido 16k) ───────────────────
+// Cada fila del grid es una versión del texto sustitutivo: [id, Fecha,
+// (download-btn)]. El SIL ordena por fecha cronológicamente (la última fila
+// es la versión más reciente). Nosotros preservamos el orden del grid en
+// el array — el caller decide cuál marcar como vigente.
+
+export function parseTextosSustitutivosFromDetail(html: string): TextoSustitutivoVersion[] {
+  const $ = cheerio.load(html);
+  const out: TextoSustitutivoVersion[] = [];
+  const rows = $('[id$="grvTextoSustitutivo"] tr').filter((_, el) => $(el).find('td').length > 1);
+  rows.each((_, tr) => {
+    const tds = $(tr).find('td');
+    const cellTexts = tds
+      .map((_i, td) => ($(td).text() ?? '').replace(/\s+/g, ' ').trim())
+      .get();
+    if (cellTexts.length < 2) return;
+    const idDocumento = cellTexts[0];
+    if (!/^\d+$/.test(idDocumento)) return;
+    const fecha = parseSilDate(cellTexts[1]);
+    if (!fecha) return;
+    out.push({ idDocumento, fecha });
+  });
+  return out;
 }
 
 // ─── Document downloads (DOCX, NOT PDF) ──────────────────────────────

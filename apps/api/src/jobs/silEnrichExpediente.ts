@@ -57,6 +57,18 @@ export interface EnrichResult {
   orden_dia_apariciones_count: number;
   fechas_vigentes_count: number;
   actas_indexadas_count: number;
+  /**
+   * Pedido 04 — consultas a entidades captadas del grid `grvConsultas` del
+   * SIL. Es la primera página (≤10 filas) del grid; expedientes con más
+   * consultas requieren paginar y eso queda fuera del enricher bulk.
+   */
+  consultas_count: number;
+  /**
+   * Pedido 16k — versiones del texto sustitutivo del grid
+   * `grvTextoSustitutivo`. Cada versión queda como sil_expediente_documentos
+   * tipo='texto_sustitutivo'.
+   */
+  textos_sustitutivos_count: number;
   error?: string;
 }
 
@@ -553,6 +565,111 @@ async function persistActasIndexadas(
   return count ?? dedup.length;
 }
 
+/**
+ * Persistencia de consultas a entidades — Pedido 04 del cliente.
+ *
+ * `sil_expediente_consultas` no tiene unique constraint en
+ * (expediente_id, idConsulta) — el SIL re-pagina y nos puede llegar la misma
+ * consulta dos veces si re-corremos el enricher después de que el grid
+ * cambió de orden. Por seguridad: DELETE + INSERT (full replace) por
+ * expediente_id. Cuando el enricher captura solo top-10 de un grid con
+ * 100+ consultas, esto significa que en cada corrida tendríamos solo las
+ * top-10 más recientes — y eso es justo lo que queremos (los más nuevos
+ * sí están priorizados).
+ *
+ * Mapping a columnas de la tabla:
+ *   - entidad_consultada ← consulta.entidad
+ *   - fecha_consulta     ← consulta.fechaSolicitud
+ *   - documento_url      ← null (la respuesta vive detrás de Select$N
+ *                          adicional, no la capturamos en esta etapa)
+ *   - raw                ← { source, organo, sesion, idConsulta }
+ *
+ * El frontend ya consulta esta tabla; el bug pendiente es solo backfill.
+ */
+async function persistConsultas(
+  s: SupabaseClient,
+  expedienteId: string,
+  consultas: ExpedienteEnriched['consultas'],
+): Promise<number> {
+  await s.from('sil_expediente_consultas').delete().eq('expediente_id', expedienteId);
+  if (consultas.length === 0) return 0;
+  const rows = consultas.map((c) => ({
+    expediente_id: expedienteId,
+    entidad_consultada: c.entidad,
+    fecha_consulta: c.fechaSolicitud,
+    fecha_respuesta: null,
+    documento_url: null,
+    documento_storage_path: null,
+    tipo_respuesta: null,
+    resumen_por_tanto: null,
+    raw: {
+      source: 'sil_webforms_enrich',
+      grid: 'grvConsultas',
+      organo: c.organo,
+      sesion: c.sesion,
+      id_consulta: c.idConsulta,
+    },
+  }));
+  const { error } = await s.from('sil_expediente_consultas').insert(rows);
+  if (error) {
+    logger.warn('consultas_insert_failed', { expedienteId, error: error.message });
+    return 0;
+  }
+  return rows.length;
+}
+
+/**
+ * Persistencia del texto sustitutivo — Pedido 16k del cliente.
+ *
+ * Cada versión es una fila en `sil_expediente_documentos` con
+ * `tipo='texto_sustitutivo'`. Idempotente: borra las versiones previas
+ * de este tipo antes de insertar (el SIL eventualmente reordena ids).
+ *
+ * El URL queda apuntando al detail panel del expediente — la descarga del
+ * DOCX/PDF de cada versión es un postback Select$N que NO ejecutamos en
+ * el enricher bulk (rate-limit). El frontend muestra "ver en el SIL
+ * oficial" hasta que un job aparte descargue.
+ *
+ * `raw.id_documento` preserva el ID del SIL — sirve si después agregamos
+ * un descargador que apunta a Select$N por índice.
+ */
+async function persistTextosSustitutivos(
+  s: SupabaseClient,
+  expedienteId: string,
+  expedienteNum: number,
+  textosSustitutivos: ExpedienteEnriched['textosSustitutivos'],
+): Promise<number> {
+  // Solo tocamos el slice de tipo='texto_sustitutivo' — NO borramos los
+  // dictámenes/mociones/etc que `persistDocumentos` acaba de meter.
+  await s
+    .from('sil_expediente_documentos')
+    .delete()
+    .eq('expediente_id', expedienteId)
+    .eq('tipo', 'texto_sustitutivo');
+  if (textosSustitutivos.length === 0) return 0;
+  const rows = textosSustitutivos.map((t, idx) => ({
+    expediente_id: expedienteId,
+    tipo: 'texto_sustitutivo',
+    titulo: `Texto sustitutivo (versión ${idx + 1})`,
+    fecha: t.fecha,
+    url: `https://consultassil3.asamblea.go.cr/frmConsultaProyectos.aspx?expediente=${expedienteNum}`,
+    storage_path: null,
+    embed_status: 'pending',
+    raw: {
+      source: 'sil_webforms_enrich',
+      grid: 'grvTextoSustitutivo',
+      id_documento: t.idDocumento,
+      orden: idx,
+    },
+  }));
+  const { error } = await s.from('sil_expediente_documentos').insert(rows);
+  if (error) {
+    logger.warn('textos_sustitutivos_insert_failed', { expedienteId, error: error.message });
+    return 0;
+  }
+  return rows.length;
+}
+
 function emptyResult(numero: string, status: EnrichResult['status'], error?: string): EnrichResult {
   return {
     numero,
@@ -565,6 +682,8 @@ function emptyResult(numero: string, status: EnrichResult['status'], error?: str
     orden_dia_apariciones_count: 0,
     fechas_vigentes_count: 0,
     actas_indexadas_count: 0,
+    consultas_count: 0,
+    textos_sustitutivos_count: 0,
     ...(error ? { error } : {}),
   };
 }
@@ -671,6 +790,22 @@ export async function enrichExpediente(
     // speakers — eso requiere parsing del PDF aparte).
     const actCount = await persistActasIndexadas(s, numero, enriched);
 
+    // Consultas a entidades — Pedido 04. Grid grvConsultas del mismo HTML
+    // del Select$0; no requiere postback adicional. Persiste como rows
+    // en sil_expediente_consultas (documento_url=null hasta que un job
+    // aparte descargue la respuesta vía Select$N).
+    const consCount = await persistConsultas(s, numero, enriched.consultas);
+
+    // Texto sustitutivo — Pedido 16k. Grid grvTextoSustitutivo del mismo
+    // HTML. Cada versión queda como sil_expediente_documentos
+    // tipo='texto_sustitutivo' con URL al detail panel del SIL.
+    const textSustCount = await persistTextosSustitutivos(
+      s,
+      numero,
+      numInt,
+      enriched.textosSustitutivos,
+    );
+
     // Nota: `sil_expediente_convocatoria` NO se llena aquí — la alimenta
     // `decretoIngestor.ts` cuando llega un decreto ejecutivo nuevo del
     // SharePoint GLCP. Es un flujo independiente al SIL del expediente.
@@ -686,6 +821,8 @@ export async function enrichExpediente(
       orden_dia_apariciones_count: ordCount,
       fechas_vigentes_count: fechCount,
       actas_indexadas_count: actCount,
+      consultas_count: consCount,
+      textos_sustitutivos_count: textSustCount,
     };
   } catch (e) {
     const message = (e as Error).message;
