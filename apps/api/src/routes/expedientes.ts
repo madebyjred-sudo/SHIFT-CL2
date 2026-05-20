@@ -269,17 +269,29 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
     const fechasExtraidas = fechasRes.length > 0
       ? (() => {
           const byCampo = Object.fromEntries(fechasRes.map((f: any) => [f.campo, f]));
-          const dictamen = byCampo['fecha_dictamen_estimada'];
+          // Pedido 07 — preferencia explícita por la fecha estimada de dictamen
+          // cuando está extraída del documento (negrita/regex/llm). Fallback en
+          // orden: vencimiento ordinario (deadline procesal de 60 días, el
+          // mismo número que la fecha estimada en la mayoría de los casos),
+          // luego cuatrienal (deadline máximo del cuatrienio).
+          // Mientras el extractor de texto-de-documento no esté listo, este
+          // fallback evita que TODOS los expedientes muestren "sin fechas"
+          // — al menos los enriquecidos ven el vencimiento del SIL oficial.
+          const vigenteRow =
+            byCampo['fecha_dictamen_estimada']
+            ?? byCampo['vence_subcomision']
+            ?? byCampo['fecha_cuatrienal']
+            ?? null;
           return {
-            vigente: dictamen ? {
-              campo: dictamen.campo,
-              valor_fecha: dictamen.valor_fecha,
-              valor_texto_original: dictamen.valor_texto_original,
-              visual_marker: dictamen.visual_marker,
-              fuente_documento_url: dictamen.fuente_documento_url,
-              fuente_pagina: dictamen.fuente_pagina,
-              extraction_method: dictamen.extraction_method,
-              extraction_confidence: dictamen.extraction_confidence,
+            vigente: vigenteRow ? {
+              campo: vigenteRow.campo,
+              valor_fecha: vigenteRow.valor_fecha,
+              valor_texto_original: vigenteRow.valor_texto_original,
+              visual_marker: vigenteRow.visual_marker,
+              fuente_documento_url: vigenteRow.fuente_documento_url,
+              fuente_pagina: vigenteRow.fuente_pagina,
+              extraction_method: vigenteRow.extraction_method,
+              extraction_confidence: vigenteRow.extraction_confidence,
             } : undefined,
             historial: [], // historial detallado: 0037 lo soporta pero requiere query separada
             otras_fechas: {
