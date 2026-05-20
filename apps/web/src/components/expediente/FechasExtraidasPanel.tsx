@@ -68,7 +68,9 @@ export function FechasExtraidasPanel({ vigente, historial, otrasFechas }: Props)
           <div className="flex items-start justify-between gap-4 mb-3">
             <div>
               <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-cl2-accent mb-1">
-                Fecha estimada de dictamen
+                {vigente.campo === 'vence_subcomision'
+                  ? 'Vencimiento ordinario (60 días)'
+                  : 'Fecha estimada de dictamen'}
               </div>
               <div className="text-2xl font-display font-light text-[#0e1745] dark:text-white">
                 {formatDate(vigente.valor_fecha)}
@@ -83,15 +85,9 @@ export function FechasExtraidasPanel({ vigente, historial, otrasFechas }: Props)
               {vigente.visual_marker === 'bold' && (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30">
                   <strong>B</strong>
-                  Extraído en NEGRITA
+                  Énfasis en negrita
                 </span>
               )}
-              <span className="text-[10.5px] text-[#0e1745]/50 dark:text-white/50">
-                confidence {(vigente.extraction_confidence * 100).toFixed(0)}%
-              </span>
-              <span className="text-[10.5px] text-[#0e1745]/50 dark:text-white/50 font-mono">
-                método: {vigente.extraction_method}
-              </span>
             </div>
           </div>
           {vigente.fuente_documento_url && (
@@ -113,22 +109,35 @@ export function FechasExtraidasPanel({ vigente, historial, otrasFechas }: Props)
       {/* ── Otras fechas relacionadas ── */}
       {otrasFechas && Object.keys(otrasFechas).length > 0 && (
         <div className="grid grid-cols-2 gap-3">
-          {Object.entries(otrasFechas).map(([campo, { valor, texto }]) => (
-            <div
-              key={campo}
-              className="rounded-xl border border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-white/70 dark:bg-white/[0.025] p-4"
-            >
-              <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-[#0e1745]/55 dark:text-white/55 mb-1">
-                {campo.replace(/_/g, ' ')}
+          {Object.entries(otrasFechas).map(([campo, fecha]) => {
+            // Guard contra rows malformadas (valor null/empty) — el frontend
+            // se rompía silenciosamente y mostraba "Invalid Date".
+            if (!fecha?.valor) return null;
+            const label =
+              campo === 'fecha_cuatrienal'
+                ? 'Vence cuatrienio (4 años)'
+                : campo === 'vence_subcomision'
+                  ? 'Vencimiento ordinario'
+                  : campo.replace(/_/g, ' ');
+            return (
+              <div
+                key={campo}
+                className="rounded-xl border border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-white/70 dark:bg-white/[0.025] p-4"
+              >
+                <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-[#0e1745]/55 dark:text-white/55 mb-1">
+                  {label}
+                </div>
+                <div className="text-base font-medium text-[#0e1745] dark:text-white">
+                  {formatDate(fecha.valor)}
+                </div>
+                {fecha.texto && (
+                  <div className="text-[11px] italic text-[#0e1745]/50 dark:text-white/50 mt-1">
+                    "{fecha.texto}"
+                  </div>
+                )}
               </div>
-              <div className="text-base font-medium text-[#0e1745] dark:text-white">
-                {formatDate(valor)}
-              </div>
-              <div className="text-[11px] italic text-[#0e1745]/50 dark:text-white/50 mt-1">
-                "{texto}"
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

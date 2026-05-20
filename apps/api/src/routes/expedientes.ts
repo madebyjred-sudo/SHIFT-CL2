@@ -269,19 +269,42 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
     const fechasExtraidas = fechasRes.length > 0
       ? (() => {
           const byCampo = Object.fromEntries(fechasRes.map((f: any) => [f.campo, f]));
-          // Pedido 07 — preferencia explícita por la fecha estimada de dictamen
-          // cuando está extraída del documento (negrita/regex/llm). Fallback en
-          // orden: vencimiento ordinario (deadline procesal de 60 días, el
-          // mismo número que la fecha estimada en la mayoría de los casos),
-          // luego cuatrienal (deadline máximo del cuatrienio).
-          // Mientras el extractor de texto-de-documento no esté listo, este
-          // fallback evita que TODOS los expedientes muestren "sin fechas"
-          // — al menos los enriquecidos ven el vencimiento del SIL oficial.
+          // Pedido 07 — fecha estimada de dictamen, en orden de preferencia:
+          //   1. fecha_dictamen_estimada (extraída del documento via regex/LLM)
+          //   2. vence_subcomision (Vencimiento Ordinario del SIL, deadline
+          //      procesal de 60 días — es el dato más cercano al concepto
+          //      "fecha de dictamen" en términos legales)
+          //
+          // IMPORTANTE: fecha_cuatrienal NO califica como "fecha estimada de
+          // dictamen". Es el deadline ABSOLUTO del cuatrienio (4 años) — un
+          // expediente recién presentado tiene cuatrienal en 2030 pero su
+          // dictamen procesal vence en 60 días. Mostrar 2030 como "fecha de
+          // dictamen" confunde al usuario. Si solo hay cuatrienal, el panel
+          // no muestra card vigente — solo cuatrienal en otras_fechas.
           const vigenteRow =
             byCampo['fecha_dictamen_estimada']
             ?? byCampo['vence_subcomision']
-            ?? byCampo['fecha_cuatrienal']
             ?? null;
+          // Filtrar otras_fechas: solo incluir keys cuyo valor existe.
+          // El frontend espera shape `{ valor, texto }` por campo. Antes
+          // pasábamos string suelto y el destructuring `{ valor, texto }`
+          // daba undefined → `new Date(undefined)` → "Invalid Date" en
+          // pantalla.
+          const otrasFechas: Record<string, { valor: string; texto: string }> = {};
+          if (byCampo['fecha_cuatrienal']?.valor_fecha) {
+            otrasFechas.fecha_cuatrienal = {
+              valor: byCampo['fecha_cuatrienal'].valor_fecha,
+              texto: byCampo['fecha_cuatrienal'].valor_texto_original ?? '',
+            };
+          }
+          if (byCampo['vence_subcomision']?.valor_fecha && vigenteRow?.campo !== 'vence_subcomision') {
+            // Si vence_subcomision YA está mostrándose como vigente, no lo
+            // duplicamos en otras_fechas.
+            otrasFechas.vence_subcomision = {
+              valor: byCampo['vence_subcomision'].valor_fecha,
+              texto: byCampo['vence_subcomision'].valor_texto_original ?? '',
+            };
+          }
           return {
             vigente: vigenteRow ? {
               campo: vigenteRow.campo,
@@ -294,10 +317,7 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
               extraction_confidence: vigenteRow.extraction_confidence,
             } : undefined,
             historial: [], // historial detallado: 0037 lo soporta pero requiere query separada
-            otras_fechas: {
-              fecha_cuatrienal: byCampo['fecha_cuatrienal']?.valor_fecha,
-              vence_subcomision: byCampo['vence_subcomision']?.valor_fecha,
-            },
+            otras_fechas: otrasFechas,
           };
         })()
       : (meta.fechas_extraidas ?? null);
