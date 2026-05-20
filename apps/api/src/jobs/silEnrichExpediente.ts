@@ -97,9 +97,17 @@ async function persistProponentes(
   proponentesFull: ProponenteFirmante[],
   fechaPresentacion: string | null,
 ): Promise<{ count: number }> {
-  // Borrar set existente para idempotencia
+  // SAFETY: si el SIL no devolvió proponentes (rate ~2%), NO borrar los
+  // existentes. Hay 9,554 expedientes que tienen proponentes del backfill
+  // manual previo pero sin tramite — cuando el enricher los re-procese
+  // para llenar las tablas faltantes, si el SIL falla en proponentes
+  // (no_proponentes status) NO debemos destruir los datos válidos
+  // previos. Bug descubierto 2026-05-20 antes del re-enrich masivo.
+  if (proponentesFull.length === 0) {
+    return { count: 0 };
+  }
+  // Borrar set existente — solo cuando hay reemplazo válido del SIL.
   await s.from('sil_expediente_proponentes').delete().eq('expediente_id', expedienteId);
-  if (proponentesFull.length === 0) return { count: 0 };
 
   // Mapping local de presidentes CR — para los casos Poder Ejecutivo donde
   // el SIL solo dice "PODER".
