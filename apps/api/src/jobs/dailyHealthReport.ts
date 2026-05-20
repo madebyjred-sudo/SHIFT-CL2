@@ -142,38 +142,26 @@ export async function runDailyHealthReport(): Promise<DailyHealthResult> {
   const s = supa();
   const since24h = new Date(Date.now() - 24 * 3_600_000).toISOString();
 
-  // ── Counts en paralelo ──────────────────────────────────────────
-  const [
-    silExpedientes,
-    silDocumentos,
-    silDocsEmbedded,
-    silProponentes,
-    silProponentesConFraccion,
-    sessionsIndexed,
-    sessionsPending,
-    sessionsRejected,
-    transcriptSegments,
-    centinelaEventos,
-    centinelaEventos24h,
-    diputados,
-    messages24h,
-    aiCallLog24h,
-  ] = await Promise.all([
-    rowCount('sil_expedientes'),
-    rowCount('sil_documentos'),
-    rowCount('sil_documentos', (q) => q.eq('status', 'embedded')),
-    rowCount('sil_expediente_proponentes'),
-    rowCount('sil_expediente_proponentes', (q) => q.not('fraccion', 'is', null)),
-    rowCount('sessions', (q) => q.eq('status', 'indexed')),
-    rowCount('sessions', (q) => q.eq('status', 'pending')),
-    rowCount('sessions', (q) => q.eq('status', 'rejected')),
-    rowCount('transcript_segments'),
-    rowCount('centinela_eventos'),
-    rowCount('centinela_eventos', (q) => q.gte('detected_at', since24h)),
-    rowCount('diputados'),
-    rowCount('messages', (q) => q.gte('created_at', since24h)),
-    rowCount('ai_call_log', (q) => q.gte('created_at', since24h)),
-  ]);
+  // ── Counts serializados ─────────────────────────────────────────
+  // Antes los corría en Promise.all (14 paralelos) pero algunos count(*)
+  // sobre tablas grandes (sil_documentos 22k, transcript_segments 73k)
+  // pegaban statement_timeout cuando Postgres se sobrecargaba con
+  // múltiples scans concurrentes. Serializar es ~3x más lento total
+  // (~3s en lugar de ~1s) pero 100% confiable.
+  const silExpedientes = await rowCount('sil_expedientes');
+  const silDocumentos = await rowCount('sil_documentos');
+  const silDocsEmbedded = await rowCount('sil_documentos', (q) => q.eq('status', 'embedded'));
+  const silProponentes = await rowCount('sil_expediente_proponentes');
+  const silProponentesConFraccion = await rowCount('sil_expediente_proponentes', (q) => q.not('fraccion', 'is', null));
+  const sessionsIndexed = await rowCount('sessions', (q) => q.eq('status', 'indexed'));
+  const sessionsPending = await rowCount('sessions', (q) => q.eq('status', 'pending'));
+  const sessionsRejected = await rowCount('sessions', (q) => q.eq('status', 'rejected'));
+  const transcriptSegments = await rowCount('transcript_segments');
+  const centinelaEventos = await rowCount('centinela_eventos');
+  const centinelaEventos24h = await rowCount('centinela_eventos', (q) => q.gte('detected_at', since24h));
+  const diputados = await rowCount('diputados');
+  const messages24h = await rowCount('messages', (q) => q.gte('created_at', since24h));
+  const aiCallLog24h = await rowCount('ai_call_log', (q) => q.gte('created_at', since24h));
 
   // `legislative_chunks` puede tener >800k rows; el count(*) es caro
   // (sequential scan en pgvector). Dejamos null y solo capturamos el
