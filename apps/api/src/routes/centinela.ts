@@ -142,9 +142,23 @@ centinelaInternalRouter.post('/sil-sync', async (req, res) => {
 centinelaInternalRouter.post('/sil-enrich', async (req, res) => {
   if (!validateInternalTrigger(req, res)) return;
 
-  const body = (req.body ?? {}) as { limit?: number; min_id?: number };
+  const body = (req.body ?? {}) as {
+    limit?: number;
+    min_id?: number;
+    /**
+     * Cuando se activa, en lugar de excluir expedientes ya con proponentes
+     * (modo default que cubre el backfill inicial), el endpoint TARGETEA
+     * expedientes que SÍ tienen proponentes pero NO tienen consultas
+     * todavía. Sirve para backfillear Pedidos 04 + 16k sobre los
+     * expedientes ya procesados antes del deploy del parser nuevo
+     * (2026-05-20). El enricher es idempotente (DELETE+INSERT en todas
+     * las tablas) así que re-correrlo no rompe nada.
+     */
+    re_enrich_for_consultas?: boolean;
+  };
   const limit = Math.min(Math.max(body.limit ?? 80, 1), 200);
   const minId = body.min_id ?? 25000;
+  const reEnrichForConsultas = body.re_enrich_for_consultas === true;
 
   try {
     const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -152,34 +166,69 @@ centinelaInternalRouter.post('/sil-enrich', async (req, res) => {
     if (!supaUrl || !supaKey) throw new Error('supabase env missing');
     const s = createSupaClient(supaUrl, supaKey, { auth: { persistSession: false, autoRefreshToken: false } });
 
-    // Targets: expedientes con id >= min_id que NO tienen proponentes aún
-    const { data: withProp } = await s.from('sil_expediente_proponentes').select('expediente_id');
-    const enrichedSet = new Set((withProp ?? []).map((r) => r.expediente_id as string));
+    let targets: string[];
 
-    const { data: candidates } = await s
-      .from('sil_expedientes')
-      .select('numero, id')
-      .gte('id', minId)
-      .order('id', { ascending: false })
-      .limit(limit * 5); // sobre-pedimos porque algunos ya están enriched
+    if (reEnrichForConsultas) {
+      // Backfill de Pedidos 04 + 16k sobre expedientes ya procesados.
+      // Pedimos los expedientes que SÍ tienen proponentes pero NO tienen
+      // consultas. (Algunos tendrán 0 consultas reales — los marcamos como
+      // "intentados" via cualquier otra señal, pero por simplicidad acá
+      // el reintento sobre los que ya intentamos no rompe nada porque el
+      // enricher es idempotente.)
+      const { data: withProp } = await s.from('sil_expediente_proponentes').select('expediente_id');
+      const propSet = new Set((withProp ?? []).map((r) => r.expediente_id as string));
+      const { data: withCons } = await s.from('sil_expediente_consultas').select('expediente_id');
+      const consSet = new Set((withCons ?? []).map((r) => r.expediente_id as string));
 
-    const targets = (candidates ?? [])
-      .filter((r) => !enrichedSet.has(r.numero as string))
-      .slice(0, limit)
-      .map((r) => r.numero as string);
+      const { data: candidates } = await s
+        .from('sil_expedientes')
+        .select('numero, id')
+        .gte('id', minId)
+        .order('id', { ascending: false })
+        .limit(limit * 5);
+
+      targets = (candidates ?? [])
+        .filter((r) => propSet.has(r.numero as string) && !consSet.has(r.numero as string))
+        .slice(0, limit)
+        .map((r) => r.numero as string);
+    } else {
+      // Modo default: enrich inicial — expedientes SIN proponentes.
+      const { data: withProp } = await s.from('sil_expediente_proponentes').select('expediente_id');
+      const enrichedSet = new Set((withProp ?? []).map((r) => r.expediente_id as string));
+
+      const { data: candidates } = await s
+        .from('sil_expedientes')
+        .select('numero, id')
+        .gte('id', minId)
+        .order('id', { ascending: false })
+        .limit(limit * 5); // sobre-pedimos porque algunos ya están enriched
+
+      targets = (candidates ?? [])
+        .filter((r) => !enrichedSet.has(r.numero as string))
+        .slice(0, limit)
+        .map((r) => r.numero as string);
+    }
 
     if (targets.length === 0) {
-      res.json({ ok: true, result: { enriched: 0, message: 'no targets — all up to date' } });
+      res.json({
+        ok: true,
+        result: {
+          enriched: 0,
+          message: reEnrichForConsultas
+            ? 'no targets — todos los expedientes ya tienen consultas registradas'
+            : 'no targets — all up to date',
+        },
+      });
       return;
     }
 
     const result = await enrichExpedientesBulk(s, targets, { politenessMs: 700 });
     logger.info('centinela_internal_sil_enrich_complete', {
       ...result,
+      mode: reEnrichForConsultas ? 're_enrich_for_consultas' : 'initial',
       processed: targets.length,
-      remaining_estimate: Math.max(0, (candidates?.length ?? 0) - enrichedSet.size - targets.length),
     });
-    res.json({ ok: true, result, processed: targets.length });
+    res.json({ ok: true, result, processed: targets.length, mode: reEnrichForConsultas ? 're_enrich_for_consultas' : 'initial' });
   } catch (err) {
     const message = (err as Error)?.message ?? String(err);
     req.log?.error('centinela_internal_sil_enrich_failed', { error: message });
