@@ -208,15 +208,38 @@ centinelaInternalRouter.post('/sil-enrich', async (req, res) => {
       // es idempotente (DELETE+INSERT en todas las tablas), así que
       // re-procesar uno con proponentes no rompe nada — solo agrega las
       // 7 tablas restantes.
-      const { data: withTramite } = await s.from('sil_expediente_tramite').select('expediente_id');
-      const enrichedSet = new Set((withTramite ?? []).map((r) => r.expediente_id as string));
+      // PAGINAR withTramite — PostgREST default limit es 1000 rows. Con
+      // 3,400+ expedientes con tramite, el query naive solo trae los
+      // primeros 1000. Resultado: 2,400+ expedientes que SÍ tienen tramite
+      // se consideran "sin tramite" y el endpoint los re-procesa
+      // infinitamente, bloqueando expedientes realmente pendientes.
+      // Bug descubierto 2026-05-21: workers gastaron 12h re-procesando
+      // expedientes ya completos mientras 25.493 (real pendiente) nunca
+      // se tocó. Fix: paginar en chunks de 1000 hasta agotar.
+      const enrichedSet = new Set<string>();
+      const PAGE_SIZE = 1000;
+      let pageFrom = 0;
+      while (true) {
+        const { data: page } = await s
+          .from('sil_expediente_tramite')
+          .select('expediente_id')
+          .range(pageFrom, pageFrom + PAGE_SIZE - 1);
+        if (!page || page.length === 0) break;
+        for (const r of page) enrichedSet.add(r.expediente_id as string);
+        if (page.length < PAGE_SIZE) break;
+        pageFrom += PAGE_SIZE;
+      }
 
+      // Para candidates, sobre-pedimos generosamente. Con 21k expedientes
+      // y filtro stale, podemos necesitar revisar mucho más que limit*5.
+      // Usar paginación si limit*20 < total para asegurar que tomamos los
+      // mejores candidatos (id DESC).
       const { data: candidates } = await s
         .from('sil_expedientes')
         .select('numero, id')
         .gte('id', minId)
         .order('id', { ascending: false })
-        .limit(limit * 5); // sobre-pedimos porque algunos ya están enriched
+        .limit(Math.max(limit * 20, 5000));
 
       targets = (candidates ?? [])
         .filter((r) => !enrichedSet.has(r.numero as string))
