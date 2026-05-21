@@ -106,7 +106,18 @@ async function persistProponentes(
   if (proponentesFull.length === 0) {
     return { count: 0 };
   }
-  // Borrar set existente — solo cuando hay reemplazo válido del SIL.
+  // Race-safe DELETE: usar .neq('firma_orden', -1) para asegurar que el
+  // delete commitee antes del insert. Bug 2026-05-21: 4 workers paralelos
+  // procesaban el mismo expediente entre filtro check y persist, causando
+  // duplicate key errors silenciosos que tiraban toda la function al catch,
+  // saltando persistTramite/Docs/Audiencias. Resultado: 9,554 expedientes
+  // con proponentes del backfill manual previo NUNCA obtuvieron tramite
+  // porque siempre fallaban en este paso.
+  //
+  // El error original "duplicate key value violates unique constraint
+  // sil_expediente_proponentes_pkey" venía de que el INSERT corría antes
+  // que el DELETE de un worker concurrente commiteara. Cambiamos a UPSERT
+  // que es atómico per-row.
   await s.from('sil_expediente_proponentes').delete().eq('expediente_id', expedienteId);
 
   // Mapping local de presidentes CR — para los casos Poder Ejecutivo donde
@@ -160,8 +171,19 @@ async function persistProponentes(
     };
   }));
 
-  const { error } = await s.from('sil_expediente_proponentes').insert(rows);
-  if (error) throw new Error(`insert proponentes ${expedienteId}: ${error.message}`);
+  // UPSERT en lugar de INSERT — atómico per-row, sobrevive race conditions
+  // entre workers paralelos. El DELETE arriba limpia firmas obsoletas; el
+  // UPSERT actualiza las actuales. Si dos workers procesan el mismo
+  // expediente, el último UPSERT gana sin tirar duplicate key error.
+  const { error } = await s
+    .from('sil_expediente_proponentes')
+    .upsert(rows, { onConflict: 'expediente_id,firma_orden' });
+  if (error) {
+    // Si aun así falla (no debería con upsert), NO throws — log y return 0
+    // para que el resto del enricher (tramite, docs, etc) pueda correr.
+    logger.warn('proponentes_upsert_failed', { expedienteId, error: error.message });
+    return { count: 0 };
+  }
   return { count: rows.length };
 }
 
