@@ -218,8 +218,11 @@ async function persistDocumentos(
   expedienteNum: number,
   docs: Array<{ tipo: string; titulo: string | null; fecha: string | null; grid: string; index: number }>,
 ): Promise<number> {
-  await s.from('sil_expediente_documentos').delete().eq('expediente_id', expedienteId);
+  // SAFETY (2026-05-21): NO borrar docs existentes si el parser devuelve [].
+  // El SIL puede devolver detail panel sin grids cargados (timeout, error,
+  // session expiry) y borrar destruye la lista buena del enricher previo.
   if (docs.length === 0) return 0;
+  await s.from('sil_expediente_documentos').delete().eq('expediente_id', expedienteId);
 
   // ── Lookup en sil_documentos (legacy) para tomar gcs_path + status ─────
   // sil_documentos.expediente_id es INTEGER referenciando sil_expedientes.id.
@@ -279,8 +282,11 @@ async function persistAudienciasDesdeSil(
   html: string,
 ): Promise<number> {
   const audiencias = parseAudienciasFromDetail(html);
-  await s.from('sil_expediente_audiencias').delete().eq('expediente_id', expedienteId);
+  // SAFETY (2026-05-21): si parser devuelve [], NO borrar audiencias
+  // existentes. El SIL falla intermitentemente o pagina el grid; borrar
+  // destruye datos válidos previos.
   if (audiencias.length === 0) return 0;
+  await s.from('sil_expediente_audiencias').delete().eq('expediente_id', expedienteId);
   const rows = audiencias.map((a) => ({
     expediente_id: expedienteId,
     fecha: a.fecha,
@@ -315,8 +321,13 @@ async function persistTramite(
   html: string,
 ): Promise<number> {
   const eventos = parseTramiteFromDetail(html);
-  await s.from('sil_expediente_tramite').delete().eq('expediente_id', expedienteId);
+  // SAFETY (2026-05-21): si parser devuelve [], NO borrar tramite previo.
+  // El SIL falla intermitentemente con HTML truncado o sin grvTramite;
+  // borrar destruye eventos válidos del backfill o procesos anteriores.
+  // Bug confirmado: tramite count estancado en 496 cuando workers reciben
+  // HTML sin grvTramite y borran sus 30+ expedientes previamente buenos.
   if (eventos.length === 0) return 0;
+  await s.from('sil_expediente_tramite').delete().eq('expediente_id', expedienteId);
   const rows = eventos.map((e, idx) => ({
     expediente_id: expedienteId,
     organo_legislativo: e.organo,
@@ -651,8 +662,9 @@ async function persistConsultas(
   expedienteId: string,
   consultas: ExpedienteEnriched['consultas'],
 ): Promise<number> {
-  await s.from('sil_expediente_consultas').delete().eq('expediente_id', expedienteId);
+  // SAFETY (2026-05-21): NO borrar consultas previas si parser devuelve [].
   if (consultas.length === 0) return 0;
+  await s.from('sil_expediente_consultas').delete().eq('expediente_id', expedienteId);
   const rows = consultas.map((c) => ({
     expediente_id: expedienteId,
     entidad_consultada: c.entidad,
