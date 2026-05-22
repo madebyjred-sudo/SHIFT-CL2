@@ -708,6 +708,75 @@ centinelaInternalRouter.post('/ingest-transcript-chunks', async (req, res) => {
 // Scheduler para automatización completa.
 // Para ingest-ral-chunks: Reglamento estable, manual con `npm run ingest:ral`.
 
+/**
+ * POST /api/internal/centinela/ingest-decretos
+ *
+ * Pedido 16i — Decretos ejecutivos. Procesa los items en
+ * sil_sharepoint_raw que aún no están en decretos_ejecutivos.
+ *
+ * Cloud Scheduler reference:
+ *   gcloud scheduler jobs create http cl2-ingest-decretos \
+ *     --schedule='0 5 * * *' --time-zone='America/Costa_Rica' \
+ *     --uri="https://<service>/api/internal/centinela/ingest-decretos" \
+ *     --http-method=POST --headers="X-Internal-Trigger=$INTERNAL_TRIGGER_SECRET"
+ */
+centinelaInternalRouter.post('/ingest-decretos', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  try {
+    const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supaKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!supaUrl || !supaKey) throw new Error('supabase env missing');
+    const s = createSupaClient(supaUrl, supaKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+
+    const { ingestNewDecretos } = await import('../services/decretoIngestor.js');
+    const result = await ingestNewDecretos(s);
+
+    logger.info('centinela_internal_ingest_decretos_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_ingest_decretos_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/process-ordenes-dia
+ *
+ * Pedido 06 — Órdenes del día de comisiones. Procesa los PDFs en
+ * sil_sharepoint_raw (list_id='Órdenes del día') extrayendo expedientes
+ * mencionados y poblando agenda_legislativa.
+ *
+ * Body opcional: { limit?: number (default 200, cap 1000) }
+ *
+ * Cloud Scheduler reference:
+ *   gcloud scheduler jobs create http cl2-process-ordenes-dia \
+ *     --schedule='30 5 * * *' --time-zone='America/Costa_Rica' \
+ *     --uri="https://<service>/api/internal/centinela/process-ordenes-dia" \
+ *     --http-method=POST --headers="X-Internal-Trigger=$INTERNAL_TRIGGER_SECRET"
+ */
+centinelaInternalRouter.post('/process-ordenes-dia', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  const body = (req.body ?? {}) as { limit?: number };
+  const limit = Math.min(Math.max(body.limit ?? 200, 1), 1000);
+
+  try {
+    const { processOrdenesDia } = await import('../jobs/processOrdenesDia.js');
+    const result = await processOrdenesDia({ limit });
+
+    logger.info('centinela_internal_process_ordenes_dia_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_process_ordenes_dia_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
 // ── /api/admin/centinela router ───────────────────────────────────────────────
 
 export const centinelaAdminRouter = Router();

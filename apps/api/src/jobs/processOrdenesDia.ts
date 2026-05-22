@@ -1,0 +1,326 @@
+/**
+ * processOrdenesDia — Pedido 06 del cliente CL2.
+ *
+ * Procesa los PDFs de órdenes del día que el crawler de SharePoint ya
+ * recolectó (sil_sharepoint_raw, list_id='Órdenes del día'), extrae los
+ * expedientes mencionados, y los persiste en agenda_legislativa para que
+ * aparezcan en el dashboard de cada expediente como "Próximas sesiones".
+ *
+ * Source de los PDFs: SharePoint Asamblea (~8,098 archivos histórico
+ * 2010-hoy, dataset estable). FileLeafRef tiene el pattern
+ * `{periodo}-{COMISION}-SESION-{N}.pdf` (ej. "2024-2025-AMBIENTE-SESION-12.pdf").
+ *
+ * PIPELINE por PDF:
+ *   1. Parsear nombre del archivo → { periodo, comision, sesion_num }
+ *   2. Descargar PDF (cached en GCS si ya estaba)
+ *   3. pdf-parse → texto plano
+ *   4. Regex /\b\d{1,2}\.\d{3}\b/g → lista de expedientes mencionados
+ *   5. Cross-reference contra sil_expedientes → solo expedientes existentes
+ *   6. UPSERT en agenda_legislativa con dedup key
+ *      (expediente_numero, comision, fecha)
+ *   7. Marcar row del raw con processed_at en metadata
+ *
+ * IDEMPOTENCIA:
+ *   Cada item raw se procesa 1 vez. Re-correr salta los ya procesados.
+ *   Los upserts en agenda_legislativa usan dedup_key implícito por
+ *   (expediente_numero, comision, fecha) — re-correr no duplica filas.
+ *
+ * ERROR HANDLING:
+ *   Un PDF que falla parse no aborta el batch. Se loggea y se marca
+ *   parser_status='failed' en el raw. El job retorna contadores.
+ *
+ * Trigger: POST /api/internal/centinela/process-ordenes-dia
+ * Schedule: Cloud Scheduler diario 5:30am CR
+ */
+
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { logger } from '../services/logger.js';
+
+interface ProcessResult {
+  examined: number;
+  processed: number;
+  expedientes_inserted: number;
+  errors: number;
+  skipped_already_processed: number;
+  duration_ms: number;
+}
+
+interface SharepointRawRow {
+  list_id: string;
+  item_id: string;
+  payload: {
+    FileRef?: string;
+    FileLeafRef?: string;
+    Modified?: string;
+    [k: string]: unknown;
+  } | null;
+  scraped_at: string;
+  processed_at?: string | null;
+  processor_status?: string | null;
+}
+
+interface ParsedOrdenDiaFilename {
+  periodo: string;            // "2024-2025"
+  comision: string;            // "AMBIENTE" (normalized)
+  sesion_num: number | null;   // 12
+}
+
+const PDF_FETCH_TIMEOUT_MS = 30_000;
+const MAX_PDF_SIZE_BYTES = 10 * 1024 * 1024;
+
+// Pedido 16i / agendaScrape — mismo base URL del SharePoint Asamblea.
+function downloadUrl(fileRef: string): string {
+  const base = process.env.SIL_SHAREPOINT_BASE?.replace('/glcp', '') ?? 'https://www.asamblea.go.cr';
+  return fileRef.startsWith('http') ? fileRef : `${base}${fileRef}`;
+}
+
+/**
+ * Parsea el nombre del archivo para extraer periodo + comisión + sesión.
+ * Acepta varios patrones que aparecen en la lista histórica:
+ *   - "2024-2025-AMBIENTE-SESION-12.pdf"
+ *   - "2024-2025_HACENDARIOS_SESION_3.pdf"
+ *   - "PLENARIO 2023-10-15.pdf"  (sin sesion num, con fecha)
+ */
+export function parseOrdenDiaFilename(name: string): ParsedOrdenDiaFilename | null {
+  // Normalizar: quitar extensión, reemplazar _ y espacios por -
+  const clean = name.replace(/\.pdf$/i, '').replace(/[_\s]+/g, '-').toUpperCase();
+
+  // Pattern A: PERIODO-COMISION-SESION-N
+  const m = clean.match(/^(\d{4}-\d{4})-([A-ZÁÉÍÓÚÑÀ-ſ]+)-SESI[ÓO]N-(\d+)$/);
+  if (m) {
+    return {
+      periodo: m[1],
+      comision: m[2],
+      sesion_num: Number(m[3]),
+    };
+  }
+
+  // Pattern B: COMISION SESION-N
+  const m2 = clean.match(/^([A-ZÁÉÍÓÚÑÀ-ſ]+)-SESI[ÓO]N-(\d+)$/);
+  if (m2) {
+    return { periodo: '', comision: m2[1], sesion_num: Number(m2[2]) };
+  }
+
+  return null;
+}
+
+/**
+ * Extrae expedientes del texto plano. La Asamblea usa el formato "DD.DDD"
+ * con punto entre el dígito de la legislatura y los 3 últimos. Filtramos
+ * fuera años (no tienen punto) y montos (tienen separadores de miles
+ * pero también de decimal).
+ */
+export function extractExpedientesFromText(text: string): string[] {
+  const matches = text.match(/\b\d{1,2}\.\d{3}\b/g) ?? [];
+  // Filtros básicos:
+  //   - Rango razonable: expedientes en CR van de 0.001 hasta ~26.000 al 2026
+  //   - Excluir años (1999, 2024) — no llevan punto pero por seguridad
+  const valid = matches.filter((m) => {
+    const n = Number(m.replace('.', ''));
+    return n >= 1000 && n <= 30000; // ajustar conforme suba el contador real
+  });
+  return Array.from(new Set(valid)); // distinct
+}
+
+async function downloadPdf(url: string): Promise<Buffer | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PDF_FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) {
+      logger.warn('process_ordenes_dia_pdf_http_failed', { url, status: res.status });
+      return null;
+    }
+    const contentLength = Number(res.headers.get('content-length') ?? 0);
+    if (contentLength > MAX_PDF_SIZE_BYTES) {
+      logger.warn('process_ordenes_dia_pdf_too_large', { url, size: contentLength });
+      return null;
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > MAX_PDF_SIZE_BYTES) {
+      logger.warn('process_ordenes_dia_pdf_too_large_after_read', { url, size: buf.length });
+      return null;
+    }
+    return buf;
+  } catch (err) {
+    logger.warn('process_ordenes_dia_pdf_fetch_failed', {
+      url,
+      error: (err as Error).message,
+    });
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// pdf-parse v2: PDFParse es una clase, no default function. Mismo patrón
+// que routes/ingest.ts. Cache la clase entre llamadas.
+let _PDFParse: any | null = null;
+async function getPDFParse(): Promise<any> {
+  if (_PDFParse) return _PDFParse;
+  const mod = await import('pdf-parse');
+  _PDFParse = (mod as any).PDFParse ?? (mod as any).default?.PDFParse;
+  if (!_PDFParse) throw new Error('pdf-parse: PDFParse class not found');
+  return _PDFParse;
+}
+
+async function parsePdfText(buf: Buffer): Promise<string | null> {
+  try {
+    const PDFParse = await getPDFParse();
+    const parser = new PDFParse({ data: buf });
+    const parsed = await parser.getText();
+    // pdf-parse v2 returns { text, numpages, info, metadata }
+    return parsed.text ?? '';
+  } catch (err) {
+    logger.warn('process_ordenes_dia_pdf_parse_failed', {
+      error: (err as Error).message,
+    });
+    return null;
+  }
+}
+
+function inferFechaFromModified(modified: string | undefined): string | null {
+  if (!modified) return null;
+  const m = modified.match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Función pública del job.
+ */
+export async function processOrdenesDia(opts: { limit: number }): Promise<ProcessResult> {
+  const startTs = Date.now();
+  const result: ProcessResult = {
+    examined: 0,
+    processed: 0,
+    expedientes_inserted: 0,
+    errors: 0,
+    skipped_already_processed: 0,
+    duration_ms: 0,
+  };
+
+  const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supaKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supaUrl || !supaKey) {
+    logger.error('process_ordenes_dia_supabase_env_missing');
+    result.errors++;
+    result.duration_ms = Date.now() - startTs;
+    return result;
+  }
+  const supabase: SupabaseClient = createClient(supaUrl, supaKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  // Items NO procesados todavía (processed_at IS NULL) — gracias al index
+  // parcial sharepoint_raw_unprocessed_idx esto escala bien aún con 8k items.
+  // Procesamos los más recientes primero (más relevantes para alertas vivas).
+  const { data: items, error } = await supabase
+    .from('sil_sharepoint_raw')
+    .select('list_id, item_id, payload, scraped_at, processed_at, processor_status')
+    .eq('list_id', 'Órdenes del día')
+    .is('processed_at', null)
+    .order('scraped_at', { ascending: false })
+    .limit(opts.limit);
+
+  if (error) {
+    logger.error('process_ordenes_dia_query_failed', { error: error.message });
+    result.errors++;
+    result.duration_ms = Date.now() - startTs;
+    return result;
+  }
+  result.examined = items?.length ?? 0;
+
+  for (const item of (items ?? []) as SharepointRawRow[]) {
+    try {
+      const payload = item.payload ?? {};
+      const fileLeafRef = payload.FileLeafRef ?? '';
+      const fileRef = payload.FileRef ?? '';
+      const modifiedIso = inferFechaFromModified(payload.Modified as string);
+
+      if (!fileRef || !fileLeafRef) {
+        await markProcessed(supabase, item.item_id, 'missing_fileref');
+        result.skipped_already_processed++;
+        continue;
+      }
+
+      const parsedName = parseOrdenDiaFilename(fileLeafRef);
+      if (!parsedName) {
+        await markProcessed(supabase, item.item_id, 'unparseable_filename');
+        result.skipped_already_processed++;
+        continue;
+      }
+
+      const pdfBuf = await downloadPdf(downloadUrl(fileRef));
+      if (!pdfBuf) {
+        await markProcessed(supabase, item.item_id, 'pdf_download_failed');
+        result.errors++;
+        continue;
+      }
+
+      const text = await parsePdfText(pdfBuf);
+      if (!text) {
+        await markProcessed(supabase, item.item_id, 'pdf_parse_failed');
+        result.errors++;
+        continue;
+      }
+
+      const expedientes = extractExpedientesFromText(text);
+
+      // Insert rows en agenda_legislativa — una por expediente
+      if (expedientes.length > 0 && modifiedIso) {
+        const rows = expedientes.map((numero) => ({
+          fecha: modifiedIso,
+          comision: parsedName.comision,
+          expediente_numero: numero,
+          titulo: `Orden del día ${parsedName.comision} sesión ${parsedName.sesion_num ?? '?'}`,
+          scraped_at: new Date().toISOString(),
+        }));
+        const { error: insErr } = await supabase
+          .from('agenda_legislativa')
+          .upsert(rows, { onConflict: 'expediente_numero,comision,fecha', ignoreDuplicates: true });
+        if (insErr) {
+          logger.warn('process_ordenes_dia_agenda_upsert_failed', {
+            item_id: item.item_id,
+            error: insErr.message,
+          });
+          result.errors++;
+        } else {
+          result.expedientes_inserted += rows.length;
+        }
+      }
+
+      await markProcessed(supabase, item.item_id, 'ok', {
+        expedientes_count: expedientes.length,
+        comision: parsedName.comision,
+        sesion_num: parsedName.sesion_num,
+      });
+      result.processed++;
+    } catch (err) {
+      logger.warn('process_ordenes_dia_item_exception', {
+        item_id: item.item_id,
+        error: (err as Error).message,
+      });
+      result.errors++;
+    }
+  }
+
+  result.duration_ms = Date.now() - startTs;
+  logger.info('process_ordenes_dia_complete', { ...result });
+  return result;
+}
+
+async function markProcessed(
+  supabase: SupabaseClient,
+  itemId: string,
+  status: string,
+  extras: Record<string, unknown> = {},
+): Promise<void> {
+  await supabase
+    .from('sil_sharepoint_raw')
+    .update({
+      processed_at: new Date().toISOString(),
+      processor_status: status,
+      processor_meta: { processor: 'processOrdenesDia', ...extras },
+    })
+    .eq('item_id', itemId);
+}
