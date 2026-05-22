@@ -208,6 +208,10 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
       'consulta_177_no_reflejada_en_tramite',
       'acta_sin_evento_tramite',
       'mocion_segundo_dia_sin_primer_dia',
+      // 2026-05-22: Agregado para Pedido 11 / 11bis (aviso cuando aparece
+      // una moción nueva en el expediente watched). El cron mocionAlertScan
+      // y el backfill SQL emiten este tipo con priority y descripcion.
+      'mocion_fondo_presentada',
     ] as const;
 
     let novedadesDetectadas: unknown[] = [];
