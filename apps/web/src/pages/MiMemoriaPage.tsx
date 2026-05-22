@@ -14,7 +14,7 @@
  */
 import { useEffect, useMemo, useState, useCallback, type DragEvent } from 'react';
 import {
-  BookHeart, ChevronDown, ChevronRight, FilePlus, Folder,
+  ArrowLeft, BookHeart, ChevronDown, ChevronRight, FilePlus, Folder,
   FolderOpen, FolderPlus, History, Loader2, MoveRight, Plus, Save,
   Trash2, Users, X, AlertCircle,
 } from 'lucide-react';
@@ -510,6 +510,15 @@ export function MiMemoriaPage() {
       {/* HERO */}
       <header className="border-b border-white/5 bg-gradient-to-b from-cl2-burgundy/5 to-transparent">
         <div className="mx-auto max-w-6xl px-6 py-12">
+          {/* Botón volver — pedido cliente 2026-05-22 */}
+          <button
+            onClick={() => window.history.length > 1 ? window.history.back() : (window.location.href = '/')}
+            className="inline-flex items-center gap-1.5 text-[12px] text-cl2-ink/55 hover:text-cl2-ink mb-5 transition-colors"
+            aria-label="Volver"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            Volver
+          </button>
           <div className="flex items-center gap-3 text-xs uppercase tracking-[0.16em] text-cl2-burgundy/80 mb-3">
             <BookHeart className="w-3.5 h-3.5" />
             <span>Tu memoria en CL2</span>
