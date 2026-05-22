@@ -291,18 +291,23 @@ export async function processOrdenesDia(opts: { limit: number }): Promise<Proces
 
       const expedientes = extractExpedientesFromText(text);
 
-      // Insert rows en agenda_legislativa — una por expediente
+      // Insert rows en agenda_legislativa — una por expediente.
+      // unique constraint real es (fecha, comision, titulo) — si todos los
+      // rows del mismo PDF llevan el mismo título "Orden del día X sesión Y"
+      // solo 1 sobrevive. Hacemos el título único por row metiendo el número
+      // del expediente — eso convierte el unique de facto en
+      // (fecha, comision, expediente_numero) sin migración.
       if (expedientes.length > 0 && modifiedIso) {
         const rows = expedientes.map((numero) => ({
           fecha: modifiedIso,
           comision: parsedName.comision,
           expediente_numero: numero,
-          titulo: `Orden del día ${parsedName.comision} sesión ${parsedName.sesion_num ?? '?'}`,
+          titulo: `Exp. ${numero} · Orden del día ${parsedName.comision} sesión ${parsedName.sesion_num ?? '?'}`,
           scraped_at: new Date().toISOString(),
         }));
-        const { error: insErr } = await supabase
+        const { error: insErr, count } = await supabase
           .from('agenda_legislativa')
-          .upsert(rows, { onConflict: 'expediente_numero,comision,fecha', ignoreDuplicates: true });
+          .upsert(rows, { onConflict: 'fecha,comision,titulo', ignoreDuplicates: true, count: 'exact' });
         if (insErr) {
           logger.warn('process_ordenes_dia_agenda_upsert_failed', {
             item_id: item.item_id,
@@ -310,7 +315,7 @@ export async function processOrdenesDia(opts: { limit: number }): Promise<Proces
           });
           result.errors++;
         } else {
-          result.expedientes_inserted += rows.length;
+          result.expedientes_inserted += count ?? rows.length;
         }
       }
 
