@@ -49,13 +49,15 @@ FROM mcr.microsoft.com/playwright:v1.59.1-noble AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV API_PORT=8080
-# --use-system-ca hace que Node 20 use el trust store del OS (Ubuntu Noble
-# trae los root CAs estándar) en lugar de su bundle hardcoded. Necesario
-# para scrapear www.asamblea.go.cr (IIS con CA intermedio que Node no
-# valida por default — UNABLE_TO_VERIFY_LEAF_SIGNATURE en fetch nativo).
-# Detectado 2026-05-22 después de que decretos + órdenes del día
-# fallaron todos en Cloud Run pero funcionaban en local con curl.
-ENV NODE_OPTIONS="--use-system-ca"
+# NODE_EXTRA_CA_CERTS apunta al bundle del sistema (Ubuntu Noble trae los
+# root + intermedios via ca-certificates package). Necesario para scrapear
+# www.asamblea.go.cr — su IIS sirve un cert con CA intermedio que Node 20
+# nativo no valida (UNABLE_TO_VERIFY_LEAF_SIGNATURE).
+#
+# El flag --use-system-ca sería más limpio pero requiere Node 22.10+; nos
+# quedamos en Node 20 por compatibilidad con yt-dlp y otras deps.
+# Detectado 2026-05-22 tras debug exhaustivo con err.cause.code.
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 
 # Playwright base image already ships Chromium under /ms-playwright (root-readable).
 # Tell node-side Playwright to look there so the lazy import in

@@ -96,6 +96,7 @@ gcloud run deploy "$SERVICE_NAME" \
   ${TRAFFIC_FLAGS[@]+"${TRAFFIC_FLAGS[@]}"} \
   --set-env-vars "API_PORT=8080" \
   --set-env-vars "NODE_ENV=production" \
+  --set-env-vars "NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt" \
   --set-env-vars "NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL" \
   --set-env-vars "SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SERVICE_ROLE_KEY" \
   --set-env-vars "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=$NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY" \
