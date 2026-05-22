@@ -49,15 +49,20 @@ FROM mcr.microsoft.com/playwright:v1.59.1-noble AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV API_PORT=8080
-# NODE_EXTRA_CA_CERTS apunta al bundle del sistema (Ubuntu Noble trae los
-# root + intermedios via ca-certificates package). Necesario para scrapear
-# www.asamblea.go.cr — su IIS sirve un cert con CA intermedio que Node 20
-# nativo no valida (UNABLE_TO_VERIFY_LEAF_SIGNATURE).
+# www.asamblea.go.cr (IIS público de la Asamblea) NO sirve la cadena
+# completa de certificados — solo el leaf. El cert intermedio que falta
+# es "GlobalSign GCC R3 DV TLS CA 2020", emitido por GlobalSign Root R3
+# (que SÍ está en el bundle del sistema). Sin el intermedio, Node 20
+# rechaza con UNABLE_TO_VERIFY_LEAF_SIGNATURE porque no hace AIA fetch.
 #
-# El flag --use-system-ca sería más limpio pero requiere Node 22.10+; nos
-# quedamos en Node 20 por compatibilidad con yt-dlp y otras deps.
-# Detectado 2026-05-22 tras debug exhaustivo con err.cause.code.
-ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
+# Solución: bundle-amos el intermedio dentro de la imagen + apuntamos
+# NODE_EXTRA_CA_CERTS al bundle combinado (system + nuestro intermedio).
+# El cert se descargó de http://secure.globalsign.com/cacert/gsgccr3dvtlsca2020.crt
+# (DER convertido a PEM, en infra/deploy/certs/gsgccr3.pem).
+COPY infra/deploy/certs/gsgccr3.pem /usr/local/share/ca-certificates/gsgccr3.crt
+RUN cat /etc/ssl/certs/ca-certificates.crt /usr/local/share/ca-certificates/gsgccr3.crt \
+      > /etc/ssl/certs/cl2-ca-bundle.crt
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/cl2-ca-bundle.crt
 
 # Playwright base image already ships Chromium under /ms-playwright (root-readable).
 # Tell node-side Playwright to look there so the lazy import in
