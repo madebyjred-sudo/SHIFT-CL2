@@ -127,34 +127,55 @@ export function extractExpedientesFromText(text: string): string[] {
 }
 
 async function downloadPdf(url: string): Promise<Buffer | null> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PDF_FETCH_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    if (!res.ok) {
-      logger.warn('process_ordenes_dia_pdf_http_failed', { url, status: res.status });
-      return null;
+  // Retry x3 con User-Agent (mismo patrón que decretoIngestor) — el IIS del
+  // SharePoint Asamblea rechaza requests sin User-Agent identificable.
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PDF_FETCH_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/pdf, application/octet-stream, */*',
+          'User-Agent': 'Mozilla/5.0 (compatible; CL2-Ingest/1.0; +https://agentescl2.com)',
+        },
+      });
+      if (!res.ok) {
+        if (attempt === MAX_ATTEMPTS) {
+          logger.warn('process_ordenes_dia_pdf_http_failed', { url, status: res.status });
+        }
+        if (res.status < 500) return null; // 4xx no se reintenta
+        await new Promise((r) => setTimeout(r, 1000 * attempt));
+        continue;
+      }
+      const contentLength = Number(res.headers.get('content-length') ?? 0);
+      if (contentLength > MAX_PDF_SIZE_BYTES) {
+        logger.warn('process_ordenes_dia_pdf_too_large', { url, size: contentLength });
+        return null;
+      }
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length > MAX_PDF_SIZE_BYTES) {
+        logger.warn('process_ordenes_dia_pdf_too_large_after_read', { url, size: buf.length });
+        return null;
+      }
+      return buf;
+    } catch (err) {
+      const cause = (err as { cause?: { code?: string } })?.cause;
+      if (attempt === MAX_ATTEMPTS) {
+        logger.warn('process_ordenes_dia_pdf_fetch_failed', {
+          url,
+          attempt,
+          error: (err as Error).message,
+          cause_code: cause?.code,
+        });
+      }
+      await new Promise((r) => setTimeout(r, 1000 * attempt));
+    } finally {
+      clearTimeout(timeout);
     }
-    const contentLength = Number(res.headers.get('content-length') ?? 0);
-    if (contentLength > MAX_PDF_SIZE_BYTES) {
-      logger.warn('process_ordenes_dia_pdf_too_large', { url, size: contentLength });
-      return null;
-    }
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length > MAX_PDF_SIZE_BYTES) {
-      logger.warn('process_ordenes_dia_pdf_too_large_after_read', { url, size: buf.length });
-      return null;
-    }
-    return buf;
-  } catch (err) {
-    logger.warn('process_ordenes_dia_pdf_fetch_failed', {
-      url,
-      error: (err as Error).message,
-    });
-    return null;
-  } finally {
-    clearTimeout(timeout);
   }
+  return null;
 }
 
 // pdf-parse v2: PDFParse es una clase, no default function. Mismo patrón
