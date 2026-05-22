@@ -145,20 +145,20 @@ centinelaInternalRouter.post('/sil-enrich', async (req, res) => {
   const body = (req.body ?? {}) as {
     limit?: number;
     min_id?: number;
-    /**
-     * Cuando se activa, en lugar de excluir expedientes ya con proponentes
-     * (modo default que cubre el backfill inicial), el endpoint TARGETEA
-     * expedientes que SÍ tienen proponentes pero NO tienen consultas
-     * todavía. Sirve para backfillear Pedidos 04 + 16k sobre los
-     * expedientes ya procesados antes del deploy del parser nuevo
-     * (2026-05-20). El enricher es idempotente (DELETE+INSERT en todas
-     * las tablas) así que re-correrlo no rompe nada.
-     */
     re_enrich_for_consultas?: boolean;
+    /**
+     * Lista explícita de números a procesar. Cuando se pasa, bypasea
+     * toda la lógica de filtros + paginación y procesa esos números.
+     * Caller (Python orchestrator) hace su propia query SQL para
+     * encontrar pendientes y los manda explícitos. Más confiable que
+     * delegar la paginación al endpoint.
+     */
+    numeros?: string[];
   };
   const limit = Math.min(Math.max(body.limit ?? 80, 1), 200);
   const minId = body.min_id ?? 25000;
   const reEnrichForConsultas = body.re_enrich_for_consultas === true;
+  const explicitNumeros = Array.isArray(body.numeros) ? body.numeros.filter((n): n is string => typeof n === 'string' && n.length > 0) : null;
 
   try {
     const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -168,7 +168,11 @@ centinelaInternalRouter.post('/sil-enrich', async (req, res) => {
 
     let targets: string[];
 
-    if (reEnrichForConsultas) {
+    if (explicitNumeros && explicitNumeros.length > 0) {
+      // Modo "numeros explícitos" — el caller ya hizo su query y sabe qué
+      // procesar. Bypaseamos paginación.
+      targets = explicitNumeros.slice(0, limit);
+    } else if (reEnrichForConsultas) {
       // Backfill de Pedidos 04 + 16k sobre expedientes ya procesados.
       // Pedimos los expedientes que SÍ tienen proponentes pero NO tienen
       // consultas. (Algunos tendrán 0 consultas reales — los marcamos como
