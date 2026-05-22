@@ -69,9 +69,13 @@ const PDF_FETCH_TIMEOUT_MS = 30_000;
 const MAX_PDF_SIZE_BYTES = 10 * 1024 * 1024;
 
 // Pedido 16i / agendaScrape — mismo base URL del SharePoint Asamblea.
+// Cada segmento del path se encodea (espacios, acentos) porque el IIS del
+// SharePoint devuelve 400/404 con URLs crudas.
 function downloadUrl(fileRef: string): string {
   const base = process.env.SIL_SHAREPOINT_BASE?.replace('/glcp', '') ?? 'https://www.asamblea.go.cr';
-  return fileRef.startsWith('http') ? fileRef : `${base}${fileRef}`;
+  const encodePath = (p: string) =>
+    p.split('/').map((seg) => encodeURIComponent(seg)).join('/');
+  return fileRef.startsWith('http') ? fileRef : `${base}${encodePath(fileRef)}`;
 }
 
 /**

@@ -75,7 +75,12 @@ async function downloadDecretoPdf(fileRef: string): Promise<Buffer> {
   // FileRef viene como ruta relativa del sitio, ej: "/glcp/Decretos_Ejecutivos_Ampliacion/..."
   // La URL base del SharePoint público de la Asamblea es https://www.asamblea.go.cr
   const baseUrl = process.env.SIL_SHAREPOINT_BASE?.replace('/glcp', '') ?? 'https://www.asamblea.go.cr';
-  const url = fileRef.startsWith('http') ? fileRef : `${baseUrl}${fileRef}`;
+  // Encode cada segmento del path (espacios → %20, acentos → %XX) sin romper
+  // los slashes. Fix 2026-05-22: el SharePoint IIS devuelve 400/404 cuando
+  // recibe la URL cruda con espacios o caracteres acentuados.
+  const encodePath = (p: string) =>
+    p.split('/').map((seg) => encodeURIComponent(seg)).join('/');
+  const url = fileRef.startsWith('http') ? fileRef : `${baseUrl}${encodePath(fileRef)}`;
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), PDF_FETCH_TIMEOUT_MS);
