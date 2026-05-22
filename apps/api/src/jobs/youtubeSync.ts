@@ -277,7 +277,12 @@ function parseDateFromTitle(title: string): string | null {
   // Agregado 2026-05-12 tras ver que el Plenario #07 quedaba con fecha=null.
   // El (?:de\s+)? hace opcional un solo "de" entre día y mes para cubrir
   // también "11 de mayo 2026" sin el segundo "de".
-  const shortDateRe = /(\d{1,2})\s+(?:de\s+)?([a-záéíóúñ]+)\s+(\d{4})/i;
+  // 2026-05-22: extendido a `\s*` (cero o más espacios) entre día y mes
+  // tras ver que Plenario #14 venía como "21mayo 2026" (sin espacio
+  // entre el día y el nombre del mes). Anclamos el nombre del mes a la
+  // lista cerrada de meses para no matchear "Ordinaria" como mes.
+  const MONTH_NAMES = 'enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre';
+  const shortDateRe = new RegExp(`(\\d{1,2})\\s*(?:de\\s+)?(${MONTH_NAMES})\\s+(\\d{4})`, 'i');
   const m1b = title.match(shortDateRe);
   if (m1b) {
     const day = m1b[1].padStart(2, '0');

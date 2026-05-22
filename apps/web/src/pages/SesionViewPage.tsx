@@ -43,7 +43,10 @@ interface Props {
 
 function fmtDate(iso: string): string {
   try {
-    return new Date(iso).toLocaleDateString('es-CR', {
+    // Anclar a mediodía local para evitar TZ shift cuando la DB guarda
+    // YYYY-MM-DDT00:00:00Z (UTC midnight) y CR (-6h) lo corre un día atrás.
+    const ymd = String(iso).slice(0, 10);
+    return new Date(`${ymd}T12:00:00`).toLocaleDateString('es-CR', {
       day: 'numeric', month: 'long', year: 'numeric',
     });
   } catch { return iso.slice(0, 10); }

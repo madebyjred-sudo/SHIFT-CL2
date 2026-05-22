@@ -34,8 +34,14 @@ function fmtDuration(seconds: number): string {
 const DURATION_FULL_S = 4 * 3600;
 
 export function SesionCard({ session, selectable, selected, onToggleSelect, onClick }: Props) {
+  // Forzar mediodía LOCAL para evitar bug TZ: la DB guarda fechas como
+  // '2026-05-20T00:00:00Z' (UTC midnight), pero conceptualmente son
+  // "fechas calendario CR". Renderizarlas en local (CR=-6h) las corre 1
+  // día atrás. Slice + T12:00:00 las ancla a mediodía local → mismo día.
   const d = (() => {
-    const t = Date.parse(session.fecha);
+    if (!session.fecha) return null;
+    const ymd = String(session.fecha).slice(0, 10);
+    const t = Date.parse(`${ymd}T12:00:00`);
     return Number.isFinite(t) ? new Date(t) : null;
   })();
   const dia = d ? d.getDate() : '?';

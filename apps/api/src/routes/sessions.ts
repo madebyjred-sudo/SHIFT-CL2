@@ -195,18 +195,41 @@ sessionsRouter.get('/', async (req, res) => {
       ? ['indexed', 'pending_review', 'processing', 'pending', 'transcript_not_ready']
       : ['indexed'];
 
-    const { data: supaRows, error: supaErr } = await supa()
-      .from('sessions')
-      .select('id, youtube_video_id, fecha, status, metadata, created_at')
-      .gte('fecha', from)
-      .lte('fecha', to)
-      .in('status', statusesToQuery)
-      .order('fecha', { ascending: false, nullsFirst: false })
-      .limit(500);
+    // El pipeline de transcript a veces deja `fecha` en NULL para sesiones
+    // recién indexadas (caso real reportado 2026-05-22: Plenario #14
+    // indexada, 204 segmentos, sin fecha → invisible en /sesiones). Para
+    // que esas filas no desaparezcan, hacemos DOS queries en paralelo:
+    //   (a) sesiones con fecha en el rango
+    //   (b) sesiones con fecha=null cuyo created_at cae en el rango
+    // y las mergeamos. El frontend trata fecha=null como created_at
+    // gracias al fallback `s.fecha ?? s.created_at` más abajo.
+    const [withFecha, withoutFecha] = await Promise.all([
+      supa()
+        .from('sessions')
+        .select('id, youtube_video_id, fecha, status, metadata, created_at')
+        .gte('fecha', from)
+        .lte('fecha', to)
+        .in('status', statusesToQuery)
+        .order('fecha', { ascending: false, nullsFirst: false })
+        .limit(500),
+      supa()
+        .from('sessions')
+        .select('id, youtube_video_id, fecha, status, metadata, created_at')
+        .is('fecha', null)
+        .gte('created_at', `${from}T00:00:00`)
+        .lte('created_at', `${to}T23:59:59`)
+        .in('status', statusesToQuery)
+        .order('created_at', { ascending: false })
+        .limit(200),
+    ]);
 
-    if (supaErr) {
-      req.log.warn('sessions_supabase_query_failed_continuing', { error: supaErr.message });
+    if (withFecha.error) {
+      req.log.warn('sessions_supabase_query_failed_continuing', { error: withFecha.error.message });
     }
+    if (withoutFecha.error) {
+      req.log.warn('sessions_supabase_null_fecha_query_failed', { error: withoutFecha.error.message });
+    }
+    const supaRows = [...(withFecha.data ?? []), ...(withoutFecha.data ?? [])];
 
     type SupaSessionRow = {
       id: string;
