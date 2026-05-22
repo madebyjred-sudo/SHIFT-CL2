@@ -230,21 +230,34 @@ centinelaInternalRouter.post('/sil-enrich', async (req, res) => {
         pageFrom += PAGE_SIZE;
       }
 
-      // Para candidates, sobre-pedimos generosamente. Con 21k expedientes
-      // y filtro stale, podemos necesitar revisar mucho más que limit*5.
-      // Usar paginación si limit*20 < total para asegurar que tomamos los
-      // mejores candidatos (id DESC).
-      const { data: candidates } = await s
-        .from('sil_expedientes')
-        .select('numero, id')
-        .gte('id', minId)
-        .order('id', { ascending: false })
-        .limit(Math.max(limit * 20, 5000));
-
-      targets = (candidates ?? [])
-        .filter((r) => !enrichedSet.has(r.numero as string))
-        .slice(0, limit)
-        .map((r) => r.numero as string);
+      // Paginar candidates hasta encontrar `limit` que NO estén en el
+      // enrichedSet. Bug previo (v13): candidates con limit fijo (5000)
+      // top-N por id DESC. Si los top 5000 ya tienen tramite, targets=[]
+      // y endpoint reporta "all up to date" — los 20k históricos sin
+      // tramite nunca se procesan. Fix v14: bucle hasta tener suficientes
+      // targets o agotar la tabla.
+      targets = [];
+      let candFrom = 0;
+      const CAND_PAGE = 2000;
+      const MAX_PAGES = 15; // Hard ceiling 30k rows
+      for (let pageIdx = 0; pageIdx < MAX_PAGES; pageIdx++) {
+        const { data: page } = await s
+          .from('sil_expedientes')
+          .select('numero, id')
+          .gte('id', minId)
+          .order('id', { ascending: false })
+          .range(candFrom, candFrom + CAND_PAGE - 1);
+        if (!page || page.length === 0) break;
+        for (const r of page) {
+          if (!enrichedSet.has(r.numero as string)) {
+            targets.push(r.numero as string);
+            if (targets.length >= limit) break;
+          }
+        }
+        if (targets.length >= limit) break;
+        if (page.length < CAND_PAGE) break;
+        candFrom += CAND_PAGE;
+      }
     }
 
     if (targets.length === 0) {
