@@ -33,6 +33,7 @@ COPY package.json package-lock.json tsconfig*.json ./
 COPY apps/api ./apps/api
 COPY packages/shared-types ./packages/shared-types
 COPY packages/cerebro-config ./packages/cerebro-config
+COPY scripts ./scripts
 
 RUN npm run build --workspace=apps/api
 
@@ -48,6 +49,13 @@ FROM mcr.microsoft.com/playwright:v1.59.1-noble AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV API_PORT=8080
+# --use-system-ca hace que Node 20 use el trust store del OS (Ubuntu Noble
+# trae los root CAs estándar) en lugar de su bundle hardcoded. Necesario
+# para scrapear www.asamblea.go.cr (IIS con CA intermedio que Node no
+# valida por default — UNABLE_TO_VERIFY_LEAF_SIGNATURE en fetch nativo).
+# Detectado 2026-05-22 después de que decretos + órdenes del día
+# fallaron todos en Cloud Run pero funcionaban en local con curl.
+ENV NODE_OPTIONS="--use-system-ca"
 
 # Playwright base image already ships Chromium under /ms-playwright (root-readable).
 # Tell node-side Playwright to look there so the lazy import in
@@ -70,8 +78,11 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 COPY --from=deps    /app/node_modules ./node_modules
 COPY --from=builder /app/apps/api/dist ./apps/api/dist
 COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
+COPY --from=builder /app/apps/api/scripts ./apps/api/scripts
+COPY --from=builder /app/apps/api/src ./apps/api/src
 COPY --from=builder /app/packages/shared-types ./packages/shared-types
 COPY --from=builder /app/packages/cerebro-config ./packages/cerebro-config
+COPY --from=builder /app/scripts ./scripts
 COPY package.json package-lock.json ./
 
 # The Playwright image creates a `pwuser` (uid 1001). Node:slim creates `node`
