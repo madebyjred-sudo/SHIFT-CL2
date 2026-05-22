@@ -148,7 +148,7 @@ export function CalendarView({ sessions, initialMonth, onDayClick }: Props) {
                       key={it.id}
                       className={cn(
                         'w-1.5 h-1.5 rounded-full',
-                        it.estado === 1 ? 'bg-emerald-500' : 'bg-amber-500',
+                        it.estado === 2 ? 'bg-emerald-500' : 'bg-amber-500',
                       )}
                       title={it.titulo}
                     />

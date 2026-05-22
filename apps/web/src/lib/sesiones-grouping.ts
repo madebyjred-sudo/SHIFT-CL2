@@ -206,7 +206,7 @@ export function computeKpis(
   for (const s of sessions) {
     const d = parseFecha(s.fecha);
     if (d && d >= thisWeekStart) sesionesEstaSemana += 1;
-    if (d && d >= monthStart && s.estado === 1) finalizadasMes += 1;
+    if (d && d >= monthStart && s.estado === 2) finalizadasMes += 1;
     if (s.has_resumen) conResumen += 1;
   }
   return {
@@ -248,7 +248,7 @@ export function applyEstadoFilter(
   estado: EstadoFilter,
 ): SessionListItem[] {
   if (estado === 'todas') return sessions;
-  if (estado === 'finalizadas') return sessions.filter((s) => s.estado === 1);
+  if (estado === 'finalizadas') return sessions.filter((s) => s.estado === 2);
   return sessions.filter((s) => s.estado !== 1);
 }
 

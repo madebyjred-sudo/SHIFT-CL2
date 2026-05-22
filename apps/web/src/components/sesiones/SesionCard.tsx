@@ -41,7 +41,18 @@ export function SesionCard({ session, selectable, selected, onToggleSelect, onCl
   const dia = d ? d.getDate() : '?';
   const dom = d ? DOWS_ES[d.getDay()] : '';
   const mon = d ? MONTHS_ES_SHORT[d.getMonth()] : '';
-  const finalizada = session.estado === 1;
+  // Estados del API (statusToEstado en sessions.ts):
+  //   0 = en cola (pending/transcript_not_ready)
+  //   1 = procesando (pending_review/processing)
+  //   2 = indexada (visible al equipo, con resumen)
+  //   3 = archivada
+  //   4 = error
+  // Bug pre-fix 2026-05-22: el chequeo era estado===1 que es "procesando",
+  // así que TODAS las sesiones aparecían como "En proceso" — incluyendo las
+  // ya indexadas con transcript + resumen. Corregido: estado===2 es lo
+  // visible/listo para el cliente.
+  const finalizada = session.estado === 2;
+  const enCola = session.estado === 0;
 
   const durFill = Math.min(100, Math.round(((session.duration_s ?? 0) / DURATION_FULL_S) * 100));
 
@@ -150,7 +161,12 @@ export function SesionCard({ session, selectable, selected, onToggleSelect, onCl
         {finalizada ? (
           <>
             <CheckCircle2 size={11} className="text-emerald-500" />
-            <span>Finalizada</span>
+            <span>Indexada</span>
+          </>
+        ) : enCola ? (
+          <>
+            <span className="w-1.5 h-1.5 rounded-full bg-[#0e1745]/30 dark:bg-white/30" />
+            <span>En cola</span>
           </>
         ) : (
           <>
