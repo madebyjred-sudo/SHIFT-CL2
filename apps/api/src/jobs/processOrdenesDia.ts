@@ -289,7 +289,25 @@ export async function processOrdenesDia(opts: { limit: number }): Promise<Proces
         continue;
       }
 
-      const expedientes = extractExpedientesFromText(text);
+      let expedientes = extractExpedientesFromText(text);
+
+      // 2026-05-23: PDFs escaneados de comisiones devolvían text ~vacío
+      // ("-- 1 of 2 --") y por ende 0 expedientes. Fallback a Vertex Gemini
+      // Vision (Flash, ~$0.002 por PDF) cuando el texto es sospechosamente
+      // corto O cuando un PDF de 2+ páginas no devuelve ningún expediente.
+      // PLENARIO siempre devuelve >100 expedientes así que estos signos
+      // discriminan bien casos escaneados.
+      const textTooShort = (text?.trim().length ?? 0) < 100;
+      const noExpedientes = expedientes.length === 0;
+      if (textTooShort || noExpedientes) {
+        const visionExpedientes = await tryVisionFallbackOrdenDia(
+          pdfBuf,
+          fileLeafRef,
+        );
+        if (visionExpedientes && visionExpedientes.length > 0) {
+          expedientes = visionExpedientes;
+        }
+      }
 
       // Insert rows en agenda_legislativa — una por expediente.
       // unique constraint real es (fecha, comision, titulo) — si todos los
@@ -337,6 +355,46 @@ export async function processOrdenesDia(opts: { limit: number }): Promise<Proces
   result.duration_ms = Date.now() - startTs;
   logger.info('process_ordenes_dia_complete', { ...result });
   return result;
+}
+
+/**
+ * Vision fallback para PDFs escaneados de órdenes del día (comisiones).
+ * Pide a Gemini Flash la lista de expedientes mencionados como JSON
+ * `{"expedientes":["DD.DDD",...]}`. Costo ~$0.002 por PDF.
+ */
+async function tryVisionFallbackOrdenDia(
+  pdfBuffer: Buffer,
+  fileLeafRef: string,
+): Promise<string[] | null> {
+  try {
+    const { visionParsePdf } = await import('../services/visionPdfFallback.js');
+    const prompt = `Sos un parser de documentos PDF de la Asamblea Legislativa de Costa Rica que detectan expedientes legislativos discutidos en sesión.
+
+Devolvé un JSON con la lista de números de expediente que aparecen en este PDF:
+{
+  "expedientes": ["23.511", "22.293", "24.018"]
+}
+
+Reglas:
+- Los expedientes en CR tienen formato DD.DDD (1-2 dígitos, punto, 3 dígitos).
+- Incluí cada número distinto que veas, sin importar el contexto (lectura, votación, dictamen, etc.).
+- Si el PDF está vacío o no menciona expedientes, devolvé {"expedientes": []}.
+- Solo emitís JSON, sin texto adicional ni fences.`;
+    const result = await visionParsePdf<{ expedientes?: string[] }>(pdfBuffer, {
+      route: 'orden_dia.vision_fallback',
+      modelTier: 'flash',
+      label: fileLeafRef,
+      prompt,
+    });
+    if (!result) return null;
+    return (result.expedientes ?? []).filter((e) => /^\d{1,2}\.\d{3}$/.test(e));
+  } catch (err) {
+    logger.warn('process_ordenes_dia_vision_fallback_failed', {
+      file: fileLeafRef,
+      error: (err as Error).message,
+    });
+    return null;
+  }
 }
 
 async function markProcessed(
