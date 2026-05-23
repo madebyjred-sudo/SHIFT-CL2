@@ -32,6 +32,7 @@ import {
   ScrollText,
   Settings2,
   Youtube,
+  DollarSign,
   type LucideIcon,
 } from 'lucide-react';
 import { TopDock } from '@/components/top-dock';
@@ -61,6 +62,7 @@ const NAV: ReadonlyArray<NavItem> = [
   { id: 'expedientes',     label: 'Expedientes SIL',     icon: Folder,          group: 'Contenido' },
   { id: 'podcasts',        label: 'Podcasts',            icon: Headphones,      group: 'Contenido' },
   { id: 'usuarios',        label: 'Usuarios',            icon: Users,           group: 'Acceso & sistema' },
+  { id: 'tokens',          label: 'Tokens / Costo',      icon: DollarSign,      group: 'Acceso & sistema' },
   { id: 'auditoria',       label: 'Auditoría',           icon: ScrollText,      group: 'Acceso & sistema' },
 ];
 

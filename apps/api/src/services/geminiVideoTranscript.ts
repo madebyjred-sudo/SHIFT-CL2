@@ -137,8 +137,14 @@ export async function fetchTranscriptViaGemini(
     /** Override del modelo. Si no se setea, usa DEFAULT_MODEL (flash).
      *  El caller chunked elige Pro para videos largos. */
     model?: string;
+    /** Si presente, ai_call_log atribuye el costo al user (Supabase auth.uid).
+     *  Si null/undefined la llamada se loggea con user_id=null (cron/system). */
+    userId?: string | null;
+    /** Identificador de callsite para ai_call_log.route (default 'transcript.gemini'). */
+    route?: string;
   },
 ): Promise<GeminiSegment[]> {
+  const startTs = Date.now();
   const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
   // Auth — usa la SA del Cloud Run (shift-cl2-vertex). En local toma
@@ -270,6 +276,34 @@ export async function fetchTranscriptViaGemini(
     candidatesTokens: json.usageMetadata?.candidatesTokenCount,
     bodyChars: text.length,
   });
+
+  // Token accounting certero — atribuir el costo al user que disparó la
+  // transcripción (cuando hay user) o al system (cuando es cron de
+  // transcriptProcess.ts). Vertex Gemini no pasa por Cerebro, así que sin
+  // este log el costo queda invisible en ai_call_log.
+  void (async () => {
+    try {
+      const { logLLMCall } = await import('./tokenAccounting.js');
+      await logLLMCall({
+        userId: opts?.userId ?? null,
+        route: opts?.route ?? 'transcript.gemini',
+        provider: 'vertex',
+        model,
+        tokensIn: json.usageMetadata?.promptTokenCount ?? 0,
+        tokensOut: json.usageMetadata?.candidatesTokenCount ?? 0,
+        latencyMs: Date.now() - startTs,
+        meta: {
+          video_id: videoId,
+          finish_reason: finishReason,
+          start_offset_s: opts?.startOffsetS,
+          end_offset_s: opts?.endOffsetS,
+          total_tokens_provider: json.usageMetadata?.totalTokenCount,
+        },
+      });
+    } catch {
+      // fail-open
+    }
+  })();
 
   if (!text) {
     throw new GeminiTranscriptError(

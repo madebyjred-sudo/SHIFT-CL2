@@ -97,6 +97,7 @@ function authHeaders(): Record<string, string> {
 export async function cerebroInvoke(args: CerebroInvokeArgs): Promise<CerebroInvokeResponse> {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), CEREBRO_LLM_TIMEOUT_MS);
+  const startTs = Date.now();
   try {
     const body: Record<string, unknown> = {
       model: args.model,
@@ -119,10 +120,48 @@ export async function cerebroInvoke(args: CerebroInvokeArgs): Promise<CerebroInv
     });
     if (!r.ok) {
       const txt = await r.text().catch(() => '');
+      // Log fallido (sin tokens, pero con latencia + error) para que
+      // ai_call_log no se quede ciego ante errores que igual consumen
+      // cuota del provider.
+      void logCerebroCall(args, undefined, Date.now() - startTs, `HTTP ${r.status}: ${txt.slice(0, 200)}`);
       throw new Error(`cerebro_invoke ${r.status}: ${txt.slice(0, 240)}`);
     }
-    return (await r.json()) as CerebroInvokeResponse;
+    const resp = (await r.json()) as CerebroInvokeResponse;
+    void logCerebroCall(args, resp, Date.now() - startTs);
+    return resp;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/** Token accounting helper — invocado side-effect-only desde cerebroInvoke. */
+async function logCerebroCall(
+  args: CerebroInvokeArgs,
+  resp: CerebroInvokeResponse | undefined,
+  latencyMs: number,
+  errorMessage?: string,
+): Promise<void> {
+  try {
+    const { logLLMCall } = await import('./tokenAccounting.js');
+    await logLLMCall({
+      userId: args.user_id ?? null,
+      route: args.trace_label ?? 'cerebro.invoke',
+      provider: 'cerebro',
+      model: resp?.model ?? args.model,
+      tokensIn: resp?.usage?.input_tokens ?? 0,
+      tokensOut: resp?.usage?.output_tokens ?? 0,
+      cacheReadTokens: resp?.usage?.cache_read_input_tokens ?? 0,
+      cacheCreateTokens: resp?.usage?.cache_creation_input_tokens ?? 0,
+      latencyMs,
+      errorMessage,
+      meta: {
+        app_id: args.app_id ?? 'cl2',
+        realm: args.realm,
+        call_id: resp?.call_id,
+        openrouter_cost_usd: resp?.usage?.openrouter_cost_usd,
+      },
+    });
+  } catch {
+    // tokenAccounting es fail-open por design
   }
 }

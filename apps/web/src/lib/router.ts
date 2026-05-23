@@ -126,6 +126,7 @@ export type AdminSection =
   | 'usuarios'
   | 'auditoria'
   | 'feedback'
+  | 'tokens'
   | 'config';
 
 const ADMIN_SECTIONS: ReadonlyArray<AdminSection> = [
@@ -140,6 +141,7 @@ const ADMIN_SECTIONS: ReadonlyArray<AdminSection> = [
   'usuarios',
   'auditoria',
   'feedback',
+  'tokens',
   'config',
 ];
 
