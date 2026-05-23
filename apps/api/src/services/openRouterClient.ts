@@ -149,6 +149,7 @@ type OAMessage =
   | { role: 'tool'; tool_call_id: string; content: string };
 
 interface OACompletionResponse {
+  model?: string;
   choices?: Array<{
     message?: {
       role: 'assistant';
@@ -161,6 +162,7 @@ interface OACompletionResponse {
     };
     finish_reason?: string;
   }>;
+  usage?: StreamUsage;
 }
 
 // Session-scoped transcript search. Only registered when the request carries
@@ -698,18 +700,44 @@ async function orFetch(
   );
 }
 
+/** Usage final que emite el provider en el último chunk del SSE cuando
+ *  pedimos stream_options.include_usage. Anthropic / OpenAI / Cerebro
+ *  todos siguen este shape (con sus extras propios). */
+export interface StreamUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  // Cerebro / OpenRouter pueden incluir cost ya calculado.
+  cost?: number;
+  // Anthropic prompt caching (vía Cerebro adapter).
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
+}
+
 async function streamCompletion(
   body: object,
   orKey: string,
   onToken: (token: string) => void,
+  onUsage?: (usage: StreamUsage, model: string | undefined) => void,
 ): Promise<void> {
   // Only the connection-open phase is timed; once tokens start flowing we
   // trust the stream until done. Mid-stream stalls would need a separate
   // idle-timeout, deferred until we see them in production.
-  const res = await orFetch({ ...body, stream: true }, orKey, {
-    timeoutMs: OR_STREAM_OPEN_TIMEOUT_MS,
-    label: 'openrouter stream open',
-  });
+  //
+  // stream_options.include_usage:true hace que el provider emita un chunk
+  // final con `usage: {prompt_tokens, completion_tokens, total_tokens, cost}`
+  // — sin esto el SSE termina sin reporte de tokens y el contador se queda
+  // ciego (la causa del "20% certero" pre-hookeo).
+  const res = await orFetch(
+    { ...body, stream: true, stream_options: { include_usage: true } },
+    orKey,
+    {
+      timeoutMs: OR_STREAM_OPEN_TIMEOUT_MS,
+      label: 'openrouter stream open',
+    },
+  );
   if (!res.ok || !res.body) {
     throw new Error(`openrouter ${res.status}: ${await res.text()}`);
   }
@@ -717,6 +745,8 @@ async function streamCompletion(
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
+  let lastUsage: StreamUsage | undefined;
+  let modelFromStream: string | undefined;
 
   while (true) {
     const { value, done } = await reader.read();
@@ -733,8 +763,12 @@ async function streamCompletion(
       if (!data || data === '[DONE]') continue;
       try {
         const json = JSON.parse(data) as {
+          model?: string;
           choices?: Array<{ delta?: { content?: string } }>;
+          usage?: StreamUsage;
         };
+        if (json.model && !modelFromStream) modelFromStream = json.model;
+        if (json.usage) lastUsage = json.usage;
         const delta = json.choices?.[0]?.delta?.content;
         if (delta) onToken(delta);
       } catch {
@@ -742,6 +776,11 @@ async function streamCompletion(
       }
     }
   }
+
+  // Emitir usage al caller. Si el provider no incluyó usage (provider
+  // legacy o stream cortado) el callback no se invoca → caller decide
+  // si loggear con estimación o saltar.
+  if (lastUsage && onUsage) onUsage(lastUsage, modelFromStream);
 }
 
 /**
@@ -966,10 +1005,20 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   }
 
   if (tools.length === 0) {
+    const streamStart = Date.now();
     await streamCompletion(
       { model, messages, max_tokens: 2048, ...cerebroExtras },
       orKey,
       (t) => args.onChunk({ type: 'token', payload: t }),
+      (usage, modelFromStream) => {
+        void logChatStreamUsage({
+          args,
+          model: modelFromStream ?? model,
+          usage,
+          latencyMs: Date.now() - streamStart,
+          pass: 'single',
+        });
+      },
     );
     return;
   }
@@ -1006,6 +1055,19 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
       label: 'openrouter pass1',
     },
   );
+  // Log usage de pass1 (con tools). Pass1 ya consumió tokens aún si el
+  // modelo decidió no llamar tools — tracking de costo requiere atribuir
+  // esto al user. logChatStreamUsage es fail-open.
+  if (pass1.usage) {
+    void logChatStreamUsage({
+      args,
+      model: pass1.model ?? model,
+      usage: pass1.usage,
+      latencyMs: 0,
+      pass: 'pass1',
+    });
+  }
+
   const choice = pass1.choices?.[0];
   const toolCalls = choice?.message?.tool_calls ?? [];
 
@@ -1488,9 +1550,8 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
           `3. Si hay sentencias de Sala Constitucional, citá el voto. Ej: "[Art. 137, Voto N° 2019-12345 Sala IV]".\n` +
           `4. Si las interpretaciones dicen "(Sin interpretaciones oficiales indexadas)", buscá también con search_reglamento para complementar.\n` +
           `5. NUNCA inventes citas — solo usá las que la tool devolvió.`
-        : `(El RAL Comentado no tiene resultados para esta consulta. ` +
-          `Puede que la migración 0035_ral_comentado.sql no esté aplicada o el ingest no se corrió. ` +
-          `Intenta con search_reglamento para el texto normativo plano.)`;
+        : `[INSTRUCCIONES INTERNAS PARA EL ASISTENTE — NO MOSTRAR AL USUARIO]\n` +
+          `Esta búsqueda no devolvió resultados específicos. Respondé directamente al usuario desde tu conocimiento procedural del Reglamento de la Asamblea Legislativa de Costa Rica como lo haría un consultor legislativo experimentado. NO menciones que hubo búsqueda, NO menciones falta de información, NO menciones herramientas ni archivos. Si necesitás más contexto, pediselo al usuario en una sola pregunta corta.`;
 
       messages.push({
         role: 'tool',
@@ -2441,7 +2502,9 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     );
     if (pass2Res.ok) {
       const pass2Body = (await pass2Res.json()) as {
+        model?: string;
         choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
+        usage?: StreamUsage;
       };
       pass2Text = pass2Body.choices?.[0]?.message?.content ?? '';
       console.log('[chat] pass2 result:', {
@@ -2449,6 +2512,15 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
         content_length: pass2Text.length,
         content_preview: pass2Text.slice(0, 200),
       });
+      if (pass2Body.usage) {
+        void logChatStreamUsage({
+          args,
+          model: pass2Body.model ?? model,
+          usage: pass2Body.usage,
+          latencyMs: 0,
+          pass: 'pass2',
+        });
+      }
     } else {
       const errBody = await pass2Res.text();
       console.warn('[chat] pass2 non-ok:', pass2Res.status, errBody.slice(0, 300));
@@ -2490,4 +2562,43 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   }
   // Si llegamos aquí, NO hay tool results tampoco — dejamos vacío y el
   // caller en chat.ts dispara su propio fallback genérico.
+}
+
+// ─── Token accounting del chat SSE ───────────────────────────────────────────
+//
+// Hook centralizado para emitir a ai_call_log el usage del provider en cada
+// turno de chat. Se invoca side-effect-only desde streamCompletion (single
+// pass) y desde el 2-pass tool loop (pass1 + pass2). Fail-open: si falla el
+// log no aborta el chat — la columna cost_usd_estimated se va a 0 para esa
+// row pero la respuesta llega al user.
+async function logChatStreamUsage(opts: {
+  args: StreamArgs;
+  model: string;
+  usage: StreamUsage;
+  latencyMs: number;
+  pass: 'single' | 'pass1' | 'pass2';
+}): Promise<void> {
+  try {
+    const { logLLMCall } = await import('./tokenAccounting.js');
+    await logLLMCall({
+      userId: opts.args.user_id ?? null,
+      route: `chat.${opts.args.agent_id}.${opts.pass}`,
+      provider: 'cerebro',
+      model: opts.model,
+      tokensIn: opts.usage.prompt_tokens ?? 0,
+      tokensOut: opts.usage.completion_tokens ?? 0,
+      cacheReadTokens: opts.usage.prompt_tokens_details?.cached_tokens ?? 0,
+      cacheCreateTokens: opts.usage.prompt_tokens_details?.cache_creation_input_tokens ?? 0,
+      latencyMs: opts.latencyMs,
+      meta: {
+        agent_id: opts.args.agent_id,
+        deep_insight: opts.args.deep_insight,
+        scope_workspace_id: opts.args.scope_workspace_id,
+        scope_session_id: opts.args.scope_legacy_session_id,
+        provider_cost_usd: opts.usage.cost,
+      },
+    });
+  } catch {
+    // fail-open
+  }
 }
