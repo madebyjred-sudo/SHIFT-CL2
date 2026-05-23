@@ -1613,7 +1613,9 @@ adminRouter.get('/tokens/by-user', async (req, res) => {
     const limit = Math.min(Math.max(Number(req.query.limit ?? 100) || 100, 1), 500);
     const { getUsageByUser } = await import('../services/tokenAccounting.js');
     const rows = await getUsageByUser({ windowDays, limit });
-    res.json(live({ window_days: windowDays, items: rows }));
+    // Shape flat — el frontend lee `data.items` directo. `live()` envuelve
+    // en {data: ...} y rompe el contract del endpoint.
+    res.json({ ok: true, generated_at: new Date().toISOString(), window_days: windowDays, items: rows });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
@@ -1630,7 +1632,7 @@ adminRouter.get('/tokens/by-user/:user_id', async (req, res) => {
     const windowDays = Math.min(Math.max(Number(req.query.window_days ?? 30) || 30, 1), 365);
     const { getUsageByUserDetail } = await import('../services/tokenAccounting.js');
     const detail = await getUsageByUserDetail(req.params.user_id, windowDays);
-    res.json(live({ user_id: req.params.user_id, window_days: windowDays, detail }));
+    res.json({ ok: true, user_id: req.params.user_id, window_days: windowDays, detail });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
