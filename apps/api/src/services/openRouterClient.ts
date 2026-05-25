@@ -861,6 +861,14 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   const cerebroExtras = {
     tenant: 'cl2',
     app_id: 'cl2',
+    // preferred_agent — wire del F6 selector de Cerebro (commit a95a40d
+    // en shift-cerebro main). Cuando el body lo manda junto a realm +
+    // user_id, F6 busca el workflow del usuario (tier 1) → factory
+    // (tier 2) → Punto Medio (tier 3) y prepende al system_blocks. Sin
+    // este campo F6 queda dormido aunque esté wired en oai_adapter.py.
+    // Ver apps/cl2/output/handoffs/2026-05-24-from-padre-plantillas-v3.md
+    // (Paso 1 del padre — demo-blocker).
+    preferred_agent: args.agent_id,
     trace_label: `cl2:chat:${args.agent_id}${args.deep_insight ? ':di' : ''}`,
     enable_auto_route: process.env.CL2_AUTO_ROUTE_ENABLED !== 'false',
     enable_cove: args.deep_insight === true,
