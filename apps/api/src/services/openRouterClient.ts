@@ -1589,28 +1589,51 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
 
       // Single-expediente citation event — useful for "tell me about Exp X"
       // queries so the UI surfaces the link prominently.
-      args.onChunk({
-        type: 'citation',
-        payload: [
-          {
-            id: `sil:exp:${exp.id}`,
-            session_id: '',
-            source_ref: `Exp. ${exp.numero}`,
-            content: exp.titulo ?? '',
-            similarity: 1.0,
-            fecha: exp.fecha_presentacion,
-            comision: exp.comision,
-            tipo: exp.tipo,
-            source_type: 'sil_expediente',
-            expediente_numero: exp.numero,
-            estado: exp.estado,
-            proponente: exp.proponente,
-            url_detalle: exp.url_detalle,
-            video_url: null,
-            transcript_url: null,
-          },
-        ],
-      });
+      // CONTENT incluye estatus formal arriba leído de extras jsonb (mismo
+      // formato que search_sil_expedientes para consistencia). Sin esto el
+      // usuario veía solo el título y NO si el expediente era ley.
+      {
+        const e = (exp.extras ?? {}) as Record<string, unknown>;
+        const lineas: string[] = [];
+        if (e['numero_ley']) {
+          const gaceta = e['numero_gaceta'] ? ` · Gaceta N° ${e['numero_gaceta']}` : '';
+          const pub = e['fecha_publicacion'] ? ` · publicada ${e['fecha_publicacion']}` : '';
+          lineas.push(`✅ ES LEY · N° ${e['numero_ley']}${gaceta}${pub}`);
+        } else if (e['numero_archivado']) {
+          lineas.push(`📦 ARCHIVADO · N° ${e['numero_archivado']}`);
+        } else if (e['numero_acuerdo']) {
+          lineas.push(`📋 ACUERDO LEGISLATIVO N° ${e['numero_acuerdo']}`);
+        } else if (e['fecha_dispensa']) {
+          lineas.push(`⚡ DISPENSA DE TRÁMITE · ${e['fecha_dispensa']}`);
+        } else {
+          lineas.push(`🟡 EN TRÁMITE`);
+        }
+        if (e['numero_alcance']) lineas.push(`🔁 Alcance N° ${e['numero_alcance']}`);
+        lineas.push(exp.titulo ?? '(sin título)');
+
+        args.onChunk({
+          type: 'citation',
+          payload: [
+            {
+              id: `sil:exp:${exp.id}`,
+              session_id: '',
+              source_ref: `Exp. ${exp.numero}`,
+              content: lineas.join('\n'),
+              similarity: 1.0,
+              fecha: exp.fecha_presentacion,
+              comision: exp.comision,
+              tipo: exp.tipo,
+              source_type: 'sil_expediente',
+              expediente_numero: exp.numero,
+              estado: exp.estado,
+              proponente: exp.proponente,
+              url_detalle: exp.url_detalle,
+              video_url: null,
+              transcript_url: null,
+            },
+          ],
+        });
+      }
 
       messages.push({
         role: 'tool',
