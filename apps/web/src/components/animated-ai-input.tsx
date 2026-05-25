@@ -903,6 +903,7 @@ export function AnimatedAiInput({
                         'w-full flex',
                         msg.role === 'user' ? 'justify-end' : 'justify-start',
                       )}
+                      data-testid={msg.role === 'assistant' ? 'message-assistant' : 'message-user'}
                     >
                       {msg.role === 'user' ? (
                         <div className="max-w-[80%] bg-blue-600/20 border border-blue-500/30 text-[#0e1745] dark:text-white rounded-2xl rounded-tr-sm p-chat-bubble text-[14px] leading-relaxed">
@@ -1211,6 +1212,7 @@ export function AnimatedAiInput({
                 rows={1}
                 disabled={isLoading}
                 spellCheck={false}
+                data-testid="chat-input"
               />
             </div>
 
@@ -1433,6 +1435,7 @@ export function AnimatedAiInput({
                   : undefined}
                 disabled={!value.trim() && !isLoading}
                 aria-label={isLoading ? 'Detener' : 'Enviar'}
+                data-testid="chat-send"
               >
                 {isLoading ? (
                   <Square className="w-4 h-4 fill-current" />
