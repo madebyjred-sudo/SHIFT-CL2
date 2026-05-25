@@ -552,6 +552,43 @@ centinelaInternalRouter.post('/novelty-scan', async (req, res) => {
 });
 
 /**
+ * POST /api/internal/centinela/keyword-match
+ *
+ * Cada 30 min. Recorre watches `entity_type='tema'`, matchea cada keyword
+ * (ILIKE) contra sessions.metadata.resumen, sil_expedientes.titulo,
+ * sil_mociones.asunto y agenda_legislativa. Emite events
+ * `event_type='keyword_match'` (idempotente vía dedup_key).
+ *
+ * Cloud Scheduler reference:
+ *   gcloud scheduler jobs create http cl2-keyword-match \
+ *     --schedule='*\/30 * * * *' \
+ *     --uri="https://<service>/api/internal/centinela/keyword-match" \
+ *     --http-method=POST \
+ *     --headers="X-Internal-Trigger=$INTERNAL_TRIGGER_SECRET"
+ */
+centinelaInternalRouter.post('/keyword-match', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  try {
+    const { runKeywordMatcher } = await import('../jobs/keywordMatcher.js');
+    const result = await runKeywordMatcher();
+    logger.info('centinela_internal_keyword_match_complete', {
+      watches: result.watches_processed,
+      keywords: result.keywords_unique,
+      inserted: result.matches_inserted,
+      duplicates: result.matches_skipped_dup,
+      errors_count: result.errors.length,
+      duration_ms: result.duration_ms,
+    });
+    res.json({ ok: true, started_at: new Date().toISOString(), result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_keyword_match_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
  * POST /api/internal/centinela/daily-health-report
  *
  * Llamado por Cloud Scheduler una vez al día a las 6am CR. Captura un
@@ -937,6 +974,141 @@ centinelaAdminRouter.post('/detect-similar', async (req, res) => {
 // see another user's data.
 
 export const centinelaUserRouter = Router();
+
+// ── LISTAS — endpoints CRUD ──────────────────────────────────────────────
+//
+// Un user puede tener N listas (centinela_listas). Cada watch
+// (centinela_watchlist.lista_id) puede pertenecer a una lista. Listas
+// típicas: por cliente ("Empresa X"), por sector ("Energía", "Salud"),
+// o "Personal".
+//
+// Endpoints:
+//   GET    /api/centinela/listas             → todas las listas del user
+//   POST   /api/centinela/listas             → crear lista
+//   PATCH  /api/centinela/listas/:id         → renombrar/archivar/recolor
+//   DELETE /api/centinela/listas/:id         → eliminar lista (watches quedan sin lista_id)
+
+centinelaUserRouter.get('/listas', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+
+  const { data, error } = await supa()
+    .from('centinela_listas')
+    .select('id, nombre, descripcion, color, archivada, orden, created_at, updated_at')
+    .eq('user_id', userId)
+    .order('archivada', { ascending: true })
+    .order('orden', { ascending: true })
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+
+  // Agregar conteo de watches por lista (incluyendo las sin lista_id como "Sin lista")
+  const counts: Record<string, number> = {};
+  const { data: rows } = await supa()
+    .from('centinela_watchlist')
+    .select('lista_id')
+    .eq('user_id', userId);
+  for (const r of rows ?? []) {
+    const key = (r as { lista_id?: string | null }).lista_id ?? '__none__';
+    counts[key] = (counts[key] ?? 0) + 1;
+  }
+
+  res.json({
+    ok: true,
+    listas: (data ?? []).map((l) => ({ ...l, watches_count: counts[l.id] ?? 0 })),
+    watches_sin_lista: counts['__none__'] ?? 0,
+  });
+});
+
+centinelaUserRouter.post('/listas', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+
+  const body = (req.body ?? {}) as { nombre?: string; descripcion?: string; color?: string };
+  const nombre = String(body.nombre ?? '').trim();
+  if (!nombre) return res.status(400).json({ ok: false, error: 'nombre requerido' });
+  if (nombre.length > 80) return res.status(400).json({ ok: false, error: 'nombre máx 80 chars' });
+
+  const color = ['default', 'burgundy', 'ink', 'sage', 'amber', 'cream'].includes(body.color ?? '')
+    ? (body.color as string)
+    : 'default';
+
+  const { data, error } = await supa()
+    .from('centinela_listas')
+    .insert({
+      user_id: userId,
+      nombre,
+      descripcion: String(body.descripcion ?? '').slice(0, 280),
+      color,
+    })
+    .select('id, nombre, descripcion, color, archivada, orden, created_at, updated_at')
+    .single();
+
+  if (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ ok: false, error: 'Ya tenés una lista con ese nombre' });
+    }
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+
+  res.json({ ok: true, lista: data });
+});
+
+centinelaUserRouter.patch('/listas/:id', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const id = String(req.params.id ?? '');
+  const body = (req.body ?? {}) as { nombre?: string; descripcion?: string; color?: string; archivada?: boolean; orden?: number };
+
+  const patch: Record<string, unknown> = {};
+  if (typeof body.nombre === 'string') patch.nombre = body.nombre.trim().slice(0, 80);
+  if (typeof body.descripcion === 'string') patch.descripcion = body.descripcion.slice(0, 280);
+  if (typeof body.color === 'string' && ['default', 'burgundy', 'ink', 'sage', 'amber', 'cream'].includes(body.color)) {
+    patch.color = body.color;
+  }
+  if (typeof body.archivada === 'boolean') patch.archivada = body.archivada;
+  if (typeof body.orden === 'number' && Number.isInteger(body.orden)) patch.orden = body.orden;
+
+  if (Object.keys(patch).length === 0) {
+    return res.status(400).json({ ok: false, error: 'nada para actualizar' });
+  }
+
+  const { data, error } = await supa()
+    .from('centinela_listas')
+    .update(patch)
+    .eq('id', id)
+    .eq('user_id', userId)
+    .select('id, nombre, descripcion, color, archivada, orden, created_at, updated_at')
+    .maybeSingle();
+
+  if (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ ok: false, error: 'Ya tenés una lista con ese nombre' });
+    }
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+  if (!data) return res.status(404).json({ ok: false, error: 'lista no encontrada' });
+
+  res.json({ ok: true, lista: data });
+});
+
+centinelaUserRouter.delete('/listas/:id', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const id = String(req.params.id ?? '');
+
+  const { error } = await supa()
+    .from('centinela_listas')
+    .delete()
+    .eq('id', id)
+    .eq('user_id', userId);
+
+  if (error) return res.status(500).json({ ok: false, error: error.message });
+  // Los watches asociados quedan con lista_id=null por el ON DELETE SET NULL
+  res.json({ ok: true });
+});
 
 // ── GET /api/centinela/summary ─────────────────────────────────────────────
 //
