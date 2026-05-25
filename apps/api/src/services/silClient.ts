@@ -155,7 +155,7 @@ export async function searchExpedientes(args: {
           async (signal) => {
             const res = await supa()
               .from('sil_expedientes')
-              .select('id, numero, titulo, proponente, comision, fecha_presentacion, estado, tipo, legislatura, url_detalle')
+              .select('id, numero, titulo, proponente, comision, fecha_presentacion, estado, tipo, legislatura, url_detalle, extras')
               .or(orParts.join(','))
               .limit(k)
               .abortSignal(signal);
@@ -180,7 +180,7 @@ export async function searchExpedientes(args: {
           // Supabase exposes this via .textSearch with config 'spanish'.
           let q = supa()
             .from('sil_expedientes')
-            .select('id, numero, titulo, proponente, comision, fecha_presentacion, estado, tipo, legislatura, url_detalle')
+            .select('id, numero, titulo, proponente, comision, fecha_presentacion, estado, tipo, legislatura, url_detalle, extras')
             .textSearch(
               'titulo_proponente_tsv',  // virtual: see migration index
               args.query,
@@ -196,7 +196,7 @@ export async function searchExpedientes(args: {
             // textSearch on a non-tsvector column will fail. Fall back to ilike on titulo.
             const fb = await supa()
               .from('sil_expedientes')
-              .select('id, numero, titulo, proponente, comision, fecha_presentacion, estado, tipo, legislatura, url_detalle')
+              .select('id, numero, titulo, proponente, comision, fecha_presentacion, estado, tipo, legislatura, url_detalle, extras')
               .ilike('titulo', `%${args.query}%`)
               .limit(k);
             if (fb.error) throw new Error(fb.error.message);
@@ -481,7 +481,28 @@ export function renderExpedientesForLlm(rows: SilExpedienteRow[]): string {
       const fecha = r.fecha_presentacion ?? 's/f';
       const titulo = r.titulo ?? '(sin título)';
       const proponente = r.proponente ?? 's/proponente';
-      return `[${i + 1}] Exp. ${r.numero} (${fecha}) — ${titulo}\n    Proponente: ${proponente} · Comisión: ${r.comision ?? '—'} · Estado: ${r.estado ?? '—'}\n    ${r.url_detalle}`;
+      // ESTATUS FORMAL — leído de extras jsonb. La doctrina del YAML
+      // de Lexa (lexa.yaml) dice que esto es lo PRIMERO que el LLM debe
+      // ver: el campo `estado` solo dice qué comisión tiene el papel
+      // físico HOY, NO si es ley. La verdad sobre "¿es ley?" está
+      // en extras.numero_ley.
+      const e = (r.extras ?? {}) as SilExtras;
+      let estatusFormal = '';
+      if (e.numero_ley) {
+        const gaceta = e.numero_gaceta ? ` · Gaceta N° ${e.numero_gaceta}` : '';
+        const pub = e.fecha_publicacion ? ` · publicada ${e.fecha_publicacion}` : '';
+        estatusFormal = `\n    ✅ ES LEY · N° ${e.numero_ley}${gaceta}${pub}`;
+      } else if (e.numero_archivado) {
+        estatusFormal = `\n    📦 ARCHIVADO · N° ${e.numero_archivado}`;
+      } else if (e.numero_acuerdo) {
+        estatusFormal = `\n    📋 ACUERDO LEGISLATIVO N° ${e.numero_acuerdo}`;
+      } else if (e.fecha_dispensa) {
+        estatusFormal = `\n    ⚡ DISPENSA DE TRÁMITE · ${e.fecha_dispensa}`;
+      } else {
+        estatusFormal = `\n    🟡 EN TRÁMITE`;
+      }
+      const alcance = e.numero_alcance ? `\n    🔁 Tiene Alcance N° ${e.numero_alcance}` : '';
+      return `[${i + 1}] Exp. ${r.numero} (${fecha}) — ${titulo}${estatusFormal}${alcance}\n    Proponente: ${proponente} · Comisión: ${r.comision ?? '—'} · Estado interno: ${r.estado ?? '—'}\n    ${r.url_detalle}`;
     })
     .join('\n\n');
 }
