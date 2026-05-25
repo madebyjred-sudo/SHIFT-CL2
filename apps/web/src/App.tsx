@@ -32,6 +32,8 @@ import { LandingPage } from './pages/LandingPage';
 import { AudiosPage } from './pages/AudiosPage';
 import { PodcastSharePage } from './pages/PodcastSharePage';
 import { cn } from '@/lib/utils';
+import { isCentinelaLocked } from '@/lib/centinelaCountdown';
+import { CentinelaLockedRoute } from '@/components/centinela/CentinelaLockOverlay';
 
 export default function App() {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
@@ -131,13 +133,13 @@ export default function App() {
           ) : workspaceId ? (
             <WorkspaceCanvasPage id={workspaceId} />
           ) : isCentinela(path) ? (
-            <CentinelaPage />
+            isCentinelaLocked() ? <CentinelaLockedRoute /> : <CentinelaPage />
           ) : isAlertasPage(path) ? (
-            <AlertasPage />
+            isCentinelaLocked() ? <CentinelaLockedRoute /> : <AlertasPage />
           ) : isEstadoPlenario(path) ? (
             <EstadoPlenarioPage />
           ) : isMatrizCliente(path) ? (
-            <MatrizClientePage />
+            isCentinelaLocked() ? <CentinelaLockedRoute /> : <MatrizClientePage />
           ) : isInformesSemanales(path) ? (
             <InformesSemanalesPage />
           ) : isMiMemoria(path) ? (

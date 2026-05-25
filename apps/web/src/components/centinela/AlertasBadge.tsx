@@ -19,6 +19,7 @@ import { Bell } from 'lucide-react';
 import { navigate } from '@/lib/router';
 import { cn } from '@/lib/utils';
 import { supabase } from '@/lib/supabase';
+import { isCentinelaLocked } from '@/lib/centinelaCountdown';
 
 // ─── Tipos ───────────────────────────────────────────────────────────────────
 
@@ -80,6 +81,7 @@ const REFRESH_INTERVAL_MS = 60_000; // 60 segundos
 export function AlertasBadge() {
   const [badge, setBadge] = useState<BadgeData | null>(null);
   const [loading, setLoading] = useState(true);
+  const locked = isCentinelaLocked();
 
   const refresh = useCallback(async () => {
     const data = await fetchBadge();
@@ -88,6 +90,9 @@ export function AlertasBadge() {
   }, []);
 
   useEffect(() => {
+    // Centinela en refactor — no polleamos la API mientras dura el lock.
+    if (locked) return;
+
     // Carga inicial
     void refresh();
 
@@ -97,7 +102,11 @@ export function AlertasBadge() {
     }, REFRESH_INTERVAL_MS);
 
     return () => clearInterval(interval);
-  }, [refresh]);
+  }, [refresh, locked]);
+
+  // Centinela bloqueado temporalmente — escondemos el badge entero. El
+  // contador volverá cuando vuelva Centinela. Ver lib/centinelaCountdown.ts.
+  if (locked) return null;
 
   // No renderizar mientras carga la primera vez
   if (loading) return null;

@@ -167,9 +167,8 @@ export function ListaDespachoPanel({ historial }: Props) {
       </div>
 
       <div className="rounded-xl border border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-white/60 dark:bg-white/[0.025] px-4 py-3">
-        <p className="text-[10.5px] text-[#0e1745]/55 dark:text-white/55 leading-relaxed font-mono">
-          Fuente: crawler <code>crawler-lista-despacho.ts</code> + SharePoint GLCP.
-          Centinela emite alerta cada vez que un expediente vigilado entra o sale de la lista.
+        <p className="text-[10.5px] text-[#0e1745]/55 dark:text-white/55 leading-relaxed">
+          Fuente oficial: lista de despacho de la Asamblea Legislativa.
         </p>
       </div>
     </div>

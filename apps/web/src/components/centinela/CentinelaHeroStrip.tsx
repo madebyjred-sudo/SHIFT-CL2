@@ -39,13 +39,19 @@ import {
   getSummary, getFeed, alertTypeLabel,
   type CentinelaAlert, type Summary,
 } from '@/services/centinelaApi';
+import { isCentinelaLocked } from '@/lib/centinelaCountdown';
+import { CentinelaLockStrip } from './CentinelaLockOverlay';
 
 export function CentinelaHeroStrip() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [alerts, setAlerts] = useState<CentinelaAlert[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const locked = isCentinelaLocked();
 
   useEffect(() => {
+    // Centinela en refactor — no pegamos a la API mientras dura el lock.
+    // Ver lib/centinelaCountdown.ts.
+    if (locked) return;
     let alive = true;
     Promise.all([
       getSummary().catch(() => null),
@@ -60,7 +66,11 @@ export function CentinelaHeroStrip() {
         if (alive) setLoaded(true);
       });
     return () => { alive = false; };
-  }, []);
+  }, [locked]);
+
+  // Centinela bloqueado temporalmente — reemplazo total del strip por el
+  // chip de countdown. Hooks ya se llamaron arriba para respetar Rules.
+  if (locked) return <CentinelaLockStrip />;
 
   // Don't render anything until we know the state — flashing the empty
   // state and then swapping to alerts is jarring. ~200ms of blank space
