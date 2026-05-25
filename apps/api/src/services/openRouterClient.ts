@@ -1292,16 +1292,27 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
         }
 
         // Emitir citation event para que la UI pinte la tarjeta de la sesión.
+        // En `content` incluimos el resumen ejecutivo + puntos clave + acuerdos
+        // completos, porque ESO es la respuesta que el usuario quiere ver. El
+        // fallback en chat.ts (cuando Pass 2 emita vacío) usa este content
+        // como texto principal — no es decorativo.
         args.onChunk({
           type: 'citation',
           payload: data.map((row, i) => {
             const meta = (row.metadata ?? {}) as Record<string, unknown>;
             const resumen = (meta.resumen ?? {}) as Record<string, unknown>;
+            const ejecutivo = (resumen.ejecutivo as string | undefined) ?? '';
+            const puntos = Array.isArray(resumen.puntos_clave) ? (resumen.puntos_clave as string[]) : [];
+            const acuerdos = Array.isArray(resumen.acuerdos) ? (resumen.acuerdos as string[]) : [];
+            const blocks: string[] = [];
+            if (ejecutivo) blocks.push(ejecutivo);
+            if (puntos.length > 0) blocks.push(`Puntos clave:\n${puntos.map((p) => `• ${p}`).join('\n')}`);
+            if (acuerdos.length > 0) blocks.push(`Acuerdos:\n${acuerdos.map((a) => `• ${a}`).join('\n')}`);
             return {
               id: `session:${row.id}`,
               session_id: row.id,
               source_ref: `Sesión ${tipo === 'plenario' ? 'plenaria' : 'de comisión'} del ${row.fecha}`,
-              content: (resumen.ejecutivo as string | undefined) ?? '',
+              content: blocks.join('\n\n'),
               similarity: 1 - i / data.length,
               fecha: row.fecha,
               comision: row.comision,

@@ -321,14 +321,28 @@ chatRouter.post('/stream', async (req, res) => {
           const cc = c as unknown as Record<string, unknown>;
           const fecha = c.fecha ? ` (${c.fecha})` : '';
           const ref = (c.source_ref ?? (cc['expediente_numero'] as string | undefined) ?? c.id ?? `[${i + 1}]`) as string;
-          const content = (c.content ?? '').slice(0, 200).replace(/\s+/g, ' ').trim();
-          return `[${i + 1}] **${ref}**${fecha}${content ? ` — ${content}` : ''}`;
+          // Para citations de sesión (get_session_by_date) mostramos el
+          // resumen completo (hasta 2000 chars) porque ES la respuesta.
+          // Para citations de SIL solo un preview corto, porque suelen
+          // ser muchos resultados y el usuario los ojea.
+          const sourceType = cc['source_type'] as string | undefined;
+          const isSession = sourceType === 'session';
+          const limit = isSession ? 2000 : 250;
+          const content = (c.content ?? '').slice(0, limit).replace(/\s+/g, ' ').trim();
+          return `[${i + 1}] **${ref}**${fecha}${content ? `\n\n${content}` : ''}`;
         });
         const more = citations.length > top.length ? ` (y ${citations.length - top.length} más)` : '';
-        fallback =
-          `Acá te dejo lo que encontré en el corpus${more}:\n\n` +
-          lines.join('\n\n') +
-          `\n\nSi querés profundizar en alguna, pedímelo por su número o nombre.`;
+        const hasSession = citations.some((c) => {
+          const cc = c as unknown as Record<string, unknown>;
+          return cc['source_type'] === 'session';
+        });
+        const intro = hasSession
+          ? `Esto es lo que tengo registrado de la sesión${more}:`
+          : `Acá te dejo lo que encontré en el corpus${more}:`;
+        const closer = hasSession
+          ? '\n\n¿Querés que profundice en alguno de los temas o expedientes mencionados?'
+          : '\n\nSi querés profundizar en alguna, pedímelo por su número o nombre.';
+        fallback = `${intro}\n\n${lines.join('\n\n')}${closer}`;
       } else {
         // No hubo citas — el modelo no llamó tools o las tools no
         // devolvieron data. Sugerimos reformular.
