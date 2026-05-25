@@ -1364,14 +1364,20 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     }
 
     if (tc.function.name === 'get_sil_expediente') {
-      let parsedArgs: { numero: number };
+      let parsedArgs: { numero: number | string };
       try {
         parsedArgs = JSON.parse(tc.function.arguments);
       } catch {
         messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: 'invalid json' }) });
         continue;
       }
-      const num = Number(parsedArgs.numero);
+      // Lexa suele mandar el número con su formato visual: "23.511",
+      // "24,018", "Exp. 25.262", incluso "23-511". Aceptamos cualquiera
+      // de esos y normalizamos a integer (23511, 24018, 25262, 23511).
+      // El SIL canonicaliza con punto como separador de miles → al sacar
+      // todo lo no-dígito tenemos el id integer que vive en sil_expedientes.id.
+      const numStr = String(parsedArgs.numero).replace(/\D/g, '');
+      const num = Number(numStr);
       if (!Number.isInteger(num) || num <= 0) {
         messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: 'numero must be positive integer' }) });
         continue;
