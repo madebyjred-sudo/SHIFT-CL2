@@ -309,10 +309,34 @@ chatRouter.post('/stream', async (req, res) => {
     // graceful fallback and emit a structured warning so ops can trace
     // WHY (LightRAG unreachable, tool empty hits, model refused, etc.).
     if (assistantText.length === 0) {
-      const fallback =
-        'No encontré una respuesta concreta para esta consulta en el corpus disponible. ' +
-        'Probá reformularla con detalles específicos — por ejemplo, una fecha (DD/MM/AAAA), ' +
-        'un número de expediente o el nombre exacto de una comisión.';
+      // Hubo citas (Pass 1 ejecutó tools con éxito y devolvieron data)
+      // pero Pass 2 no compuso respuesta — sintetizar desde citations.
+      // Esto es el caso "search_transcripts encontró X hits pero el
+      // modelo decidió 'stop' con content vacío" → no podemos dejar al
+      // usuario sin respuesta cuando la data sí se recuperó.
+      let fallback: string;
+      if (citations.length > 0) {
+        const top = citations.slice(0, 5);
+        const lines = top.map((c, i) => {
+          const cc = c as unknown as Record<string, unknown>;
+          const fecha = c.fecha ? ` (${c.fecha})` : '';
+          const ref = (c.source_ref ?? (cc['expediente_numero'] as string | undefined) ?? c.id ?? `[${i + 1}]`) as string;
+          const content = (c.content ?? '').slice(0, 200).replace(/\s+/g, ' ').trim();
+          return `[${i + 1}] **${ref}**${fecha}${content ? ` — ${content}` : ''}`;
+        });
+        const more = citations.length > top.length ? ` (y ${citations.length - top.length} más)` : '';
+        fallback =
+          `Acá te dejo lo que encontré en el corpus${more}:\n\n` +
+          lines.join('\n\n') +
+          `\n\nSi querés profundizar en alguna, pedímelo por su número o nombre.`;
+      } else {
+        // No hubo citas — el modelo no llamó tools o las tools no
+        // devolvieron data. Sugerimos reformular.
+        fallback =
+          'No encontré una respuesta concreta para esta consulta en el corpus disponible. ' +
+          'Probá reformularla con detalles específicos — por ejemplo, una fecha (DD/MM/AAAA), ' +
+          'un número de expediente o el nombre exacto de una comisión.';
+      }
       send({ type: 'token', payload: fallback });
       assistantText = fallback;
       req.log.warn('empty_completion_fallback', {
@@ -320,6 +344,7 @@ chatRouter.post('/stream', async (req, res) => {
         query: body.query.slice(0, 200),
         deep_insight: deepInsight,
         scope_legacy_session_id: scopeLegacySessionId,
+        citations_count: citations.length,
         ms: Date.now() - streamStart,
       });
     }

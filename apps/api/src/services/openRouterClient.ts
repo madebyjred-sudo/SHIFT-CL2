@@ -2565,20 +2565,32 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     return;
   }
 
-  // Fallback determinístico: sintetizar respuesta desde los tool results
-  // que ya capturamos en messages. No es perfecto pero EVITA texto vacío.
-  // Tomamos los últimos mensajes role='tool' y los formateamos como
-  // resumen. Esto pasa si Cerebro/Anthropic tiene un issue de generación
-  // en pass2 — es preferible mostrar la data cruda que un fallback genérico.
+  // Fallback determinístico DESACTIVADO 2026-05-25.
+  // Antes este código tomaba el tool result raw, le quitaba el preámbulo
+  // "INSTRUCCIONES" y lo emitía como respuesta. El resultado era texto del
+  // tipo "Encontré los siguientes extractos relevantes en la transcripción
+  // de esta sesión: Resultados SIL (1): [1] Exp. 23.511 — LEY MARCO..."
+  // que es el contenido CRUDO del dispatcher, no una respuesta sintetizada.
+  // Confundía al usuario porque parecía respuesta del agente cuando en
+  // realidad era plumbing interno leaking.
+  //
+  // Ahora dejamos pass2Text vacío. El guardrail en chat.ts detecta este
+  // caso y emite un fallback que sí muestra las citations (cuando las hay)
+  // de forma humana, o un texto sugiriendo reformular cuando no hay
+  // citations. Punto de control único, más limpio.
+  console.warn('[chat] pass2 emitio content vacio — chat.ts guardrail decidira fallback', {
+    has_tool_messages: messages.some((m) => (m as { role?: string }).role === 'tool'),
+  });
+  return;
+
+  // Bloque legacy desactivado — preservado entre /* */ para auditoria.
+  /*
   const toolResults = messages
     .filter((m) => (m as { role?: string }).role === 'tool')
     .map((m) => (m as { content?: string }).content ?? '')
     .filter((c) => c.length > 0 && !c.startsWith('{"error"'));
 
   if (toolResults.length > 0) {
-    // Solo el último tool result (el más reciente) — usualmente el de
-    // search_session_transcript. Limpiamos el preámbulo de "INSTRUCCIONES"
-    // que es para el LLM, no para el usuario.
     const lastResult = toolResults[toolResults.length - 1]!;
     const cleaned = lastResult
       .split(/---\s*\n\s*INSTRUCCIONES:/i)[0]
@@ -2591,6 +2603,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     });
     return;
   }
+  */
   // Si llegamos aquí, NO hay tool results tampoco — dejamos vacío y el
   // caller en chat.ts dispara su propio fallback genérico.
 }
