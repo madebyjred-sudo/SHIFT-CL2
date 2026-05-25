@@ -1492,25 +1492,47 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
       // Citation event — same shape as plenaria citations so the UI renders
       // them in the same cards. source_type='sil_expediente' lets the badge
       // switch and the user can click straight to the SIL detail page.
+      // CONTENT incluye estatus formal arriba (✅ ES LEY / 📦 ARCHIVADO /
+      // 📋 ACUERDO / ⚡ DISPENSA / 🟡 EN TRAMITE) leído de extras jsonb.
+      // Sin esto el fallback en chat.ts solo mostraba el título.
       args.onChunk({
         type: 'citation',
-        payload: rows.map((r, i) => ({
-          id: `sil:exp:${r.id}`,
-          session_id: '',
-          source_ref: `Exp. ${r.numero}`,
-          content: r.titulo ?? '',
-          similarity: 1 - i / Math.max(rows.length, 1), // pseudo-rank for UI ordering
-          fecha: r.fecha_presentacion,
-          comision: r.comision,
-          tipo: r.tipo,
-          source_type: 'sil_expediente',
-          expediente_numero: r.numero,
-          estado: r.estado,
-          proponente: r.proponente,
-          url_detalle: r.url_detalle,
-          video_url: null,
-          transcript_url: null,
-        })),
+        payload: rows.map((r, i) => {
+          const e = (r.extras ?? {}) as Record<string, unknown>;
+          const lineas: string[] = [];
+          if (e['numero_ley']) {
+            const gaceta = e['numero_gaceta'] ? ` · Gaceta N° ${e['numero_gaceta']}` : '';
+            const pub = e['fecha_publicacion'] ? ` · publicada ${e['fecha_publicacion']}` : '';
+            lineas.push(`✅ ES LEY · N° ${e['numero_ley']}${gaceta}${pub}`);
+          } else if (e['numero_archivado']) {
+            lineas.push(`📦 ARCHIVADO · N° ${e['numero_archivado']}`);
+          } else if (e['numero_acuerdo']) {
+            lineas.push(`📋 ACUERDO LEGISLATIVO N° ${e['numero_acuerdo']}`);
+          } else if (e['fecha_dispensa']) {
+            lineas.push(`⚡ DISPENSA DE TRÁMITE · ${e['fecha_dispensa']}`);
+          } else {
+            lineas.push(`🟡 EN TRÁMITE`);
+          }
+          if (e['numero_alcance']) lineas.push(`🔁 Alcance N° ${e['numero_alcance']}`);
+          lineas.push(r.titulo ?? '(sin título)');
+          return {
+            id: `sil:exp:${r.id}`,
+            session_id: '',
+            source_ref: `Exp. ${r.numero}`,
+            content: lineas.join('\n'),
+            similarity: 1 - i / Math.max(rows.length, 1), // pseudo-rank for UI ordering
+            fecha: r.fecha_presentacion,
+            comision: r.comision,
+            tipo: r.tipo,
+            source_type: 'sil_expediente',
+            expediente_numero: r.numero,
+            estado: r.estado,
+            proponente: r.proponente,
+            url_detalle: r.url_detalle,
+            video_url: null,
+            transcript_url: null,
+          };
+        }),
       });
 
       const renderedExpedientes = renderExpedientesForLlm(rows);
