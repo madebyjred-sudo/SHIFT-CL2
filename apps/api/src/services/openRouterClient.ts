@@ -2509,9 +2509,21 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
       {
         model,
         messages: messagesForPass2,
-        // NO incluimos `tools` ni `tool_choice` — el modelo ya ejecutó la tool
-        // en pass1. Tener tools registradas + tool_choice='none' confunde a
-        // sonnet-4.6 (devuelve stop con content vacío).
+        // tools=[] + tool_choice='none' — fix 2026-05-25. Antes (v3)
+        // omitíamos ambos, pero el modelo seguía emitiendo
+        // finish_reason='tool_calls' con content vacío porque la
+        // conversación contenía mensajes role='tool' y assistant con
+        // tool_calls — Anthropic lo interpreta como contexto válido para
+        // emitir más tool_calls. Forzar tools=[] + 'none' deja explícito
+        // que NO hay herramientas en este turno y el modelo responde
+        // con texto. Comentario v2 que sugería que esto confundía a
+        // sonnet ya no aplica: era con tools NO vacíos. Verificado vía
+        // smoke + curl directo al endpoint (logs Cloud Run mostraban
+        // finish_reason='tool_calls' content_length=0 → fallback
+        // determinístico → "Encontré los siguientes extractos…" leaking
+        // tool content raw al usuario).
+        tools: [],
+        tool_choice: 'none',
         max_tokens: 2048,
         temperature: 0.2,
         ...cerebroExtras,
