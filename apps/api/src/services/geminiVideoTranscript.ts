@@ -74,24 +74,49 @@ const SYSTEM_INSTRUCTION = `Sos un transcriptor de sesiones legislativas de la
 Asamblea Legislativa de Costa Rica. Tu trabajo es generar la transcripción
 del audio del video con timestamps precisos.
 
-REGLAS:
+REGLAS DE GRANULARIDAD (LO MÁS IMPORTANTE — antes que cualquier otra cosa):
+
+Cada segment DEBE durar entre 3 y 8 segundos. NUNCA generes un segment
+de más de 10 segundos. Si un diputado habla 30 segundos seguidos, devolvés
+6-10 segments distintos (uno cada 3-5s), NO un solo segment grande.
+
+Esto NO es opcional. La herramienta deja al usuario hacer click en un
+timecode y saltar al momento exacto del video — necesita granularidad
+fina para que la cita sea útil. Un segment de 60s es inutilizable
+porque el usuario no sabe en qué instante de esos 60 está la palabra
+que busca.
+
+EJEMPLOS DE LO QUE QUEREMOS:
+✓ {"start_s": 14.2, "end_s": 18.5, "text": "Buenos días, diputadas y diputados."}
+✓ {"start_s": 18.5, "end_s": 22.1, "text": "Iniciamos esta sesión número catorce."}
+✓ {"start_s": 22.1, "end_s": 26.8, "text": "Primer punto del orden del día es la discusión del expediente 25.262."}
+
+EJEMPLOS DE LO QUE NO QUEREMOS:
+✗ {"start_s": 14.2, "end_s": 65.3, "text": "Buenos días diputadas y diputados iniciamos esta sesión número catorce primer punto del orden del día es la discusión del expediente 25.262..."}
+  (Demasiado largo — debe ser 8 segments distintos)
+
+OTRAS REGLAS:
 1. Transcribí TODO el audio audible. No omitas, no resumas, no parafrases.
-2. Segmentá en bloques de 5-10 segundos para que se pueda navegar y citar.
-3. Mantené el orden cronológico estricto: cada segmento empieza después del anterior.
-4. NO inventes palabras donde no las hay. Si hay silencio o ruido inaudible,
-   omití el segmento.
-5. Nombres propios: usá la grafía correcta cuando la conozcas (e.g.
+2. Mantené el orden cronológico estricto: cada segmento empieza al terminar el anterior.
+3. NO inventes palabras donde no las hay. Si hay silencio o ruido inaudible,
+   omití el segmento o anotalo: {"text": "[inaudible]"}.
+4. Nombres propios: usá la grafía correcta cuando la conozcas (e.g.
    "Rodrigo Chaves Robles", "Asamblea Legislativa", "Yara Jiménez").
    Si dudás de un nombre, transcribilo fonéticamente.
-6. Idioma: español de Costa Rica.
+5. Idioma: español de Costa Rica.
+6. NO incluyas marcadores ni texto fuera del JSON.
 
-OUTPUT — JSON estricto, sin texto adicional:
+OUTPUT — JSON estricto, sin texto adicional, sin markdown:
 {
   "segments": [
-    {"start_s": 0.0, "end_s": 5.4, "text": "..."},
-    ...
+    {"start_s": 0.0, "end_s": 4.2, "text": "..."},
+    {"start_s": 4.2, "end_s": 8.5, "text": "..."}
   ]
-}`;
+}
+
+Cobertura esperada: para 5 minutos (300s) de audio activo, devolvés
+entre 50 y 100 segments. Si devolvés menos de 30, estás agrupando
+demasiado y la transcripción NO sirve.`;
 
 interface GeminiResponse {
   candidates?: Array<{
@@ -208,7 +233,13 @@ export async function fetchTranscriptViaGemini(
     ],
     generationConfig: {
       responseMimeType: 'application/json',
-      maxOutputTokens: 32000,
+      // 65535 es el máximo de Gemini 2.5 Pro y Flash en Vertex. Subido de
+      // 32000 (2026-05-25) porque con la nueva granularidad fina (5-8s/seg)
+      // un chunk de 300s puede generar ~60 segments × ~100 tokens cada uno
+      // = 6K tokens output. Pero plenarias densas con interrupciones pueden
+      // doblar ese cálculo. Mejor tener margen que cortar con MAX_TOKENS y
+      // perder los últimos minutos del chunk.
+      maxOutputTokens: 65535,
       temperature: 0.05,
     },
   };
