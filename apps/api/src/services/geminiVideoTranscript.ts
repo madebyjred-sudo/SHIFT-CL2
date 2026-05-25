@@ -403,9 +403,21 @@ export async function fetchTranscriptViaGeminiChunked(
     signal?: AbortSignal;
     windowS?: number;
     onProgress?: (done: number, total: number) => void;
+    /** Retries por chunk fallido (default 2 → 3 intentos totales) */
+    maxRetries?: number;
+    /** Si un chunk devuelve menos de N segments lo consideramos magro y
+     *  lo reintentamos con ventana subdividida. Default 5. */
+    sparseSegmentThreshold?: number;
   },
 ): Promise<GeminiSegment[]> {
-  const windowS = opts?.windowS ?? 600;
+  // 2026-05-25: bajado de 600s → 300s. Análisis showed que con 600s muchas
+  // ventanas devolvían pocos segments porque Gemini quedaba con MAX_TOKENS
+  // por output, y el código original no recuperaba esos minutos perdidos.
+  // 300s da ~2× chunks pero cada uno cabe holgado en max_output_tokens y
+  // hace el output mas denso.
+  const windowS = opts?.windowS ?? 300;
+  const maxRetries = opts?.maxRetries ?? 2;
+  const sparseThreshold = opts?.sparseSegmentThreshold ?? 5;
   if (!Number.isFinite(durationS) || durationS <= 0) {
     // Sin duración no podemos chunkear — caemos a una sola llamada con flash.
     return fetchTranscriptViaGemini(videoId, { signal: opts?.signal });
@@ -434,10 +446,18 @@ export async function fetchTranscriptViaGeminiChunked(
     estimatedCostUsd: ((durationS / 60) * costPerMin).toFixed(3),
   });
 
-  const allSegments: GeminiSegment[] = [];
-  let chunkIdx = 0;
-  for (const [startOffsetS, endOffsetS] of ranges) {
-    chunkIdx++;
+  /**
+   * Procesa un chunk con retry. Si recibe pocos segments para el rango,
+   * subdivide la ventana en 2 y procesa cada mitad — esto cubre el caso
+   * típico donde MAX_TOKENS corta el output y la segunda mitad del rango
+   * queda sin transcribir.
+   */
+  async function processChunkWithRetry(
+    startOffsetS: number,
+    endOffsetS: number,
+    attempt = 0,
+    depth = 0,
+  ): Promise<GeminiSegment[]> {
     try {
       const segs = await fetchTranscriptViaGemini(videoId, {
         signal: opts?.signal,
@@ -445,25 +465,77 @@ export async function fetchTranscriptViaGeminiChunked(
         endOffsetS,
         model,
       });
-      allSegments.push(...segs);
-      opts?.onProgress?.(chunkIdx, ranges.length);
+
+      const rangeS = endOffsetS - startOffsetS;
+      const lastSegEnd = segs.length > 0 ? segs[segs.length - 1]!.end_seconds : startOffsetS;
+      // Coverage: cuánto del rango cubrieron los segments. Si <70% del
+      // rango está cubierto, tratamos como magro → split.
+      const coverage = (lastSegEnd - startOffsetS) / rangeS;
+      const sparse = segs.length < sparseThreshold || coverage < 0.7;
+
       logger.info('gemini_video_transcript_chunk_done', {
         videoId,
-        chunk: `${chunkIdx}/${ranges.length}`,
         rangeS: `${startOffsetS}-${endOffsetS}`,
         segmentsInChunk: segs.length,
+        coverage: coverage.toFixed(2),
+        sparse,
+        attempt,
+        depth,
       });
+
+      // Si está magro y aún podemos profundizar (subdividir ventana), lo
+      // hacemos. Cap a profundidad 2 (180s → 90s → 45s) para evitar
+      // recursión infinita.
+      if (sparse && depth < 2 && rangeS > 60) {
+        const mid = Math.floor((startOffsetS + endOffsetS) / 2);
+        logger.warn('gemini_video_transcript_chunk_sparse_split', {
+          videoId,
+          rangeS: `${startOffsetS}-${endOffsetS}`,
+          coverage: coverage.toFixed(2),
+          segments: segs.length,
+          splitAt: mid,
+        });
+        const [half1, half2] = await Promise.all([
+          processChunkWithRetry(startOffsetS, mid, 0, depth + 1).catch(() => [] as GeminiSegment[]),
+          processChunkWithRetry(mid, endOffsetS, 0, depth + 1).catch(() => [] as GeminiSegment[]),
+        ]);
+        // Mergeamos las dos mitades con lo que sí trajo el intento original
+        // (puede haber segments útiles al principio).
+        return [...segs, ...half1, ...half2];
+      }
+
+      return segs;
     } catch (err) {
-      // Un chunk que falla NO mata todo el proceso — los demás siguen.
-      // El sesion queda con transcript parcial y el operador puede
-      // re-disparar process-pending para llenar los huecos.
+      if (attempt < maxRetries) {
+        const backoffMs = 1000 * Math.pow(2, attempt);
+        logger.warn('gemini_video_transcript_chunk_retry', {
+          videoId,
+          rangeS: `${startOffsetS}-${endOffsetS}`,
+          attempt: attempt + 1,
+          maxRetries,
+          backoffMs,
+          error: (err as Error).message,
+        });
+        await new Promise((r) => setTimeout(r, backoffMs));
+        return processChunkWithRetry(startOffsetS, endOffsetS, attempt + 1, depth);
+      }
       logger.error('gemini_video_transcript_chunk_failed', {
         videoId,
-        chunk: `${chunkIdx}/${ranges.length}`,
         rangeS: `${startOffsetS}-${endOffsetS}`,
+        attemptsExhausted: maxRetries + 1,
         error: (err as Error).message,
       });
+      return [];
     }
+  }
+
+  const allSegments: GeminiSegment[] = [];
+  let chunkIdx = 0;
+  for (const [startOffsetS, endOffsetS] of ranges) {
+    chunkIdx++;
+    const segs = await processChunkWithRetry(startOffsetS, endOffsetS);
+    allSegments.push(...segs);
+    opts?.onProgress?.(chunkIdx, ranges.length);
   }
 
   // Dedupe por (start_seconds redondeado a 1s, primeras 30 chars de text).
