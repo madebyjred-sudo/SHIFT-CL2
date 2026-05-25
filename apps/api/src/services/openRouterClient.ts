@@ -2574,12 +2574,53 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // Confundía al usuario porque parecía respuesta del agente cuando en
   // realidad era plumbing interno leaking.
   //
-  // Ahora dejamos pass2Text vacío. El guardrail en chat.ts detecta este
-  // caso y emite un fallback que sí muestra las citations (cuando las hay)
-  // de forma humana, o un texto sugiriendo reformular cuando no hay
-  // citations. Punto de control único, más limpio.
+  // Pass 2 emitió content vacío. Hay dos sub-casos:
+  //   (A) hubo tool messages (search_transcripts/search_sil_expedientes
+  //       se ejecutó) — el chat.ts guardrail va a mostrar las citations
+  //       cuando las haya, pero si las tools devolvieron 0 hits NO hay
+  //       citations. Emitimos un mensaje natural acá para que el usuario
+  //       no vea el fallback genérico tonto.
+  //   (B) no hubo tools — el modelo no quiso/no pudo llamar nada. Dejamos
+  //       vacío y chat.ts emite el genérico ("reformulá con detalles").
+  const toolMessages = messages.filter((m) => (m as { role?: string }).role === 'tool');
+  const hasToolMessages = toolMessages.length > 0;
+
+  if (hasToolMessages) {
+    // Detectar si los tool results fueron "SIN RESULTADOS" o error.
+    const tools_that_ran = toolMessages
+      .map((m) => (m as { content?: string }).content ?? '')
+      .map((c) => {
+        if (c.startsWith('{"error"')) return 'error';
+        if (/SIN RESULTADOS|0 hits|no encontré/i.test(c)) return 'empty';
+        return 'data';
+      });
+    const allEmpty = tools_that_ran.every((s) => s === 'empty' || s === 'error');
+    if (allEmpty) {
+      args.onChunk({
+        type: 'token',
+        payload:
+          'Consulté las fuentes disponibles (transcripciones, expedientes, reglamento) pero no encontré información que responda específicamente a tu consulta. ' +
+          'Probá reformularla con más detalle — por ejemplo, un número de expediente (ej. 23.511), una fecha exacta (DD/MM/AAAA), ' +
+          'el nombre de un proyecto de ley o de una comisión.',
+      });
+      console.warn('[chat] pass2 empty + tools empty — emitio fallback natural', {
+        tool_count: toolMessages.length,
+        tools_results: tools_that_ran.join(','),
+      });
+      return;
+    }
+    // Si llegamos acá, había tools con data PERO Pass 2 igual vacío.
+    // Eso es el caso del citation event sin Pass 2 — chat.ts guardrail
+    // maneja con citations.
+    console.warn('[chat] pass2 empty + tools con data — chat.ts guardrail decide', {
+      tool_count: toolMessages.length,
+      tools_results: tools_that_ran.join(','),
+    });
+    return;
+  }
+
   console.warn('[chat] pass2 emitio content vacio — chat.ts guardrail decidira fallback', {
-    has_tool_messages: messages.some((m) => (m as { role?: string }).role === 'tool'),
+    has_tool_messages: false,
   });
   return;
 
