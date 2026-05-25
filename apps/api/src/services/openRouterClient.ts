@@ -165,6 +165,37 @@ interface OACompletionResponse {
   usage?: StreamUsage;
 }
 
+// Direct lookup of a plenary or commission session by its calendar date.
+// Critical for prompts like "qué se discutió en la sesión del 21 de mayo"
+// — search_transcripts depends on chunks (limited coverage for recent
+// plenaries) while this tool reads sessions.metadata.resumen which is
+// always populated post-LLM-review (Vertex Gemini 2.5 Pro). Returns the
+// full executive summary + key points + agreements + duration.
+const GET_SESSION_BY_DATE_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'get_session_by_date',
+    description:
+      'Recupera el resumen ejecutivo + puntos clave + acuerdos de una sesión legislativa (plenaria o de comisión) por su fecha. Usá esta tool SIEMPRE que el usuario pregunte por una sesión específica con su fecha — por ejemplo "qué se discutió en la plenaria del 21 de mayo", "qué pasó en la sesión del 14 de marzo", "dame el resumen del plenario del jueves pasado". Es más directa y confiable que search_transcripts para preguntas centradas en una fecha. Devuelve metadata estructurada (fecha, tipo, comisión, duración, video) + el resumen ejecutivo generado por el LLM tras la transcripción.',
+    parameters: {
+      type: 'object',
+      properties: {
+        fecha: {
+          type: 'string',
+          description: 'Fecha de la sesión en formato YYYY-MM-DD (ej. "2026-05-21"). Si el usuario escribe "21 de mayo" del año en curso, convertilo a YYYY-MM-DD.',
+        },
+        tipo: {
+          type: 'string',
+          enum: ['plenario', 'comision'],
+          description: 'Tipo de sesión: "plenario" o "comision". Default: plenario.',
+          default: 'plenario',
+        },
+      },
+      required: ['fecha'],
+    },
+  },
+};
+
 // Session-scoped transcript search. Only registered when the request carries
 // `scope_legacy_session_id` — i.e. the user is chatting from /sesiones/:id.
 // Returns excerpts from the CURRENT plenaria's transcript with timecodes,
@@ -925,7 +956,14 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // Loose `unknown` element type — both tool schemas have different
   // `parameters.properties` shapes; `tools` is forwarded as JSON to the API.
   const tools: Array<Record<string, unknown>> = [];
-  if (hasSearchTranscriptsTool(agent.tools)) tools.push(SEARCH_TRANSCRIPTS_TOOL);
+  if (hasSearchTranscriptsTool(agent.tools)) {
+    tools.push(SEARCH_TRANSCRIPTS_TOOL);
+    // get_session_by_date va junto con search_transcripts — son
+    // complementarias. La primera para "qué dijo X" (search semántico
+    // sobre chunks), la segunda para "qué pasó el DD/MM" (lookup
+    // directo por fecha leyendo metadata.resumen).
+    tools.push(GET_SESSION_BY_DATE_TOOL);
+  }
   const scopeId = args.scope_legacy_session_id ?? null;
   const scopeUuid = args.scope_session_uuid ?? null;
   // search_session_transcript se registra SOLO cuando NO tenemos el
@@ -1201,6 +1239,118 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
         tool_call_id: tc.id,
         content: toolPayload,
       });
+      continue;
+    }
+
+    if (tc.function.name === 'get_session_by_date') {
+      let parsedArgs: { fecha: string; tipo?: 'plenario' | 'comision' };
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments);
+      } catch {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: 'invalid json' }) });
+        continue;
+      }
+      const fecha = String(parsedArgs.fecha ?? '').trim();
+      const tipo = parsedArgs.tipo === 'comision' ? 'comision' : 'plenario';
+      // Validar formato YYYY-MM-DD permisivo (acepta también DD/MM/AAAA y normaliza)
+      let isoDate: string | null = null;
+      const iso = fecha.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      const dmy = fecha.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+      if (iso) isoDate = `${iso[1]}-${iso[2]}-${iso[3]}`;
+      else if (dmy) isoDate = `${dmy[3]}-${(dmy[2] ?? '').padStart(2, '0')}-${(dmy[1] ?? '').padStart(2, '0')}`;
+      if (!isoDate) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify({ error: 'fecha invalida. Usá YYYY-MM-DD (ej. 2026-05-21)' }),
+        });
+        continue;
+      }
+
+      try {
+        const { createClient: cc } = await import('@supabase/supabase-js');
+        const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+        const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+        if (!url || !key) throw new Error('supabase env missing');
+        const s = cc(url, key, { auth: { persistSession: false } });
+        const { data, error } = await s
+          .from('sessions')
+          .select('id, fecha, tipo, comision, video_url, metadata, status, youtube_video_id')
+          .eq('fecha', isoDate)
+          .eq('tipo', tipo)
+          .eq('status', 'indexed')
+          .order('created_at', { ascending: false })
+          .limit(3);
+        if (error) throw new Error(error.message);
+        if (!data || data.length === 0) {
+          messages.push({
+            role: 'tool',
+            tool_call_id: tc.id,
+            content: `SIN RESULTADOS — no encontré sesión ${tipo} del ${isoDate} en el corpus indexado. Decile al usuario que no hay sesión indexada para esa fecha. Sugerí buscar fechas próximas o verificar que la sesión efectivamente ocurrió.`,
+          });
+          continue;
+        }
+
+        // Emitir citation event para que la UI pinte la tarjeta de la sesión.
+        args.onChunk({
+          type: 'citation',
+          payload: data.map((row, i) => {
+            const meta = (row.metadata ?? {}) as Record<string, unknown>;
+            const resumen = (meta.resumen ?? {}) as Record<string, unknown>;
+            return {
+              id: `session:${row.id}`,
+              session_id: row.id,
+              source_ref: `Sesión ${tipo === 'plenario' ? 'plenaria' : 'de comisión'} del ${row.fecha}`,
+              content: (resumen.ejecutivo as string | undefined) ?? '',
+              similarity: 1 - i / data.length,
+              fecha: row.fecha,
+              comision: row.comision,
+              tipo: row.tipo,
+              source_type: 'session',
+              video_url: row.video_url,
+              transcript_url: null,
+            };
+          }),
+        });
+
+        // Construir el tool_payload con resumen + puntos clave + acuerdos.
+        const rendered = data
+          .map((row, i) => {
+            const meta = (row.metadata ?? {}) as Record<string, unknown>;
+            const resumen = (meta.resumen ?? {}) as Record<string, unknown>;
+            const ejecutivo = resumen.ejecutivo as string | undefined;
+            const puntos = Array.isArray(resumen.puntos_clave) ? (resumen.puntos_clave as string[]) : [];
+            const acuerdos = Array.isArray(resumen.acuerdos) ? (resumen.acuerdos as string[]) : [];
+            const dur = typeof meta.duration_seconds === 'number' ? meta.duration_seconds : null;
+            const durHuman = dur ? `${Math.floor(dur / 3600)}h${Math.floor((dur % 3600) / 60).toString().padStart(2, '0')}m` : 'duración no disponible';
+            const lines: string[] = [];
+            lines.push(`[${i + 1}] Sesión ${tipo === 'plenario' ? 'plenaria' : `de comisión (${row.comision ?? 'sin comisión'})`} — ${row.fecha} · ${durHuman}`);
+            if (row.video_url) lines.push(`Video: ${row.video_url}`);
+            if (ejecutivo) lines.push(`\nRESUMEN EJECUTIVO:\n${ejecutivo}`);
+            if (puntos.length > 0) lines.push(`\nPUNTOS CLAVE:\n${puntos.map((p) => `- ${p}`).join('\n')}`);
+            if (acuerdos.length > 0) lines.push(`\nACUERDOS:\n${acuerdos.map((a) => `- ${a}`).join('\n')}`);
+            return lines.join('\n');
+          })
+          .join('\n\n---\n\n');
+
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content:
+            `Sesión(es) encontrada(s) (${data.length}):\n\n${rendered}\n\n---\n` +
+            `INSTRUCCIONES:\n` +
+            `1. Respondé al usuario citando los puntos clave y acuerdos del resumen. Usá [N] inline después de cada afirmación.\n` +
+            `2. Si el resumen tiene acuerdos formales, mencionalos primero — son lo más concreto.\n` +
+            `3. Si el video está disponible, ofrecé el link al final.\n` +
+            `4. NO uses la palabra "metadata" ni "resumen ejecutivo del LLM" — hablale al usuario de "lo registrado en el acta" o "lo discutido".`,
+        });
+      } catch (err) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify({ error: (err as Error).message }),
+        });
+      }
       continue;
     }
 
