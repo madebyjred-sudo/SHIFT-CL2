@@ -124,6 +124,54 @@ export async function searchExpedientes(args: {
 }): Promise<SilExpedienteRow[]> {
   const k = Math.min(Math.max(args.k ?? 10, 1), 50);
 
+  // Detección de "número de expediente". Lexa suele pasar el query con
+  // el número crudo ("23.511", "24.018", "Exp. 25.262"). El full-text
+  // en español stemming NO matchea esos tokens — los devuelve 0 hits y
+  // Lexa reporta "no encontré expedientes". Antes del path full-text,
+  // intentamos un lookup directo por número/id. Si encuentra, devolvemos
+  // ese row (lo importante es el match). Si no, caemos al full-text
+  // normal para queries de texto natural.
+  const numTokens = args.query.match(/\d[\d.,\s-]*\d|\d/g) ?? [];
+  if (numTokens.length > 0) {
+    const ids: number[] = [];
+    const numeros: string[] = [];
+    for (const tok of numTokens) {
+      const digits = tok.replace(/\D/g, '');
+      if (digits.length >= 4 && digits.length <= 6) {
+        const n = Number(digits);
+        if (Number.isInteger(n) && n > 0) ids.push(n);
+        // Formato canónico SIL: NN.NNN o N.NNN (números con punto cada 3 dígitos)
+        if (digits.length === 5) numeros.push(`${digits[0]}${digits[1]}.${digits.slice(2)}`);
+        else if (digits.length === 6) numeros.push(`${digits.slice(0, 3)}.${digits.slice(3)}`);
+        else if (digits.length === 4) numeros.push(`${digits[0]}.${digits.slice(1)}`);
+      }
+    }
+    if (ids.length > 0 || numeros.length > 0) {
+      try {
+        const orParts: string[] = [];
+        if (ids.length > 0) orParts.push(`id.in.(${ids.join(',')})`);
+        if (numeros.length > 0) orParts.push(`numero.in.(${numeros.map((n) => `"${n}"`).join(',')})`);
+        const lookup = await withTimeout(
+          async (signal) => {
+            const res = await supa()
+              .from('sil_expedientes')
+              .select('id, numero, titulo, proponente, comision, fecha_presentacion, estado, tipo, legislatura, url_detalle')
+              .or(orParts.join(','))
+              .limit(k)
+              .abortSignal(signal);
+            return res;
+          },
+          { ms: SUPA_TIMEOUT_MS, label: 'sil:search_expedientes:lookup_by_number' },
+        );
+        if (!lookup.error && lookup.data && lookup.data.length > 0) {
+          return lookup.data as SilExpedienteRow[];
+        }
+      } catch {
+        // Lookup directo fall — continuar con full-text
+      }
+    }
+  }
+
   return withRetry(
     () =>
       withTimeout(

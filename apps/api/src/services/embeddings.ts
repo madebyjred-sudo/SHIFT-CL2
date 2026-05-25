@@ -21,7 +21,13 @@ const DEFAULT_LOCATION = 'us-central1';
 const DEFAULT_MODEL = 'gemini-embedding-001';
 const DEFAULT_DIM = 3072;
 const CONCURRENCY = 8;
-const EMBED_TIMEOUT_MS = 15_000;
+// Subido de 15s → 30s (2026-05-25). El cold start de Vertex AI puede
+// superar 15s en la primera invocación del proceso Cloud Run, y eso
+// hace que search_transcripts falle con "timeout" — Lexa reporta al
+// usuario "error de tiempo de respuesta del sistema" y no puede citar
+// transcripciones. El call promedio de Vertex Gemini embed cuando está
+// caliente es 200-500ms; 30s da margen para 1-2 retries en cold start.
+const EMBED_TIMEOUT_MS = 30_000;
 const EMBED_RETRY_ATTEMPTS = 3;
 const EMBED_RETRY_BASE_MS = 400;
 
