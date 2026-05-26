@@ -77,6 +77,13 @@ interface StreamArgs {
   // through Cerebro's /v1/llm/invoke (the bypass-closure path; deferred).
   // null/undefined → skip injection silently.
   user_email?: string | null;
+  // Role del usuario tomado de user_access.role. Wave 4 / Ronald F1 (2026-05-26):
+  // si role='cliente' se filtran las tools editoriales con marca CL2
+  // (generate_presentation, generate_docx, generate_asset, edit_asset_slide).
+  // Cliente puede usar todo lo demás (chat, browse, alertas Centinela).
+  // null/undefined → se asume rol no-restringido (caller no resolvió el
+  // role o el user no tiene row en user_access aún).
+  user_role?: 'lector' | 'editor' | 'operador' | 'admin' | 'cliente' | null;
   // Prior turns of this conversation, in OAI {role,content} shape. Without
   // this, every turn is a "first turn" to the LLM (it can't see what it
   // said last time, so references like "el #1" or "expandí esa idea" miss).
@@ -1120,25 +1127,31 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   if (hasGraphTool(agent.tools) && args.deep_insight) {
     tools.push(QUERY_LEGISLATIVE_GRAPH_TOOL);
   }
+  // Wave 4 / Ronald F1 (2026-05-26): los 4 tools editoriales con marca CL2
+  // están gateados por role del usuario. `cliente` NO puede invocarlos —
+  // son productos "para venta" propiedad de CL2 Consultoría. Cualquier otro
+  // rol (lector/editor/operador/admin/null) conserva acceso completo.
+  const canUseEditorial = args.user_role !== 'cliente';
+
   // generate_presentation — only available when the chat is scoped to a
   // workspace AND the agent yaml declares the tool (Atlas does, Lexa/
   // Centinela don't). Without scope_workspace_id we don't know which
   // canvas to convert, so we hide the tool entirely rather than letting
   // the model attempt and fail.
-  if (hasGeneratePresentationTool(agent.tools) && args.scope_workspace_id) {
+  if (canUseEditorial && hasGeneratePresentationTool(agent.tools) && args.scope_workspace_id) {
     tools.push(GENERATE_PRESENTATION_TOOL);
   }
   // generate_docx — same workspace-scoping contract as generate_presentation.
   // Only Atlas declares this tool; only available when a workspace is in scope.
-  if (hasGenerateDocxTool(agent.tools) && args.scope_workspace_id) {
+  if (canUseEditorial && hasGenerateDocxTool(agent.tools) && args.scope_workspace_id) {
     tools.push(GENERATE_DOCX_TOOL);
   }
   // generate_asset / edit_asset_slide — branded HTML→PDF pipeline.
   // Same workspace-scope gate as the legacy tools above.
-  if (hasGenerateAssetTool(agent.tools) && args.scope_workspace_id) {
+  if (canUseEditorial && hasGenerateAssetTool(agent.tools) && args.scope_workspace_id) {
     tools.push(GENERATE_ASSET_TOOL);
   }
-  if (hasEditAssetSlideTool(agent.tools) && args.scope_workspace_id) {
+  if (canUseEditorial && hasEditAssetSlideTool(agent.tools) && args.scope_workspace_id) {
     tools.push(EDIT_ASSET_SLIDE_TOOL);
   }
   // create_workspace — Atlas tool para CREAR un workspace nuevo. NO está

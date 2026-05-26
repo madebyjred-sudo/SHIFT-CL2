@@ -2,7 +2,7 @@ import { Router } from 'express';
 import type { CerebroRequest, CerebroStreamChunk } from '@shift-cl2/shared-types';
 import { openRouterStream } from '../services/openRouterClient.js';
 import { getAgent } from '../services/agentLoader.js';
-import { getUserFromRequest, getUserIdFromRequest } from '../services/auth.js';
+import { getUserFromRequest, getUserIdFromRequest, loadUserAccess } from '../services/auth.js';
 import { requireQuota, logAiCall } from '../services/aiQuota.js';
 import { ResilienceError } from '../services/resilience.js';
 import { estimateConfidence } from '../services/confidence.js';
@@ -89,6 +89,16 @@ chatRouter.post('/stream', async (req, res) => {
   if (!userId) {
     res.status(401).json({ ok: false, error: 'auth_required', message: 'Iniciá sesión para chatear con Lexa.' });
     return;
+  }
+  // Wave 4 / Ronald F1 (2026-05-26): cargar el role del user. Best-effort —
+  // si falla la lectura, dejamos role=null (sin restricciones) en vez de
+  // bloquear al user. role='cliente' es el único que filtra tools editoriales.
+  let userRole: 'lector' | 'editor' | 'operador' | 'admin' | 'cliente' | null = null;
+  try {
+    const access = await loadUserAccess(userId);
+    userRole = (access?.role as typeof userRole) ?? null;
+  } catch {
+    // Tabla no disponible / transient — degradar a sin role (acceso completo).
   }
   const quotaCheck = await requireQuota(userId, 'chat.stream', res);
   if (quotaCheck === 'denied') {
@@ -284,6 +294,10 @@ chatRouter.post('/stream', async (req, res) => {
       // realms ("cl2" realm here) — openRouterStream uses it to fetch
       // /memories before the LLM call and inject as a system block.
       user_email: userEmail,
+      // Wave 4 / Ronald F1 (2026-05-26): role filtra tools editoriales con
+      // marca CL2 cuando es 'cliente'. Cualquier otro rol/null deja acceso
+      // completo. Lookup hecho arriba — null si la consulta falló o no hay row.
+      user_role: userRole,
       // Forward conversation history sent by the client (keeps the model
       // aware of prior turns). The frontend trims to its own window; the
       // server caps at MAX_HISTORY_MESSAGES as a safety net.
