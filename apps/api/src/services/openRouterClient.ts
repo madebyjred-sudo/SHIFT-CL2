@@ -2693,19 +2693,23 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   //       tool_choice='none'. Si el content sigue vacío, último recurso:
   //       sintetizar respuesta determinística desde los tool results que
   //       ya capturamos en `messages`.
-  // Pass2 messages: enviar la conversación TAL CUAL — la última entrada
-  // es un role:'tool' con tool_result, y el modelo DEBE responder con
-  // texto. El nudge user message anterior estaba causando que Anthropic
-  // devolviera {content:null} (diagnosticado 2026-05-26 vía v7 dump):
-  // el modelo interpretaba el doble user (tool_result + nudge) como
-  // "conversación cerrada, ya respondí con tool_use, fin".
+  // Pass2 messages: ASSISTANT PREFILL TURN (v10, fix definitivo según
+  // Cerebro padre handoff 2026-05-26).
   //
-  // Cambiamos a un enfoque assistant-prefill: agregamos un assistant
-  // message vacío al final para que el modelo "continúe" la respuesta
-  // natural post-tool_result, no la inicie desde cero.
-  // En OpenAI format eso es simplemente NO añadir nada extra y dejar
-  // que el modelo emita su turn-of-assistant.
-  const messagesForPass2 = [...messages];
+  // Anthropic Sonnet 4.5/4.6 tiene un patrón conocido: post-tool_result,
+  // a veces "decide" que ya completó la tarea con el tool y devuelve
+  // {content:null}. v9 (sin tool_choice) bajó el rate de 53% → 17% (UI)
+  // pero quedaba un residual.
+  //
+  // Solución canónica de Anthropic Cookbook: agregar un message
+  // role:'assistant' al final con un prefill — el modelo COMPLETA ese
+  // turn, no puede devolver null porque ya hay texto del assistant.
+  // El parser de Pass 2 luego strippea el prefijo del output final.
+  const PASS2_PREFILL = 'Acá te resumo lo que encontré:';
+  const messagesForPass2 = [
+    ...messages,
+    { role: 'assistant' as const, content: PASS2_PREFILL },
+  ];
 
   let pass2Text = '';
   try {
@@ -2748,6 +2752,13 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
       const raw = msg?.content as unknown;
       if (typeof raw === 'string') {
         pass2Text = raw;
+        // v10: si Anthropic via OR ya incluyó el prefill en la respuesta,
+        // lo dejamos como prefijo natural. Si NO (Anthropic native style)
+        // se devuelve solo la continuación → prepend el prefill para que
+        // el usuario vea la frase completa.
+        if (!pass2Text.startsWith(PASS2_PREFILL) && pass2Text.length > 0) {
+          pass2Text = `${PASS2_PREFILL} ${pass2Text}`;
+        }
       } else if (Array.isArray(raw)) {
         // Concatenar solo bloques type='text' — descartar 'thinking'/'reasoning'
         pass2Text = raw
