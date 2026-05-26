@@ -67,6 +67,14 @@ interface ClienteRow {
   archived: boolean;
   created_at: string;
   updated_at: string;
+  // 2026-05-26 Ronald F2 — campos de personalización del contexto.
+  // context_prompt: prosa rica (3-5 párrafos) inyectada al system de
+  //   Lexa/Atlas cuando el user asociado chatea.
+  // context_keywords: keywords explícitos para el matcher de Centinela.
+  // uploaded_docs: placeholder para Phase 2E (pipeline embed → chunks).
+  context_prompt: string | null;
+  context_keywords: string[] | null;
+  uploaded_docs: Array<Record<string, unknown>>;
 }
 
 // ─── Render para neurona ──────────────────────────────────────────────
@@ -188,11 +196,21 @@ clientesRouter.post('/', async (req, res) => {
   const body = (req.body ?? {}) as {
     label?: string; description?: string; sector?: string;
     contact_email?: string; contact_whatsapp?: string;
+    // F2 — context_prompt + keywords. Permitidos en create para que el
+    // admin pueda alimentar el contexto en un solo paso.
+    context_prompt?: string;
+    context_keywords?: string[] | string;
   };
   if (!body.label?.trim()) {
     res.status(400).json({ ok: false, error: 'label required' });
     return;
   }
+  // context_keywords puede llegar como array o como string CSV — normalizamos.
+  const keywords = Array.isArray(body.context_keywords)
+    ? body.context_keywords
+    : typeof body.context_keywords === 'string'
+      ? body.context_keywords.split(',').map((s) => s.trim()).filter(Boolean)
+      : null;
   try {
     const slug = await uniqueSlugForUser(user.id, body.label);
     const { data, error } = await supa()
@@ -205,6 +223,8 @@ clientesRouter.post('/', async (req, res) => {
         sector: body.sector?.trim() || null,
         contact_email: body.contact_email?.trim() || null,
         contact_whatsapp: body.contact_whatsapp?.trim() || null,
+        context_prompt: body.context_prompt?.trim() || null,
+        context_keywords: keywords,
       })
       .select('*')
       .single();
@@ -226,6 +246,9 @@ clientesRouter.patch('/:id', async (req, res) => {
     label?: string; description?: string; sector?: string | null;
     contact_email?: string | null; contact_whatsapp?: string | null;
     archived?: boolean;
+    // F2 — partial update de los campos de personalización.
+    context_prompt?: string | null;
+    context_keywords?: string[] | string | null;
   };
   const update: Record<string, unknown> = {};
   if (body.label !== undefined) update.label = body.label.trim();
@@ -234,6 +257,18 @@ clientesRouter.patch('/:id', async (req, res) => {
   if (body.contact_email !== undefined) update.contact_email = body.contact_email?.trim() || null;
   if (body.contact_whatsapp !== undefined) update.contact_whatsapp = body.contact_whatsapp?.trim() || null;
   if (body.archived !== undefined) update.archived = body.archived;
+  if (body.context_prompt !== undefined) {
+    update.context_prompt = body.context_prompt === null ? null : body.context_prompt.trim() || null;
+  }
+  if (body.context_keywords !== undefined) {
+    if (body.context_keywords === null) {
+      update.context_keywords = null;
+    } else if (Array.isArray(body.context_keywords)) {
+      update.context_keywords = body.context_keywords;
+    } else if (typeof body.context_keywords === 'string') {
+      update.context_keywords = body.context_keywords.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+  }
 
   if (Object.keys(update).length === 0) {
     res.status(400).json({ ok: false, error: 'no fields to update' });
@@ -289,4 +324,79 @@ clientesRouter.delete('/:id', async (req, res) => {
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
+});
+
+// ─── F2 — Asociar user (role='cliente') con cliente ──────────────────
+//
+// POST /api/clientes/:id/assign-user { user_email: string }
+//   Setea user_access.cliente_id = :id para el user identificado por email.
+//   Solo admins de CL2 (operador/admin) pueden hacer esto — el cliente final
+//   NO debe poder cambiar su propia asociación.
+//
+// Esto es lo que activa el chat injection (Phase 2C): cuando el user loguea,
+// chat.ts lee access.cliente_id, hace lookup en cl2_clients, y prepend
+// context_prompt al system de Lexa/Atlas.
+clientesRouter.post('/:id/assign-user', async (req, res) => {
+  const requester = await getUserFromRequest(req);
+  if (!requester) { res.status(401).json({ ok: false, error: 'auth_required' }); return; }
+
+  // Verificar que el requester es operador/admin (no cliente, no lector/editor).
+  const { data: requesterAccess } = await supa()
+    .from('user_access')
+    .select('role')
+    .eq('user_id', requester.id)
+    .maybeSingle();
+  const requesterRole = (requesterAccess as { role?: string } | null)?.role;
+  if (requesterRole !== 'admin' && requesterRole !== 'operador') {
+    res.status(403).json({ ok: false, error: 'forbidden', message: 'Solo admin/operador puede asociar usuarios a clientes.' });
+    return;
+  }
+
+  const body = (req.body ?? {}) as { user_email?: string };
+  if (!body.user_email?.trim()) {
+    res.status(400).json({ ok: false, error: 'user_email required' });
+    return;
+  }
+  const targetEmail = body.user_email.trim().toLowerCase();
+
+  // Verificar que el cliente existe y pertenece al requester (o es de un user del workspace CL2).
+  const { data: clienteRow, error: cliErr } = await supa()
+    .from('cl2_clients')
+    .select('id, user_id, label')
+    .eq('id', req.params.id)
+    .maybeSingle();
+  if (cliErr) { res.status(500).json({ ok: false, error: cliErr.message }); return; }
+  if (!clienteRow) { res.status(404).json({ ok: false, error: 'cliente_not_found' }); return; }
+
+  // Buscar al target user por email.
+  const { data: targetAccess, error: targetErr } = await supa()
+    .from('user_access')
+    .select('user_id, email, role, cliente_id')
+    .eq('email', targetEmail)
+    .maybeSingle();
+  if (targetErr) { res.status(500).json({ ok: false, error: targetErr.message }); return; }
+  if (!targetAccess) { res.status(404).json({ ok: false, error: 'user_not_found', message: `No existe un user_access con email "${targetEmail}". Pediles que se registren primero.` }); return; }
+
+  // Actualizar user_access.cliente_id.
+  const { error: updErr } = await supa()
+    .from('user_access')
+    .update({ cliente_id: req.params.id })
+    .eq('user_id', (targetAccess as { user_id: string }).user_id);
+  if (updErr) { res.status(500).json({ ok: false, error: updErr.message }); return; }
+
+  logger.info('cliente_user_assigned', {
+    cliente_id: req.params.id,
+    cliente_label: (clienteRow as { label: string }).label,
+    assigned_user_email: targetEmail,
+    assigned_by: requester.email,
+  });
+
+  res.json({
+    ok: true,
+    assignment: {
+      user_email: targetEmail,
+      cliente_id: req.params.id,
+      cliente_label: (clienteRow as { label: string }).label,
+    },
+  });
 });

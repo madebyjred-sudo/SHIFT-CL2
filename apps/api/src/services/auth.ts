@@ -58,6 +58,11 @@ export interface UserAccess {
   // (generate_presentation, generate_docx, generate_asset, edit_asset_slide)
   // ni acceder al panel /admin.
   role: UserRole | null;
+  // 2026-05-26 Ronald F2: FK opcional a cl2_clients. Cuando el user tiene
+  // este link, el chat inyecta cl2_clients[cliente_id].context_prompt
+  // como system prefix para que Lexa/Atlas entiendan las prioridades de
+  // esa institución.
+  cliente_id: string | null;
   approved_at: string | null;
 }
 
@@ -98,7 +103,7 @@ function service(): SupabaseClient {
 export async function loadUserAccess(userId: string): Promise<UserAccess | null> {
   const { data, error } = await service()
     .from('user_access')
-    .select('user_id, email, full_name, avatar_url, status, role, approved_at')
+    .select('user_id, email, full_name, avatar_url, status, role, cliente_id, approved_at')
     .eq('user_id', userId)
     .maybeSingle();
   if (error) {
@@ -155,6 +160,7 @@ export async function requireActiveUser(
       avatar_url: null,
       status: 'active',
       role: 'lector',
+      cliente_id: null,
       approved_at: null,
     };
   }
@@ -168,6 +174,7 @@ export async function requireActiveUser(
       avatar_url: null,
       status: 'pending',
       role: null,
+      cliente_id: null,
       approved_at: null,
     };
   }

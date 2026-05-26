@@ -94,9 +94,11 @@ chatRouter.post('/stream', async (req, res) => {
   // si falla la lectura, dejamos role=null (sin restricciones) en vez de
   // bloquear al user. role='cliente' es el único que filtra tools editoriales.
   let userRole: 'lector' | 'editor' | 'operador' | 'admin' | 'cliente' | null = null;
+  let userClienteId: string | null = null;
   try {
     const access = await loadUserAccess(userId);
     userRole = (access?.role as typeof userRole) ?? null;
+    userClienteId = access?.cliente_id ?? null;
   } catch {
     // Tabla no disponible / transient — degradar a sin role (acceso completo).
   }
@@ -208,6 +210,67 @@ chatRouter.post('/stream', async (req, res) => {
       req.log.error('scope_uuid_load_failed', {
         error: (err as Error).message,
         uuid: scopeSessionUuid,
+      });
+    }
+  }
+
+  // 2026-05-26 Ronald F2: si el user está asociado a un cliente
+  // (user_access.cliente_id), inyectar el context_prompt + keywords
+  // como prefijo del system. Esto le da a Lexa/Atlas el contexto
+  // institucional (prioridades de FEDEFARMA, ICT, etc.) sin que el
+  // user tenga que repetirlo cada turno.
+  //
+  // Mecanismo: ensamblamos un bloque CLIENTE_ASOCIADO que se concatena
+  // al scopeSystemPrompt (si lo hay) o se usa solo. Best-effort: si la
+  // lectura del cliente falla, el chat sigue corriendo sin contexto.
+  if (userClienteId) {
+    try {
+      const { createClient } = await import('@supabase/supabase-js');
+      const supa = createClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.SUPABASE_SERVICE_ROLE_KEY!,
+        { auth: { persistSession: false } },
+      );
+      const { data: cli } = await supa
+        .from('cl2_clients')
+        .select('label, sector, context_prompt, context_keywords')
+        .eq('id', userClienteId)
+        .maybeSingle();
+      if (cli) {
+        const c = cli as {
+          label: string;
+          sector: string | null;
+          context_prompt: string | null;
+          context_keywords: string[] | null;
+        };
+        const parts: string[] = [];
+        parts.push(`[CONTEXTO DEL CLIENTE ASOCIADO — usar para priorizar y enmarcar tus respuestas]`);
+        parts.push(`Cliente: ${c.label}${c.sector ? ` (${c.sector})` : ''}`);
+        if (c.context_prompt && c.context_prompt.trim().length > 0) {
+          parts.push('');
+          parts.push(c.context_prompt.trim());
+        }
+        if (c.context_keywords && c.context_keywords.length > 0) {
+          parts.push('');
+          parts.push(`Temas prioritarios (matcher de alertas): ${c.context_keywords.join(', ')}`);
+        }
+        parts.push('');
+        parts.push(`Cuando el usuario haga preguntas, evaluá implicaciones desde la óptica de ${c.label} cuando aplique. NO inventes posiciones que no estén en este bloque.`);
+        const clienteBlock = parts.join('\n');
+        scopeSystemPrompt = scopeSystemPrompt
+          ? `${clienteBlock}\n\n---\n\n${scopeSystemPrompt}`
+          : clienteBlock;
+        req.log.info('cliente_context_injected', {
+          cliente_id: userClienteId,
+          cliente_label: c.label,
+          has_prompt: !!c.context_prompt,
+          keywords_count: c.context_keywords?.length ?? 0,
+        });
+      }
+    } catch (err) {
+      req.log.warn('cliente_context_load_failed', {
+        cliente_id: userClienteId,
+        error: (err as Error).message,
       });
     }
   }
