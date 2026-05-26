@@ -898,3 +898,182 @@ export function renderRalComentadoForLlm(hits: RalComentadoHit[]): string {
     return `${header}\n${capLine}${textoLine}${interpsSection}${pdfRef}`;
   }).join('\n\n═══════════════════════════════════\n\n');
 }
+
+// ─── Constitución Política + LOAL ─────────────────────────────────────
+//
+// Wave 4 #2 (2026-05-26).
+// Lawyer audit reveló gaps: Lexa no podía responder sobre tratados
+// internacionales, elección magistrados Sala IV, plazo resello tras veto,
+// inmunidad parlamentaria, juramentación. Ese conocimiento NO vive ni en
+// el Reglamento Asamblea ni en el RAL Comentado — vive en la Constitución
+// y en la Ley Orgánica del Poder Legislativo (LOAL).
+//
+// El job `apps/api/src/jobs/ingestConstitucionLoal.ts` carga ambos cuerpos
+// en `legislative_chunks` con source_type='constitucion' o 'loal'.
+// Esta función es el read-path: query → embedding → match_chunks_hybrid
+// con filtro `source_type IN ('constitucion','loal')`.
+
+export interface ConstitucionLoalHit {
+  chunk_id: string;
+  source_type: 'constitucion' | 'loal';
+  /** Número del artículo. String para preservar "121 bis" si aparece. */
+  articulo_numero: string | null;
+  /** Variante entera del número (útil para ordenar). */
+  articulo_numero_int: number | null;
+  /** Título o capítulo más cercano (ej. "TÍTULO IV - DERECHOS Y GARANTÍAS"). */
+  titulo_seccion: string | null;
+  /** Nombre completo del cuerpo normativo. */
+  doc: string;
+  /** Texto completo del artículo (incluyendo header). */
+  content: string;
+  /** Score (rrf o dense similarity, según path). */
+  similarity: number;
+  /** URL oficial del PDF/HTML cuando está indexada. */
+  url: string | null;
+}
+
+/**
+ * Búsqueda híbrida sobre la Constitución Política CR (197 arts) y la
+ * Ley Orgánica del Poder Legislativo (~100 arts).
+ *
+ * Misma estrategia que `searchReglamento`:
+ *   - Path A (preferido): match_chunks_hybrid (migración 0009) con
+ *     filter_source_type=null + filtro post-hoc por source_type ∈
+ *     {constitucion, loal}.
+ *   - Path B (fallback): match_chunks_v2 dense-only cuando 0009 no está.
+ *
+ * El RPC no soporta `filter_source_type IN (...)` (solo single value)
+ * así que pedimos sin filtro y filtramos los hits en memoria. Es seguro
+ * porque overFetch = max(k*5, 15) y la fracción de chunks de estos
+ * cuerpos sobre los 825k totales es <0.04% — pero en el ranking semántico
+ * dominan cuando la query es procedural-constitucional.
+ *
+ * Reranking opcional vía cross-encoder (rerankItems). Si VOYAGE_API_KEY
+ * no está set, retorna identidad — mismo contrato que searchReglamento.
+ */
+export async function searchConstitucionLoal(args: {
+  query: string;
+  k?: number;
+}): Promise<ConstitucionLoalHit[]> {
+  const k = Math.min(Math.max(args.k ?? 8, 1), 15);
+  // Optional: 2026-05-26 — overfetch elevado a max(k*8, 24) porque la
+  // Constitución tiene artículos chiquitos (avg ~500 chars) y la búsqueda
+  // semántica empieza con 30-40 candidatos heterogéneos del corpus
+  // completo (transcripts, SIL, etc.) antes del filtro por source_type.
+  // FYI: si esto resulta caro en latencia, bajar a k*5 y registrar miss-rate.
+  const overFetch = Math.min(60, Math.max(k * 8, 24));
+  const queryEmbedding = await embedQuery(args.query);
+
+  const candidates = await withRetry(
+    () =>
+      withTimeout(
+        async (signal) => {
+          let raw: unknown[] | null = null;
+          let usedFallback = false;
+
+          // Path A: hybrid.
+          const hybrid = await supa()
+            .rpc('match_chunks_hybrid', {
+              query_embedding: queryEmbedding,
+              query_text: args.query,
+              match_count: overFetch,
+              filter_session_id: null,
+              filter_source_type: null,
+              filter_source_ref_prefix: null,
+              rrf_k: 60,
+            })
+            .abortSignal(signal);
+
+          if (hybrid.error) {
+            if (hybrid.error.code === '42883' || hybrid.error.message.includes('match_chunks_hybrid')) {
+              usedFallback = true;
+            } else {
+              throw new Error(`match_chunks_hybrid: ${hybrid.error.message}`);
+            }
+          } else {
+            raw = hybrid.data as unknown[];
+          }
+
+          // Path B: v2 dense fallback.
+          if (usedFallback) {
+            const v2 = await supa()
+              .rpc('match_chunks_v2', {
+                query_embedding: queryEmbedding,
+                match_count: overFetch,
+                filter_session_id: null,
+                filter_source_type: null,
+                filter_source_ref_prefix: null,
+              })
+              .abortSignal(signal);
+            if (v2.error) {
+              if (v2.error.code === '42883' || v2.error.message.includes('match_chunks_v2')) {
+                console.warn('[searchConstitucionLoal] hybrid + v2 missing — apply 0007/0009. Returning empty.');
+                return [] as ConstitucionLoalHit[];
+              }
+              throw new Error(`match_chunks_v2: ${v2.error.message}`);
+            }
+            raw = v2.data as unknown[];
+          }
+
+          type RawHit = {
+            chunk_id: string;
+            source_type?: string;
+            source_ref?: string;
+            content: string;
+            similarity?: number;
+            dense_similarity?: number;
+            rrf_score?: number;
+            metadata?: Record<string, unknown> | null;
+          };
+          const hits = (raw ?? []) as RawHit[];
+          const filtered = hits.filter(
+            (h) => h.source_type === 'constitucion' || h.source_type === 'loal',
+          );
+          return filtered.map<ConstitucionLoalHit>((h) => {
+            const md = (h.metadata ?? {}) as Record<string, unknown>;
+            return {
+              chunk_id: h.chunk_id,
+              source_type: h.source_type as 'constitucion' | 'loal',
+              articulo_numero:
+                typeof md.articulo_numero === 'string' ? md.articulo_numero : null,
+              articulo_numero_int:
+                typeof md.articulo_numero_int === 'number' ? md.articulo_numero_int : null,
+              titulo_seccion:
+                typeof md.titulo_seccion === 'string' ? md.titulo_seccion : null,
+              doc:
+                typeof md.doc === 'string'
+                  ? md.doc
+                  : h.source_ref ?? (h.source_type === 'constitucion' ? 'Constitución Política' : 'LOAL'),
+              content: h.content,
+              similarity: h.rrf_score ?? h.dense_similarity ?? h.similarity ?? 0,
+              url: typeof md.url === 'string' ? md.url : null,
+            };
+          });
+        },
+        { ms: 8_000, label: 'constitucion_loal:search' },
+      ),
+    { attempts: 2, baseDelayMs: 250, label: 'constitucion_loal:search' },
+  );
+
+  if (candidates.length <= 1) return candidates.slice(0, k);
+  // Rerank — same contract as searchReglamento (identity when no key).
+  // The rerankItems helper accepts any object with `content`; safe.
+  return rerankItems(args.query, candidates, k);
+}
+
+/**
+ * Render para el LLM. Lexa cita inline con "[Art. N (Const)]" o
+ * "[Art. N (LOAL)]" para que el lector distinga el cuerpo de origen.
+ */
+export function renderConstitucionLoalForLlm(hits: ConstitucionLoalHit[]): string {
+  if (hits.length === 0) return '(sin coincidencias en la Constitución ni en la LOAL)';
+  return hits
+    .map((h, i) => {
+      const tag = h.source_type === 'constitucion' ? 'Const' : 'LOAL';
+      const artRef = h.articulo_numero ? `Art. ${h.articulo_numero}` : 'Artículo';
+      const seccion = h.titulo_seccion ? ` · ${h.titulo_seccion}` : '';
+      const sim = (h.similarity * 100).toFixed(0);
+      return `[${i + 1}] ${artRef} (${tag})${seccion} — similaridad ${sim}%\n${h.content}`;
+    })
+    .join('\n\n---\n\n');
+}

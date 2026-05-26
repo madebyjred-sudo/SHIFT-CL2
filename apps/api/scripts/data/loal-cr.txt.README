@@ -1,0 +1,37 @@
+LOAL — Ley Orgánica del Poder Legislativo (Ley Orgánica de la Asamblea Legislativa)
+====================================================================================
+
+CONTENIDO REQUERIDO: el texto verbatim de la Ley Orgánica del Poder Legislativo de Costa
+Rica, en español, formato plano (.txt), con cada artículo iniciando en una línea con el
+patrón:
+
+    Artículo N.- <texto del artículo>
+
+Si los artículos del original usan "Artículo N°" en vez de "Artículo N.-", está bien — el
+parser `parseArticles()` tolera ambos formatos (regex: `Artículo\s+\d+\s*[.°-]`). Los
+títulos/capítulos que aparezcan entre artículos también se preservan en metadata.
+
+FUENTES POSIBLES (Juan tendrá que descargar manualmente — los servidores de la Asamblea y
+del SCIJ bloquean fetch automatizado):
+
+  1. SINALEVI (PGR): http://www.pgrweb.go.cr/scij/  → buscar "Ley Orgánica del Poder
+     Legislativo" → exportar versión completa vigente.
+  2. Sitio de la Asamblea Legislativa CR (área de Servicios Documentales).
+  3. CESDePU (web académica que tradicionalmente publica el texto).
+  4. Tribunal Supremo de Elecciones: https://www.tse.go.cr/ → sección Normativa.
+
+UNA VEZ DESCARGADO:
+
+  1. Si es PDF, convertilo a texto plano con:
+       pdftotext -layout <archivo>.pdf <archivo>.txt
+
+  2. Guardalo como /Users/juan/Downloads/shift-cl2/apps/api/scripts/data/loal-cr.txt
+
+  3. Verificá que `grep -c "^Artículo" loal-cr.txt` devuelve > 80 (LOAL tiene ~100 artículos).
+
+  4. Borrá este archivo README.
+
+NOTA TÉCNICA: el job `ingestConstitucionLoal.ts` lee `loal-cr.txt` y solo procesa LOAL si
+el archivo existe y tiene al menos un match de `Artículo N`. Si el archivo no existe, el
+job procesa solo la Constitución sin fallar — esto permite hacer ingest parcial mientras
+se consigue el texto de LOAL.

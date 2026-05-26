@@ -10,10 +10,12 @@ import {
   searchSilCorpus,
   searchReglamento,
   searchRalComentado,
+  searchConstitucionLoal,
   renderExpedientesForLlm,
   renderExpedienteFullForLlm,
   renderReglamentoForLlm,
   renderRalComentadoForLlm,
+  renderConstitucionLoalForLlm,
 } from './silClient.js';
 import {
   evaluateRalAplicacion,
@@ -252,6 +254,16 @@ function hasReglamentoTool(agentTools: Array<Record<string, unknown>>): boolean 
 // search_reglamento (o además de él, para backwards compat durante la transición).
 function hasRalComentadoTool(agentTools: Array<Record<string, unknown>>): boolean {
   return agentTools.some((t) => t.name === 'search_ral_comentado');
+}
+
+// search_constitucion_loal — Wave 4 #2 (2026-05-26). Constitución Política
+// (197 arts) + Ley Orgánica del Poder Legislativo (~100 arts). Cuerpos
+// normativos que el Reglamento NO contiene (tratados internacionales,
+// elección magistrados Sala IV, plazo de resello tras veto, inmunidad
+// parlamentaria, juramentación). Declarar en el YAML del agente que lo
+// quiera — Lexa primero, en demos posteriores podría agregarse Atlas.
+function hasConstitucionLoalTool(agentTools: Array<Record<string, unknown>>): boolean {
+  return agentTools.some((t) => t.name === 'search_constitucion_loal');
 }
 
 // evaluate_ral_aplicacion — Track Q, Sprint 3 (2026-05-16). Filtro activo
@@ -562,6 +574,48 @@ const SEARCH_RAL_COMENTADO_TOOL = {
         },
       },
       required: [],
+    },
+  },
+};
+
+// ─── search_constitucion_loal tool — Wave 4 #2 (2026-05-26) ──────────────────
+// Constitución Política CR (197 arts) + Ley Orgánica del Poder Legislativo
+// (~100 arts). Complementa search_reglamento + search_ral_comentado para
+// materias que el Reglamento NO regula:
+//   - Tratados internacionales (Art. 121 inciso 4 Constitución)
+//   - Elección/duración de magistrados Sala IV (Arts. 158-163 Constitución)
+//   - Resello tras veto presidencial (Art. 127 Constitución)
+//   - Inmunidad parlamentaria (Arts. 110-112 Constitución)
+//   - Juramentación de diputados (Const. + LOAL)
+//   - Atribuciones exclusivas de la Asamblea (Art. 121 Constitución)
+//
+// Si el modelo pregunta primero al Reglamento y no encuentra, debería caer
+// a este tool. Por eso el system prompt (lexa.yaml) lo lista al lado del
+// Reglamento, no como último recurso.
+const SEARCH_CONSTITUCION_LOAL_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'search_constitucion_loal',
+    description:
+      'Busca en la Constitución Política de Costa Rica (197 artículos vigentes) y en la Ley Orgánica del Poder Legislativo / LOAL (~100 artículos). ' +
+      'Úsalo cuando la pregunta toca materias que el Reglamento de la Asamblea NO regula: tratados internacionales, ratificación legislativa, elección de magistrados de la Sala IV / Corte Suprema, plazo de resello tras veto presidencial, inmunidad parlamentaria, juramentación, atribuciones de la Asamblea según la Constitución, organización interna del Poder Legislativo. ' +
+      'Devuelve artículos completos con su número y cuerpo de origen (Constitución o LOAL). Citá inline así: "[Art. 121 (Const)]" o "[Art. 11 (LOAL)]". ' +
+      'Cuándo NO usarlo: para procedimiento legislativo del día a día (plazos de dictamen, moción 137, dispensa de trámite) usá search_reglamento o search_ral_comentado — esos tienen el Reglamento + interpretaciones de la Presidencia. Este tool es para el MARCO CONSTITUCIONAL y la LEY MARCO del Poder Legislativo.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description:
+            'Pregunta o materia en español. Ej: "atribuciones de la Asamblea sobre tratados internacionales", "duración del cargo de magistrados de la Sala Constitucional", "plazo para resellar tras veto presidencial", "qué inmunidad tienen los diputados".',
+        },
+        k: {
+          type: 'integer',
+          description: 'Número de artículos a recuperar (default 8, max 15).',
+          default: 8,
+        },
+      },
+      required: ['query'],
     },
   },
 };
@@ -1046,6 +1100,14 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // Complementa search_reglamento + search_ral_comentado — no los reemplaza.
   if (hasEvaluateRalAplicacionTool(agent.tools)) {
     tools.push(EVALUATE_RAL_APLICACION_TOOL);
+  }
+  // search_constitucion_loal — Wave 4 #2 (2026-05-26).
+  // Constitución Política CR + LOAL. Cierra el gap del lawyer audit:
+  // tratados internacionales, elección Sala IV, resello, inmunidad,
+  // juramentación. Coexiste con search_reglamento + search_ral_comentado.
+  // Requiere migración 0050 aplicada + ingest job corrido al menos una vez.
+  if (hasConstitucionLoalTool(agent.tools)) {
+    tools.push(SEARCH_CONSTITUCION_LOAL_TOOL);
   }
   // Graph-augmented retrieval (LightRAG). DEEP-INSIGHT-GATED.
   // The graph traversal + Opus 4.7 synthesis is our "premium reasoning" tier
@@ -1870,6 +1932,73 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
         role: 'tool',
         tool_call_id: tc.id,
         content,
+      });
+      continue;
+    }
+
+    // ── search_constitucion_loal — Wave 4 #2 (2026-05-26) ────────────────────
+    // Constitución Política CR + LOAL. Mismo contrato que search_reglamento:
+    // emite `citation` events para el UI + agrega un `role:'tool'` message
+    // con el render. Si la tabla no tiene chunks (ingest job no corrido)
+    // searchConstitucionLoal devuelve [] y el modelo decide cómo responder
+    // — no necesita instrucción especial porque el render dice "(sin
+    // coincidencias…)".
+    if (tc.function.name === 'search_constitucion_loal') {
+      let parsedArgs: { query: string; k?: number };
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments);
+      } catch {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: 'invalid json' }) });
+        continue;
+      }
+
+      let clHits: Awaited<ReturnType<typeof searchConstitucionLoal>> = [];
+      try {
+        clHits = await searchConstitucionLoal(parsedArgs);
+      } catch (err) {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: (err as Error).message }) });
+        continue;
+      }
+
+      // Citation event — un card por artículo. tipo='constitucion' o 'loal'
+      // como label visible para el UI; source_type='metadata' por compat
+      // con el render genérico (al igual que search_reglamento). FYI:
+      // cuando el UI tenga card propio para estos cuerpos podemos cambiar
+      // source_type para distinguir.
+      args.onChunk({
+        type: 'citation',
+        payload: clHits.map((h, i) => ({
+          id: h.chunk_id,
+          session_id: '',
+          source_ref:
+            h.articulo_numero != null
+              ? `${h.doc} · Art. ${h.articulo_numero}`
+              : h.doc,
+          content: h.content.slice(0, 400),
+          similarity: h.similarity,
+          fecha: null,
+          comision: null,
+          tipo: h.source_type, // 'constitucion' | 'loal'
+          source_type: 'metadata',
+          expediente_numero: h.articulo_numero != null ? `Art. ${h.articulo_numero}` : null,
+          url_detalle: h.url,
+          video_url: null,
+          transcript_url: null,
+          rank: i + 1,
+        })),
+      });
+
+      messages.push({
+        role: 'tool',
+        tool_call_id: tc.id,
+        content:
+          `Constitución + LOAL — ${clHits.length} artículo(s):\n\n` +
+          renderConstitucionLoalForLlm(clHits) +
+          `\n\n---\n` +
+          `INSTRUCCIONES DE CITACIÓN:\n` +
+          `1. Citá inline con el tag del cuerpo: "[Art. 121 (Const)]" para Constitución, "[Art. 11 (LOAL)]" para LOAL. NO mezcles cuerpos en una sola cita.\n` +
+          `2. Si la respuesta cruza Constitución + Reglamento (típico en preguntas procedurales), citá los dos con sus tags: "Las dos terceras partes [Art. 121 inc. 4 (Const)] se votan en sesión plenaria con quórum del Art. 33 [Art. 33 (Reglamento)]."\n` +
+          `3. NUNCA inventes números de artículo. Si la búsqueda devolvió 0 resultados, decí explícitamente "la Constitución y la LOAL no aportan un artículo aplicable a esta pregunta — buscá en el Reglamento o el RAL".`,
       });
       continue;
     }

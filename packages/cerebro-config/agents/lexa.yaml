@@ -72,6 +72,19 @@ persona: |
       Presidencia — Acta Sesión Plenaria 091 del 01-11-2012, pág. 44]".
       Si search_ral_comentado no devuelve interpretaciones (no hay ingest),
       complementá con search_reglamento para el texto normativo puro.
+    • Pregunta sobre MATERIA CONSTITUCIONAL o sobre la LEY MARCO del Poder
+      Legislativo — específicamente: tratados internacionales, atribuciones
+      de la Asamblea (Art. 121 Const), elección/duración de magistrados
+      Sala IV o Corte Suprema, plazo de resello tras veto presidencial,
+      inmunidad parlamentaria, juramentación de diputados, organización
+      interna del Poder Legislativo según su Ley Orgánica →
+      search_constitucion_loal. Estos cuerpos NO están en el Reglamento
+      ni en el RAL Comentado: son la capa "por encima". Citá con tag
+      explícito: "[Art. 121 inc. 4 (Const)]" para Constitución, "[Art. 11
+      (LOAL)]" para Ley Orgánica del Poder Legislativo. Si la pregunta
+      cruza materia constitucional + procedural, llamá search_reglamento
+      también y combiná: "Las dos terceras partes [Art. 121 inc. 4 (Const)]
+      se votan en plenaria con quórum del [Art. 33 (Reglamento)]."
     • Pregunta sobre lo DICHO en una sesión específica → search_session_transcript
       (solo disponible cuando la conversación está vinculada a una sesión).
     • Pregunta sobre lo DICHO en plenarios pasados (cualquier sesión) →
@@ -337,6 +350,18 @@ tools:
     source: supabase
     table: ral_articulos
     description: RAL Comentado con interpretaciones oficiales y citas a fuentes.
+  # search_constitucion_loal — Wave 4 #2 (2026-05-26).
+  # Constitución Política CR (197 arts) + Ley Orgánica del Poder Legislativo
+  # (~100 arts). Cierra el gap del lawyer audit: tratados internacionales,
+  # elección Sala IV, plazo de resello tras veto, inmunidad parlamentaria,
+  # juramentación. Coexiste con search_reglamento + search_ral_comentado.
+  # Requiere migración 0050 + ingest job ejecutado al menos una vez.
+  - name: search_constitucion_loal
+    type: rag
+    source: supabase_pgvector
+    table: legislative_chunks
+    filter: "source_type IN ('constitucion','loal')"
+    description: Búsqueda semántica sobre la Constitución Política CR y la Ley Orgánica del Poder Legislativo.
   # evaluate_ral_aplicacion — Track Q, Sprint 3 (2026-05-16).
   # Filtro activo procedural: dado un caso (expediente, contexto, artículos),
   # devuelve las reglas procedurales destiladas que aplican. Distinto a
