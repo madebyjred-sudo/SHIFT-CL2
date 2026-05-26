@@ -326,6 +326,50 @@ clientesRouter.delete('/:id', async (req, res) => {
   }
 });
 
+// ─── F3 — WhatsApp alerts: list por cliente ────────────────────────
+//
+// GET /api/clientes/:id/whatsapp-alerts?status=pending|sent|...
+//   Lista alertas asociadas a un cliente. Cualquier user puede ver las
+//   suyas (RLS lo controla); admin/operador ve las de todos.
+clientesRouter.get('/:id/whatsapp-alerts', async (req, res) => {
+  const user = await getUserFromRequest(req);
+  if (!user) { res.status(401).json({ ok: false, error: 'auth_required' }); return; }
+  try {
+    const { listAlerts } = await import('../services/whatsappAlerts.js');
+    const status = (req.query.status as string | undefined) as 'pending' | 'sent' | 'failed' | 'skipped' | undefined;
+    const alerts = await listAlerts({
+      cliente_id: req.params.id,
+      status,
+      limit: 50,
+    });
+    res.json({ ok: true, items: alerts });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// POST /api/clientes/:id/whatsapp-alerts/process
+//   Trigger manual del worker. Solo admin/operador.
+clientesRouter.post('/:id/whatsapp-alerts/process', async (req, res) => {
+  const user = await getUserFromRequest(req);
+  if (!user) { res.status(401).json({ ok: false, error: 'auth_required' }); return; }
+  // Check role.
+  const { data: ua } = await supa()
+    .from('user_access').select('role').eq('user_id', user.id).maybeSingle();
+  const role = (ua as { role?: string } | null)?.role;
+  if (role !== 'admin' && role !== 'operador') {
+    res.status(403).json({ ok: false, error: 'forbidden' });
+    return;
+  }
+  try {
+    const { processPendingAlerts } = await import('../services/whatsappAlerts.js');
+    const result = await processPendingAlerts(50);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
 // ─── F2 — Asociar user (role='cliente') con cliente ──────────────────
 //
 // POST /api/clientes/:id/assign-user { user_email: string }
