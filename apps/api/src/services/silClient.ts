@@ -229,11 +229,50 @@ export async function searchExpedientes(args: {
           if (effectiveFechaTo) q = q.lte('fecha_presentacion', effectiveFechaTo);
           const { data, error } = await q;
           if (error) {
-            // textSearch on a non-tsvector column will fail. Fall back to ilike on titulo.
+            // 2026-05-26 audit asesor: el textSearch falla siempre porque
+            // la columna `titulo_proponente_tsv` no existe (existe el GIN
+            // index sobre la expresión `to_tsvector(spanish, titulo || ' '
+            // || proponente)` pero Supabase JS no puede usarlo via
+            // textSearch). Caemos al fallback. El fallback PREVIO hacía
+            // ilike por la frase completa — "Polo Turístico Golfo de
+            // Papagayo" no matcheaba "PROYECTO TURÍSTICO DE PAPAGAYO"
+            // (substring mismatch). Fix: split en tokens significativos
+            // (≥4 chars sin acentos, sin stopwords) y OR por cada uno.
+            // Trade-off: más ruido para queries cortas, pero asegura recall.
+            // Deuda Sprint 5: crear columna generated o RPC custom para
+            // usar el GIN index existente.
+            const STOPWORDS = new Set([
+              'sobre', 'para', 'desde', 'hasta', 'entre', 'esta', 'este',
+              'estos', 'estas', 'cual', 'cuales', 'donde', 'cuando',
+              'expediente', 'proyecto', 'iniciativa', 'algun', 'alguna',
+              'algunos', 'algunas',
+            ]);
+            const stripAccents = (s: string) =>
+              s.normalize('NFD').replace(/[̀-ͯ]/g, '');
+            const tokens = stripAccents(args.query.toLowerCase())
+              .split(/[^a-z0-9]+/)
+              .filter((t) => t.length >= 4 && !STOPWORDS.has(t));
+            if (tokens.length === 0) {
+              // Sin tokens útiles → ilike por la query cruda como último resort.
+              const fb = await supa()
+                .from('sil_expedientes')
+                .select('id, numero, titulo, proponente, comision, fecha_presentacion, estado, tipo, legislatura, url_detalle, extras')
+                .ilike('titulo', `%${args.query}%`)
+                .limit(k);
+              if (fb.error) throw new Error(fb.error.message);
+              return (fb.data ?? []) as SilExpedienteRow[];
+            }
+            // OR por todos los tokens. Supabase .or() acepta CSV de filtros.
+            // Buscamos en titulo Y en proponente para cubrir queries por
+            // diputado también.
+            const orFilters = tokens.flatMap((t) => [
+              `titulo.ilike.%${t}%`,
+              `proponente.ilike.%${t}%`,
+            ]).join(',');
             const fb = await supa()
               .from('sil_expedientes')
               .select('id, numero, titulo, proponente, comision, fecha_presentacion, estado, tipo, legislatura, url_detalle, extras')
-              .ilike('titulo', `%${args.query}%`)
+              .or(orFilters)
               .limit(k);
             if (fb.error) throw new Error(fb.error.message);
             return (fb.data ?? []) as SilExpedienteRow[];
