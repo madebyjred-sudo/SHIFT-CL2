@@ -193,13 +193,46 @@ export const REGLAMENTO_SHORTCUTS: Shortcut[] = [
 ];
 
 /**
+ * Patrones que indican que la query NO es sobre el artículo del
+ * Reglamento sino sobre EXPEDIENTES/iniciativas relacionados con
+ * ese tema. En ese caso no inyectamos hint del artículo.
+ *
+ * Ejemplo: "buscame iniciativas sobre dispensa de trámite" → user
+ * quiere expedientes que reformen el procedimiento, NO el Art 177.
+ *
+ * 2026-05-26 Wave 2.2: agregado tras observar regresión en L12 con
+ * Wave 2.1 (mi shortcut fire para "dispensa" + "iniciativas" → Lexa
+ * buscó Art 177 en vez de expedientes).
+ */
+const EXPEDIENTE_QUERY_PATTERNS = [
+  /\biniciativas?\b/i,
+  /\bexpedientes?\b/i,
+  /\bproyectos? de ley\b/i,
+  /\bbuscame\b/i,
+  /\bbusc[áa]\b/i,
+  /\bquerés? que.*busque\b/i,
+  /\bqu[ée] hay sobre\b/i,
+  /\bhay alguna iniciativa\b/i,
+  /\bencontr[áa].*expedientes?\b/i,
+];
+
+function looksLikeExpedienteQuery(query: string): boolean {
+  return EXPEDIENTE_QUERY_PATTERNS.some((p) => p.test(query));
+}
+
+/**
  * Evaluá la query del usuario contra los shortcuts. Retorna el primer
  * match o null. Si retorna match, podemos inyectar el hint como system
  * message para guiar a Lexa hacia el artículo correcto.
+ *
+ * Skip si la query parece pedir EXPEDIENTES sobre un tema procedimental
+ * (e.g. "iniciativas sobre dispensa de trámite") — en ese caso el user
+ * NO quiere el artículo del Reglamento.
  */
 export function matchReglamentoShortcut(query: string): Shortcut | null {
   const cleaned = query.trim();
   if (cleaned.length === 0) return null;
+  if (looksLikeExpedienteQuery(cleaned)) return null;
   for (const s of REGLAMENTO_SHORTCUTS) {
     if (s.pattern.test(cleaned)) return s;
   }
