@@ -1177,6 +1177,20 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
         )
         .join(','),
     });
+    // DIAG: when empty content + no tools, dump full message to understand
+    // what upstream actually returned. Helps catch null content, reasoning,
+    // refusal, or malformed shapes from any provider (Anthropic/Gemini/OAI).
+    if ((choice?.message?.content ?? '').length === 0 && toolCalls.length === 0) {
+      console.log(`[chat] agentic_round_${round} EMPTY — dump:`, {
+        message: JSON.stringify(choice?.message).slice(0, 800),
+        finish_reason: choice?.finish_reason,
+        upstream_model: roundResponse.model,
+        round_index: round,
+        messages_length: messages.length,
+        last_message_role: messages[messages.length - 1]?.role,
+        last_message_keys: Object.keys(messages[messages.length - 1] ?? {}).join(','),
+      });
+    }
 
     if (toolCalls.length === 0) {
       // Final response — emitir tokens y terminar. Anthropic via OpenRouter
