@@ -2711,11 +2711,18 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     { role: 'assistant' as const, content: PASS2_PREFILL },
   ];
 
+  // v12 (2026-05-26): Pass 2 con Haiku 4.6 (Opción C del padre Cerebro).
+  // Sonnet 4.5/4.6 ignora tool_choice='none' y devuelve finish_reason='tool_calls'
+  // con content vacío, incluso con assistant prefill. Haiku tiene menos
+  // reasoning interno → más obediente, ~3× más barato, más rápido. Pass 1
+  // sigue con Sonnet (selección de tool), Pass 2 con Haiku (prosa).
+  const PASS2_MODEL = 'anthropic/claude-haiku-4.6';
+
   let pass2Text = '';
   try {
     const pass2Res = await orFetch(
       {
-        model,
+        model: PASS2_MODEL,
         messages: messagesForPass2,
         // v11 (2026-05-26): prefill + tool_choice='none' (combinación final).
         // v9 sin tool_choice (67% success) — pero v10 con prefill solo
