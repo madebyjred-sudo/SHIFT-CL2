@@ -2774,20 +2774,19 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
           pass2Text = rawObj.text;
         }
       }
-      // Diagnóstico: dumpeamos shape REAL del raw cuando es objeto/array,
-      // para entender qué patrón emite Anthropic via OR en producción.
-      const rawDebug =
-        raw && typeof raw === 'object' && !Array.isArray(raw)
-          ? JSON.stringify(raw).slice(0, 400)
-          : undefined;
+      // Diagnóstico v7: dump COMPLETO de message cuando content_length=0
+      // para revelar si hay tool_calls embedded, reasoning, etc.
+      const msgDump = pass2Text.length === 0
+        ? JSON.stringify(msg).slice(0, 800)
+        : undefined;
       console.log('[chat] pass2 result:', {
         finish_reason: pass2Body.choices?.[0]?.finish_reason,
         content_length: pass2Text.length,
         content_preview: pass2Text.slice(0, 200),
-        raw_content_type: Array.isArray(raw) ? `array[${raw.length}]` : typeof raw,
+        raw_content_type: Array.isArray(raw) ? `array[${raw.length}]` : (raw === null ? 'null' : typeof raw),
         raw_array_types: Array.isArray(raw) ? raw.map((b: unknown) => (b as { type?: string })?.type ?? '?').join(',') : undefined,
-        raw_object_keys: rawDebug ? Object.keys(raw as Record<string, unknown>).join(',') : undefined,
-        raw_object_dump: rawDebug,
+        msg_keys: msg ? Object.keys(msg).join(',') : undefined,
+        msg_dump_when_empty: msgDump,
         has_reasoning: !!msg?.reasoning,
       });
       if (pass2Body.usage) {
