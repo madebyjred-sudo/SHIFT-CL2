@@ -2753,25 +2753,41 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
         usage?: StreamUsage;
       };
       const msg = pass2Body.choices?.[0]?.message;
-      const raw = msg?.content;
+      const raw = msg?.content as unknown;
       if (typeof raw === 'string') {
         pass2Text = raw;
       } else if (Array.isArray(raw)) {
         // Concatenar solo bloques type='text' — descartar 'thinking'/'reasoning'
         pass2Text = raw
-          .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
-          .map((b) => b.text as string)
+          .filter((b: unknown) => {
+            const bb = b as { type?: string; text?: unknown };
+            return bb && bb.type === 'text' && typeof bb.text === 'string';
+          })
+          .map((b: unknown) => (b as { text: string }).text)
           .join('');
+      } else if (raw && typeof raw === 'object') {
+        // OpenRouter a veces devuelve un single block como objeto sin wrap en array:
+        //   { type: 'text', text: '...' } ó { text: '...' }
+        // Intentamos extraer .text directamente.
+        const rawObj = raw as Record<string, unknown>;
+        if (typeof rawObj.text === 'string') {
+          pass2Text = rawObj.text;
+        }
       }
-      // Fallback final: algunos providers usan message.reasoning para chain-of-thought
-      // pero el texto real va en otro campo. Si todavía está vacío y hay reasoning,
-      // al menos logueamos para diagnóstico.
+      // Diagnóstico: dumpeamos shape REAL del raw cuando es objeto/array,
+      // para entender qué patrón emite Anthropic via OR en producción.
+      const rawDebug =
+        raw && typeof raw === 'object' && !Array.isArray(raw)
+          ? JSON.stringify(raw).slice(0, 400)
+          : undefined;
       console.log('[chat] pass2 result:', {
         finish_reason: pass2Body.choices?.[0]?.finish_reason,
         content_length: pass2Text.length,
         content_preview: pass2Text.slice(0, 200),
         raw_content_type: Array.isArray(raw) ? `array[${raw.length}]` : typeof raw,
-        raw_array_types: Array.isArray(raw) ? raw.map((b) => b?.type ?? '?').join(',') : undefined,
+        raw_array_types: Array.isArray(raw) ? raw.map((b: unknown) => (b as { type?: string })?.type ?? '?').join(',') : undefined,
+        raw_object_keys: rawDebug ? Object.keys(raw as Record<string, unknown>).join(',') : undefined,
+        raw_object_dump: rawDebug,
         has_reasoning: !!msg?.reasoning,
       });
       if (pass2Body.usage) {
