@@ -1302,13 +1302,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
               .join('\n\n---\n\n');
 
       const toolPayload =
-        `Extractos recuperados (${hits.length}):\n\n${renderedChunks}\n\n---\n` +
-        `INSTRUCCIONES:\n` +
-        `1. Citá [N] inline después de cada afirmación. CUANDO EL EXTRACTO TIENE TIMECODE (HH:MM:SS o M:SS al lado del número de sesión en el encabezado), agregalo entre paréntesis después de [N]. Ejemplo: "El diputado pidió posponer la votación [2] (Sesión 84 · 1:23:45)." Esto le permite al usuario hacer click y saltar al momento exacto del video — el timecode NO es decorativo, es la cita.\n` +
-        `2. Si un extracto no contiene literalmente lo que el usuario pide, decí "no encontré X en las transcripciones que tengo". NO inferas desde otra sesión, NO sintetices agendas/firmas/votaciones que no estén explícitas.\n` +
-        `3. Si combinás info de varios extractos, usá [N][M] con sus timecodes respectivos.\n` +
-        `4. Si un extracto NO trae timecode (chunk antiguo sin metadata), citá solo "(Sesión N, fecha)" — nunca inventes el timecode.\n` +
-        `5. NUNCA uses la palabra "chunk" o "chunks" al hablarle al usuario — usá "transcripciones", "fuentes", "registros", "lo documentado" o "el momento en el que…".`;
+        `Extractos recuperados (${hits.length}):\n\n${renderedChunks}`;
 
       messages.push({
         role: 'tool',
@@ -1423,13 +1417,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
         messages.push({
           role: 'tool',
           tool_call_id: tc.id,
-          content:
-            `Sesión(es) encontrada(s) (${data.length}):\n\n${rendered}\n\n---\n` +
-            `INSTRUCCIONES:\n` +
-            `1. Respondé al usuario citando los puntos clave y acuerdos del resumen. Usá [N] inline después de cada afirmación.\n` +
-            `2. Si el resumen tiene acuerdos formales, mencionalos primero — son lo más concreto.\n` +
-            `3. Si el video está disponible, ofrecé el link al final.\n` +
-            `4. NO uses la palabra "metadata" ni "resumen ejecutivo del LLM" — hablale al usuario de "lo registrado en el acta" o "lo discutido".`,
+          content: `Sesión(es) encontrada(s) (${data.length}):\n\n${rendered}`,
         });
       } catch (err) {
         messages.push({
@@ -1533,12 +1521,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
       const toolPayload =
         `Sesión #${result.session_id} — ${result.titulo}\n` +
         `Extractos de la transcripción (${result.hits.length} de ${result.total_segments} segmentos totales):\n\n` +
-        `${renderedHits}\n\n---\n` +
-        `INSTRUCCIONES:\n` +
-        `1. Citá [N] inline después de cada afirmación, e incluí el timecode entre paréntesis. Ejemplo: "El diputado pidió posponer la votación [2] (0:48:12)."\n` +
-        `2. Si la transcripción no contiene literalmente lo que el usuario pidió, decí "no encontré X en esta sesión".\n` +
-        `3. NO inventes lo que se dijo en otros minutos que no aparecen acá.\n` +
-        `4. Hablale al usuario de "la transcripción", "la sesión", "el video" — nunca "segmento", "chunk", "embedding".`;
+        `${renderedHits}`;
 
       messages.push({
         role: 'tool',
@@ -1615,14 +1598,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
       messages.push({
         role: 'tool',
         tool_call_id: tc.id,
-        content:
-          `Resultados SIL (${rows.length}):\n\n${renderedExpedientes}\n\n---\n` +
-          `INSTRUCCIONES:\n` +
-          `1. Citá [N] inline después de cada afirmación que se base en un expediente.\n` +
-          `2. Mencioná el número de expediente con formato "Exp. 22.293" (con punto, no coma).\n` +
-          `3. Si la lista está vacía, decí "no encontré expedientes en el SIL sobre X" — no inventes.\n` +
-          `4. Si necesitás detalle de un expediente específico para profundizar, llamá a get_sil_expediente con su número.\n` +
-          `5. Hablale al usuario de "expediente", "proyecto de ley", "iniciativa" — nunca "row" ni "registro".`,
+        content: `Resultados SIL (${rows.length}):\n\n${renderedExpedientes}`,
       });
       continue;
     }
@@ -1786,13 +1762,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
       messages.push({
         role: 'tool',
         tool_call_id: tc.id,
-        content:
-          `Artículos del Reglamento (${hits.length}):\n\n${renderReglamentoForLlm(hits)}\n\n---\n` +
-          `INSTRUCCIONES:\n` +
-          `1. Citá [Art. N] inline después de cada afirmación procedimental. Ejemplo: "El plazo es de 8 días hábiles [Art. 113]."\n` +
-          `2. Si la pregunta no se responde literalmente con los artículos devueltos, decí "el Reglamento no regula explícitamente esto" y NO inventes la respuesta.\n` +
-          `3. Cuando combinés varios artículos, citá [Art. N][Art. M].\n` +
-          `4. Hablale al usuario de "el Reglamento", "el artículo", "la norma" — nunca de "chunk".`,
+        content: `Artículos del Reglamento (${hits.length}):\n\n${renderReglamentoForLlm(hits)}`,
       });
       continue;
     }
@@ -2019,14 +1989,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
       messages.push({
         role: 'tool',
         tool_call_id: tc.id,
-        content:
-          `Extractos del corpus SIL (${hits.length}):\n\n${renderedHits}\n\n---\n` +
-          `INSTRUCCIONES:\n` +
-          `1. Citá [N] inline después de cada afirmación, e INCLUÍ entre paréntesis el expediente + tipo de documento + fecha. Ejemplo: "El proponente argumenta riesgo sistémico [2] (Exp. 24.429 · Dictamen mayoría · 14-mar-2026)." NO basta con "[2]" suelto — el usuario está en CL2 para poder volver a la fuente exacta.\n` +
-          `2. Si combinás varios extractos para argumentar, citá [N][M] con sus identificadores respectivos.\n` +
-          `3. Hablale al usuario de "el dictamen", "el proyecto", "la moción", "el expediente" — nunca "el chunk", "el chunk del corpus", "el embedding".\n` +
-          `4. Si un argumento depende de un dato que no aparece literalmente en los extractos, decí "no aparece explícito en los documentos que tengo". NO rellenes con conocimiento general sobre derecho costarricense.\n` +
-          `5. Si el usuario te pidió el ESTATUS FORMAL de un expediente (¿es ley?, ¿está archivado?, ¿vencido?), ESTA tool no responde eso — tenés que llamar get_sil_expediente con el número y leer la sección "ESTATUS FORMAL" que devuelve. Los extractos de corpus traen contenido sustantivo, no metadatos de status.`,
+        content: `Extractos del corpus SIL (${hits.length}):\n\n${renderedHits}`,
       });
       continue;
     }
@@ -2075,13 +2038,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
         messages.push({
           role: 'tool',
           tool_call_id: tc.id,
-          content:
-            `Resultado del grafo (${result.mode}):\n\n${result.answer}\n\n---\n` +
-            `INSTRUCCIONES:\n` +
-            `1. El texto anterior es la síntesis del grafo. Refrasealá con tu voz, no la copies textual.\n` +
-            `2. Cuando uses datos del grafo, citá [Grafo].\n` +
-            `3. Si el usuario pide detalle de un expediente o artículo específico mencionado por el grafo, llamá a search_sil_expedientes / get_sil_expediente / search_reglamento para confirmar — el grafo puede tener errores de extracción.\n` +
-            `4. Hablale al usuario de "el corpus", "los registros", "lo documentado" — nunca "el grafo" ni "LightRAG" ni "los embeddings".`,
+          content: `Resultado del grafo (${result.mode}):\n\n${result.answer}`,
         });
       } else if (!result.installed) {
         messages.push({
@@ -2160,11 +2117,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
           content:
             `Workspace creado: "${title}".\n` +
             `URL: /hojas/${result.workspace_id}\n` +
-            `Sources importados: ${result.seeds_imported}/${result.seeds_imported + result.seeds_failed}\n\n` +
-            `INSTRUCCIONES:\n` +
-            `1. Confirmale al usuario que ya está creado (1-2 frases).\n` +
-            `2. NO pegues la URL en tu respuesta — el frontend muestra un botón.\n` +
-            `3. Sugerí 1-2 cosas que puede hacer en el workspace (analizar, agregar más fuentes, exportar a Word).`,
+            `Sources importados: ${result.seeds_imported}/${result.seeds_imported + result.seeds_failed}`,
         });
       } catch (err) {
         const message = (err as Error).message ?? 'unknown';
@@ -2250,11 +2203,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
             `Presentación generada con Gamma (${result.cached ? 'cache' : 'fresca'}).\n` +
             `Editable: ${result.gammaUrl}\n` +
             `Descarga: ${result.exportUrl}\n` +
-            `Filename: ${result.filename}\n\n` +
-            `INSTRUCCIONES:\n` +
-            `1. Confirmale al usuario que está lista (1-2 frases).\n` +
-            `2. NO pegues las URLs en tu respuesta — el frontend ya las muestra como botones.\n` +
-            `3. Sugerí qué podría editar en Gamma si querés (cover, orden de cards, etc.).`,
+            `Filename: ${result.filename}`,
         });
       } catch (err) {
         const message = (err as Error).message ?? 'unknown';
@@ -2425,11 +2374,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
             `Documento Word generado.\n` +
             `Filename: ${result.filename}\n` +
             `Descarga: ${result.export_url}\n` +
-            `Tamaño: ${Math.round(result.size_bytes / 1024)} KB\n\n` +
-            `INSTRUCCIONES:\n` +
-            `1. Confirmale al usuario que el documento está listo (1-2 frases).\n` +
-            `2. NO pegues la URL en tu respuesta — el frontend ya muestra el botón de descarga.\n` +
-            `3. Mencioná que es editable en Word y está en A4 para impresión.`,
+            `Tamaño: ${Math.round(result.size_bytes / 1024)} KB`,
         });
       } catch (err) {
         const message = (err as Error).message ?? 'unknown';
@@ -2606,11 +2551,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
           content:
             `Asset generado (kind=${kind}, slides=${render.slidesCount}).\n` +
             `Node id: ${nodeId}\n` +
-            `Descarga: ${render.exportUrl}\n\n` +
-            `INSTRUCCIONES:\n` +
-            `1. Confirmá al usuario que el ${kind} está listo (1-2 frases).\n` +
-            `2. NO pegues la URL — el frontend ya la muestra como botón.\n` +
-            `3. Si querés, sugerí un slide específico para ajustar (por kind/idx).`,
+            `Descarga: ${render.exportUrl}`,
         });
       } catch (err) {
         const message = (err as Error).message ?? 'unknown';
@@ -2730,9 +2671,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
         messages.push({
           role: 'tool',
           tool_call_id: tc.id,
-          content:
-            `Slide ${slide_index} editado y PDF re-renderizado.\n` +
-            `INSTRUCCIONES: confirmale al usuario el cambio en 1 frase. NO pegues URL.`,
+          content: `Slide ${slide_index} editado y PDF re-renderizado.`,
         });
       } catch (err) {
         const message = (err as Error).message ?? 'unknown';
