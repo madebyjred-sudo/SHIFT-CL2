@@ -101,7 +101,11 @@ function supa(): SupabaseClient {
  * prod migration drift without breaking the demo flow.
  */
 export async function searchTranscripts(args: SearchArgs): Promise<ChunkHit[]> {
-  const topK = args.top_k ?? 5;
+  // 2026-05-26: subido de 5→12. Lawyer test L9 ("qué votación en plenaria
+  // 21 may") demostró que con k=5 los chunks con "56 votos a favor" se
+  // pierden en queries genéricas. Plenarias tienen ~1000 chunks; k=12
+  // da mejor cobertura sin saturar el context.
+  const topK = args.top_k ?? 12;
 
   const queryEmbedding = await embedQuery(args.query);
 

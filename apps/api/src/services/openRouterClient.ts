@@ -1099,7 +1099,10 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // MAX_ROUNDS=5 — la mayoría de consultas reales necesitan 1–3 rondas; 5 da
   // margen de seguridad sin abrir la puerta a loops infinitos (cada ronda
   // cuesta ~300-2000 tokens de prompt + completion).
-  const MAX_ROUNDS = 5;
+  // 2026-05-26: subido 5→8. Lawyer test L12 demostró que queries
+  // multi-step (buscar + detallar) a veces necesitan 3-4 rounds.
+  // 8 es safety margin razonable contra loops infinitos.
+  const MAX_ROUNDS = 8;
   // Conservamos la variable `assistantText` para que el guardrail final pueda
   // distinguir "el modelo emitió algo" vs "salimos del loop sin contenido".
   let assistantText = '';

@@ -368,8 +368,12 @@ export async function searchReglamento(args: {
   query: string;
   k?: number;
 }): Promise<ReglamentoHit[]> {
-  const k = Math.min(Math.max(args.k ?? 5, 1), 15);
-  const overFetch = Math.min(20, Math.max(k * 4, 10));
+  // 2026-05-26: subido de 5→12 para mejor recall en queries procedurales.
+  // Lawyer tests L1/L4/L5 demostraron que k=5 traía 5 artículos con
+  // keyword overlap pero ninguno relevante. Con k=12 el LLM tiene más
+  // candidatos para filtrar en el Pass.
+  const k = Math.min(Math.max(args.k ?? 12, 1), 20);
+  const overFetch = Math.min(30, Math.max(k * 4, 15));
   const queryEmbedding = await embedQuery(args.query);
 
   const candidates = await withRetry(
@@ -644,12 +648,20 @@ export function renderExpedienteFullForLlm(exp: SilExpedienteFull): string {
 
     for (let i = 0; i < sorted.length; i++) {
       const d = sorted[i];
+      // 2026-05-26: render explícito para que Lexa surface dictámenes
+      // correctamente. L7 (24.018) demostró que con "dictamen_mayoria"
+      // crudo, Lexa dijo "no encontré dictamen final" porque no asoció
+      // los términos. Usamos etiquetas descriptivas + equivalencias.
       const prefix = d.tipo === 'texto_sustitutivo'
-        ? '★ VIGENTE'
+        ? '★ TEXTO VIGENTE (sustitutivo, este es el articulado actual)'
         : d.tipo === 'dictamen_mayoria'
-        ? '◆ DICTAMEN'
+        ? '◆ DICTAMEN FINAL (de mayoría, este es el dictamen que llegó a votación)'
+        : d.tipo === 'dictamen_minoria'
+        ? '◇ DICTAMEN MINORÍA'
+        : d.tipo === 'redaccion_final'
+        ? '✎ REDACCIÓN FINAL'
         : '  ';
-      lines.push(`  ${prefix} [${i + 1}] ${d.tipo}: ${d.titulo ?? '(s/título)'} ${d.fecha ?? ''} — ${d.source_url}`);
+      lines.push(`  ${prefix}\n     [${i + 1}] ${d.titulo ?? '(s/título)'} ${d.fecha ?? ''} — ${d.source_url}`);
     }
 
     docsSection = '\n' + lines.join('\n');
