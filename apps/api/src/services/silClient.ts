@@ -17,6 +17,7 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { withRetry, withTimeout } from './resilience.js';
 import { embedQuery } from './embeddings.js';
 import { rerankItems } from './rerankClient.js';
+import { extractDateRangeFromQuery } from './yearExtractor.js';
 
 let _supa: SupabaseClient | null = null;
 function supa(): SupabaseClient {
@@ -124,6 +125,19 @@ export async function searchExpedientes(args: {
 }): Promise<SilExpedienteRow[]> {
   const k = Math.min(Math.max(args.k ?? 10, 1), 50);
 
+  // 2026-05-26 Wave 4 #1: year hard-filter.
+  // Si el caller (Lexa) no pasó fecha_from/to explícitos, intentamos
+  // extraer el año mencionado en la query y aplicarlo como hard-filter.
+  // Esto cierra el gap audit-D4: "iniciativas de 2018 sobre seguridad"
+  // antes devolvía expedientes de cualquier año ranqueados; ahora
+  // limita el WHERE a expedientes con fecha_presentacion en 2018.
+  // Los filtros explícitos del caller siempre ganan sobre la extracción.
+  const yearRange = (!args.fecha_from && !args.fecha_to)
+    ? extractDateRangeFromQuery(args.query)
+    : {};
+  const effectiveFechaFrom = args.fecha_from ?? yearRange.fecha_from;
+  const effectiveFechaTo = args.fecha_to ?? yearRange.fecha_to;
+
   // Detección de "número de expediente". Lexa suele pasar el query con
   // el número crudo ("23.511", "24.018", "Exp. 25.262"). El full-text
   // en español stemming NO matchea esos tokens — los devuelve 0 hits y
@@ -189,8 +203,8 @@ export async function searchExpedientes(args: {
             .limit(k)
             .abortSignal(signal);
           if (args.comision) q = q.eq('comision', args.comision);
-          if (args.fecha_from) q = q.gte('fecha_presentacion', args.fecha_from);
-          if (args.fecha_to) q = q.lte('fecha_presentacion', args.fecha_to);
+          if (effectiveFechaFrom) q = q.gte('fecha_presentacion', effectiveFechaFrom);
+          if (effectiveFechaTo) q = q.lte('fecha_presentacion', effectiveFechaTo);
           const { data, error } = await q;
           if (error) {
             // textSearch on a non-tsvector column will fail. Fall back to ilike on titulo.
