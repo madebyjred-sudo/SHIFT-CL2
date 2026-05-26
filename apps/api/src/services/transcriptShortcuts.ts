@@ -61,7 +61,9 @@ export const TRANSCRIPT_SHORTCUTS: TranscriptShortcut[] = [
 
   // ─── Aprobaciones en debate ──────────────────────────────────────
   {
-    pattern: /aprobad[oa].*(primer|segundo).*debate|debate.*aprobad/i,
+    // 2026-05-26: ampliado para capturar verbos conjugados ("se aprobó",
+    // "aprobaron", "aprobamos"), revelado por test.
+    pattern: /aprob[a-z]*.*(primer|segundo).*debate|debate.*aprob/i,
     hint:
       'BÚSQUEDA DE APROBACIÓN EN DEBATE: combinar 2 sources — (a) get_session_by_date(fecha) trae el resumen ejecutivo con aprobaciones; (b) search_transcripts con query "aprobado segundo debate" + fecha_from/to. Lexa debe usar AMBAS para respuesta completa.',
   },
