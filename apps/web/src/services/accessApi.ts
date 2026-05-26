@@ -9,7 +9,10 @@
 import { supabase } from '@/lib/supabase';
 
 export type AccessStatus = 'pending' | 'active' | 'rejected' | 'suspended';
-export type AccessRole = 'lector' | 'editor' | 'operador' | 'admin' | null;
+// 2026-05-26 Ronald F1: agregado 'cliente'. Usuarios finales de las
+// instituciones que CL2 asesora (FEDEFARMA, ICT). Acceso operativo
+// (chat, browse, alertas) sin tools editoriales con marca CL2 ni admin.
+export type AccessRole = 'lector' | 'editor' | 'operador' | 'admin' | 'cliente' | null;
 
 export interface MeResponse {
   ok: true;

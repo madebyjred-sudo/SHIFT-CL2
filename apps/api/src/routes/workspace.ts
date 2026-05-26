@@ -365,6 +365,26 @@ workspaceRouter.post('/:id/export', async (req, res) => {
     return;
   }
 
+  // 2026-05-26 Ronald F1: role 'cliente' NO puede exportar a formatos
+  // editoriales con marca CL2 (docx con identidad visual, pptx via Gamma).
+  // Markdown (md) sí está permitido porque es texto plano sin branding.
+  if (format === 'docx' || format === 'pptx') {
+    try {
+      const { loadUserAccess } = await import('../services/auth.js');
+      const access = await loadUserAccess(userId);
+      if (access?.role === 'cliente') {
+        res.status(403).json({
+          ok: false,
+          error: 'editorial_tools_restricted',
+          message: 'La exportación a Word/PowerPoint con identidad CL2 está reservada al equipo CL2 Consultoría. Puede exportar a Markdown sin restricción.',
+        });
+        return;
+      }
+    } catch {
+      // Best-effort. Si loadUserAccess falla, no bloqueamos.
+    }
+  }
+
   try {
     // Fetch workspace metadata + all nodes in one round-trip.
     const [{ data: ws, error: wsErr }, { data: nodes, error: nErr }] = await Promise.all([
