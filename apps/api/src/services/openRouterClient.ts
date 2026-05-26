@@ -2713,19 +2713,13 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
       {
         model,
         messages: messagesForPass2,
-        // tools=<originales> + tool_choice='none' — fix 2026-05-25 v4.
-        // v3 (tools=[]) hacía que Anthropic devolviera finish_reason='stop'
-        // con content_length=0 en el 53% de los casos (medido via suite
-        // lexa-tools-30: 16/30 prompts caían a guardrail sintetizando
-        // desde citations en vez de prosa Pass 2 real). Hipótesis: Anthropic
-        // interpreta el array vacío de tools como "el assistant no tiene
-        // contexto para responder" y aborta.
-        // v4: pasamos el array ORIGINAL de tools (mismo que Pass 1) + 'none'.
-        // Eso le dice al modelo "conocés estas tools pero NO las llames en
-        // este turno, respondé con texto basado en los tool_results que ya
-        // recibiste". Es el patrón canónico de tool use de Anthropic.
+        // v9 (2026-05-26): SIN tool_choice — el modelo decide. Con tools
+        // disponibles + conversación que ya tiene tool_result, el patrón
+        // canónico Anthropic es generar texto (no más tool_use) porque
+        // la información necesaria ya está en context. tool_choice:'none'
+        // causaba {content:null} en Anthropic via OR — confirmado por
+        // diag v7 (msg_dump_when_empty mostró exactamente eso).
         tools,
-        tool_choice: 'none',
         max_tokens: 2048,
         temperature: 0.2,
         ...cerebroExtras,
