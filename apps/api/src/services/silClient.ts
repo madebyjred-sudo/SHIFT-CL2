@@ -15,6 +15,28 @@
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { withRetry, withTimeout } from './resilience.js';
+import { normalizeSilEstado } from './silEstadoNormalizer.js';
+
+/**
+ * Convierte `sil_expedientes.estado` (string crudo del SIL) a texto coherente
+ * para el LLM. El SIL guarda ahí la "ubicación física actual" que puede ser:
+ *   - "ARCHIVO" / "PLENARIO" → estados canonical
+ *   - Nombre de comisión "JUVENTUD (ÁREA II)" → ubicación física, NO estado
+ *
+ * Para el LLM mostramos:
+ *   - "plenario" / "archivo" → texto explícito
+ *   - "en_comision" → omitir (la sección "Comisión física actual" ya lo dice)
+ *   - null → "sin estado registrado"
+ *
+ * Wave 4 Tier 2 C audit (2026-05-26).
+ */
+function renderEstadoForLlm(raw: string | null | undefined): string | null {
+  const canonical = normalizeSilEstado(raw);
+  if (canonical === 'plenario') return '🏛️ En debate plenario';
+  if (canonical === 'archivo') return '📦 Archivado';
+  if (canonical === 'en_comision') return null; // El campo "Comisión" lo cubre.
+  return null;
+}
 import { embedQuery } from './embeddings.js';
 import { rerankItems } from './rerankClient.js';
 import { extractDateRangeFromQuery } from './yearExtractor.js';
@@ -524,7 +546,12 @@ export function renderExpedientesForLlm(rows: SilExpedienteRow[]): string {
         estatusFormal = `\n    🟡 EN TRÁMITE`;
       }
       const alcance = e.numero_alcance ? `\n    🔁 Tiene Alcance N° ${e.numero_alcance}` : '';
-      return `[${i + 1}] Exp. ${r.numero} (${fecha}) — ${titulo}${estatusFormal}${alcance}\n    Proponente: ${proponente} · Comisión: ${r.comision ?? '—'} · Estado interno: ${r.estado ?? '—'}\n    ${r.url_detalle}`;
+      // Wave 4 Tier 2 C: omitir el campo "estado" cuando es nombre de comisión
+      // — la sección "Comisión" ya lo muestra. Solo mostrar cuando es canonical
+      // (plenario / archivo).
+      const estadoRender = renderEstadoForLlm(r.estado);
+      const estadoStr = estadoRender ? ` · ${estadoRender}` : '';
+      return `[${i + 1}] Exp. ${r.numero} (${fecha}) — ${titulo}${estatusFormal}${alcance}\n    Proponente: ${proponente} · Comisión: ${r.comision ?? '—'}${estadoStr}\n    ${r.url_detalle}`;
     })
     .join('\n\n');
 }
@@ -576,8 +603,16 @@ export function renderExpedienteFullForLlm(exp: SilExpedienteFull): string {
 
   // Si NADA de lo anterior aplica, declaramos el estatus en negativo
   // para que el LLM no asuma "es ley" por defecto.
+  // Wave 4 Tier 2 C: si `exp.estado` es nombre de comisión, NO lo repetimos
+  // acá (la sección "Comisión física actual" ya lo dice). Solo mostramos
+  // valores canonical (plenario/archivo) o el literal si es algo distinto.
   if (status.length === 0) {
-    status.push(`🟡 EN TRÁMITE · todavía NO es ley ni fue archivado. Estado físico actual: ${exp.estado ?? 'sin estado'}.`);
+    const estadoRender = renderEstadoForLlm(exp.estado);
+    if (estadoRender) {
+      status.push(`🟡 EN TRÁMITE · todavía NO es ley ni fue archivado. ${estadoRender}.`);
+    } else {
+      status.push(`🟡 EN TRÁMITE · todavía NO es ley ni fue archivado (en comisión técnica — ver abajo).`);
+    }
   }
 
   // ── Sección 2: identificación ───────────────────────────────────────
