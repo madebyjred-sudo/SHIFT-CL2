@@ -23,6 +23,12 @@ export interface ChunkMetadata {
   end?: number;
   word_count?: number;
   title?: string;
+  // transcript — Wave 4 #4 (2026-05-26): expediente que se estaba debatiendo
+  // en el momento de la votación, asignado heurísticamente vía voteExtractor.
+  // null/undefined si el chunk no es de votación o no había expediente
+  // mencionado en chunks previos. Permite que Lexa cite "votación del expediente
+  // X (sesión Y · HH:MM)" aún cuando el N° no aparezca literal en el chunk.
+  votando_expediente?: string;
   // sil_*
   sil_doc_id?: string;
   sil_doc_tipo?: string;

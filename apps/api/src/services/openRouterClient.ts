@@ -1401,7 +1401,15 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
                       ? ` · ${fmtTimecode(startS)}–${fmtTimecode(endS)}`
                       : ` · ${fmtTimecode(startS)}`
                     : '';
-                return `[${i + 1}] (${h.comision}, ${h.fecha ?? 'fecha desconocida'}, sesión ${h.source_ref}${tcRange})\n${h.content}`;
+                // Wave 4 #4: si este chunk es vote (anuncio de votos a favor /
+                // se aprueba / etc.), inyectamos el expediente al que pertenecía
+                // ese voto — extraído heurísticamente del chunk previo. Sin esto
+                // Lexa pierde el linkage porque el N° de expediente y el resultado
+                // de la votación caen en chunks distintos por longitud (3000 chars).
+                const ventExp = typeof h.metadata?.votando_expediente === 'string'
+                  ? ` · votando expediente N° ${h.metadata.votando_expediente}`
+                  : '';
+                return `[${i + 1}] (${h.comision}, ${h.fecha ?? 'fecha desconocida'}, sesión ${h.source_ref}${tcRange}${ventExp})\n${h.content}`;
               })
               .join('\n\n---\n\n');
 
