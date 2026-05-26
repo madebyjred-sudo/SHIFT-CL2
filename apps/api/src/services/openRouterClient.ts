@@ -829,9 +829,15 @@ async function streamCompletion(
  *     Lexa "recuerda" sin que CL2 toque UI ni dispatcher de memoria.
  *   - cierre del bypass arquitectural (Cerebro vuelve a ser gateway real)
  *
- * Si agent declara tools, runs 2-pass loop:
- *   Pass 1 (non-stream): model decide tool_calls (mis tools)
- *   Pass 2 (stream): final answer con tool results
+ * Si agent declara tools, runs un agentic loop (hasta MAX_ROUNDS iteraciones):
+ *   - cada ronda llama al modelo non-streaming con tools + tool_choice='auto'
+ *   - si el modelo devuelve content sin tool_calls → emitimos el texto y
+ *     terminamos
+ *   - si devuelve tool_calls → dispatcha cada tool, agrega `role:'tool'`
+ *     messages, y vuelve a llamar al modelo en la próxima iteración
+ *   - el loop cierra el bug `content:null + finish_reason='tool_calls'` que
+ *     Anthropic Sonnet 4.x y Gemini 3.x exponen cuando piden más rondas de
+ *     tools (refactor 2026-05-25, reemplaza el viejo esquema Pass 1 / Pass 2).
  * Sin tools: 1-pass stream directo.
  */
 export async function openRouterStream(args: StreamArgs): Promise<void> {
@@ -1074,81 +1080,151 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     return;
   }
 
-  // Pass 1: ask model with tools, non-streaming so we can detect tool_calls cleanly.
-  // Retried on transient failures — pass1 is idempotent (no SSE bytes flushed yet).
-  const pass1 = await withRetry(
-    async () => {
-      const res = await orFetch(
-        {
-          model,
-          messages,
-          tools,
-          tool_choice: 'auto',
-          max_tokens: 2048,
-          ...cerebroExtras,
-        },
-        orKey,
-        { timeoutMs: OR_PASS1_TIMEOUT_MS, label: 'openrouter pass1' },
-      );
-      if (!res.ok) {
-        const text = await res.text();
-        // 4xx (except 429) won't change on retry — fail fast.
-        if (res.status >= 400 && res.status < 500 && res.status !== 429) {
-          throw new ResilienceError(`openrouter pass1 ${res.status}: ${text}`, 'aborted');
+  // ── Agentic loop (refactor 2026-05-25) ────────────────────────────────────
+  // Reemplaza el viejo Pass 1 / Pass 2 fijo por un bucle de hasta MAX_ROUNDS
+  // turnos contra el modelo. Cada iteración:
+  //   1) Llama al LLM (non-streaming JSON) con `tools` + `tool_choice: 'auto'`.
+  //   2) Si NO hay tool_calls → emite el `content` como token y termina.
+  //   3) Si hay tool_calls → empuja el mensaje assistant + dispatcha cada tool
+  //      (mismo switch que antes), agrega los `role:'tool'` messages, y
+  //      vuelve a llamar al LLM en la próxima iteración.
+  //
+  // El bug que cerró este refactor: Anthropic Sonnet 4.x y Gemini 3.x devuelven
+  // `content:null + finish_reason='tool_calls'` cuando quieren MÁS rondas de
+  // tools. El esquema viejo de 2 pasos cortaba en la 2da llamada y emitía
+  // vacío → "content_length=0" intermitente desde 2026-05-12. Ahora el modelo
+  // puede hacer search → get_detalle → search_corpus → respuesta sin perder
+  // continuidad.
+  //
+  // MAX_ROUNDS=5 — la mayoría de consultas reales necesitan 1–3 rondas; 5 da
+  // margen de seguridad sin abrir la puerta a loops infinitos (cada ronda
+  // cuesta ~300-2000 tokens de prompt + completion).
+  const MAX_ROUNDS = 5;
+  // Conservamos la variable `assistantText` para que el guardrail final pueda
+  // distinguir "el modelo emitió algo" vs "salimos del loop sin contenido".
+  let assistantText = '';
+  // Capturamos el último response del LLM (puede ser útil para tracing en el
+  // guardrail). Tipado igual que el viejo `pass1`.
+  let lastRoundResponse: OACompletionResponse | null = null;
+
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    // Cada ronda es idempotente (no flushea SSE de texto todavía) → safe to retry.
+    const roundResponse = await withRetry(
+      async () => {
+        const res = await orFetch(
+          {
+            model,
+            messages,
+            tools,
+            tool_choice: 'auto',
+            max_tokens: 2048,
+            ...cerebroExtras,
+          },
+          orKey,
+          { timeoutMs: OR_PASS1_TIMEOUT_MS, label: `openrouter agentic_round_${round}` },
+        );
+        if (!res.ok) {
+          const text = await res.text();
+          // 4xx (except 429) won't change on retry — fail fast.
+          if (res.status >= 400 && res.status < 500 && res.status !== 429) {
+            throw new ResilienceError(
+              `openrouter agentic_round_${round} ${res.status}: ${text}`,
+              'aborted',
+            );
+          }
+          throw new Error(`openrouter agentic_round_${round} ${res.status}: ${text}`);
         }
-        throw new Error(`openrouter pass1 ${res.status}: ${text}`);
-      }
-      return (await res.json()) as OACompletionResponse;
-    },
-    {
-      attempts: OR_PASS1_RETRY_ATTEMPTS,
-      baseDelayMs: OR_PASS1_RETRY_BASE_MS,
-      label: 'openrouter pass1',
-    },
-  );
-  // Log usage de pass1 (con tools). Pass1 ya consumió tokens aún si el
-  // modelo decidió no llamar tools — tracking de costo requiere atribuir
-  // esto al user. logChatStreamUsage es fail-open.
-  if (pass1.usage) {
-    void logChatStreamUsage({
-      args,
-      model: pass1.model ?? model,
-      usage: pass1.usage,
-      latencyMs: 0,
-      pass: 'pass1',
+        return (await res.json()) as OACompletionResponse;
+      },
+      {
+        attempts: OR_PASS1_RETRY_ATTEMPTS,
+        baseDelayMs: OR_PASS1_RETRY_BASE_MS,
+        label: `openrouter agentic_round_${round}`,
+      },
+    );
+    lastRoundResponse = roundResponse;
+
+    // Log usage por ronda — cada turno consume tokens aún si el modelo no
+    // emite contenido. Si no rastreamos por-ronda perdemos la atribución de
+    // costo en queries que escalan a 4-5 rondas (deep_research, expedientes
+    // complejos con varios cross-references).
+    if (roundResponse.usage) {
+      void logChatStreamUsage({
+        args,
+        model: roundResponse.model ?? model,
+        usage: roundResponse.usage,
+        latencyMs: 0,
+        pass: `agentic_round_${round}`,
+      });
+    }
+
+    const choice = roundResponse.choices?.[0];
+    const toolCalls = choice?.message?.tool_calls ?? [];
+
+    // DEBUG: traza por ronda. Útil para distinguir "el modelo decidió no
+    // llamar tools nunca" (round 0 termina) vs "necesitó 3 rondas" (cost).
+    console.log(`[chat] agentic_round_${round} result:`, {
+      model,
+      finish_reason: choice?.finish_reason,
+      tool_calls_count: toolCalls.length,
+      tool_names: toolCalls.map((t) => t.function?.name).join(','),
+      content_length: (choice?.message?.content ?? '').length,
+      content_preview: (choice?.message?.content ?? '').slice(0, 200),
+      tools_registered: tools
+        .map(
+          (t: Record<string, unknown>) =>
+            (t.function as { name?: string } | undefined)?.name ?? 'unknown',
+        )
+        .join(','),
     });
-  }
 
-  const choice = pass1.choices?.[0];
-  const toolCalls = choice?.message?.tool_calls ?? [];
+    if (toolCalls.length === 0) {
+      // Final response — emitir tokens y terminar. Anthropic via OpenRouter
+      // puede devolver content como string (formato OpenAI clásico) O como
+      // array de bloques {type:'text',text:'...'} + {type:'thinking',...}
+      // (formato Anthropic nativo). Cubrimos ambos para no romper si el
+      // provider cambia el shape.
+      const raw = choice?.message?.content as unknown;
+      let text = '';
+      if (typeof raw === 'string') {
+        text = raw;
+      } else if (Array.isArray(raw)) {
+        text = raw
+          .filter((b: unknown) => {
+            const bb = b as { type?: string; text?: unknown };
+            return bb && bb.type === 'text' && typeof bb.text === 'string';
+          })
+          .map((b: unknown) => (b as { text: string }).text)
+          .join('');
+      } else if (raw && typeof raw === 'object') {
+        const rawObj = raw as Record<string, unknown>;
+        if (typeof rawObj.text === 'string') {
+          text = rawObj.text;
+        }
+      }
+      assistantText = text;
+      if (text.length > 0) {
+        args.onChunk({ type: 'token', payload: text });
+        return;
+      }
+      // No content + no tool_calls = empty completion. Salimos del loop y
+      // dejamos que el guardrail final decida (citation-based response o
+      // fallback genérico).
+      console.warn(`[chat] agentic_round_${round} empty completion (no content + no tool_calls)`);
+      break;
+    }
 
-  // DEBUG: traza del pass1 — quitar tras diagnosticar el flow UUID.
-  console.log('[chat] pass1 result:', {
-    model,
-    finish_reason: choice?.finish_reason,
-    tool_calls_count: toolCalls.length,
-    tool_names: toolCalls.map((t) => t.function?.name).join(','),
-    content_length: (choice?.message?.content ?? '').length,
-    content_preview: (choice?.message?.content ?? '').slice(0, 200),
-    tools_registered: tools.map((t: Record<string, unknown>) => (t.function as { name?: string } | undefined)?.name ?? 'unknown').join(','),
-  });
+    // Hay tool_calls → append assistant message + dispatch each tool.
+    // El push del mensaje assistant ES CRÍTICO antes de los tool messages
+    // porque el contract OpenAI/Anthropic exige `assistant{tool_calls}` →
+    // `tool{tool_call_id}` en secuencia.
+    messages.push({
+      role: 'assistant',
+      content: choice?.message?.content ?? null,
+      tool_calls: toolCalls,
+    });
 
-  if (toolCalls.length === 0) {
-    // No tool call — stream the assistant's direct response token-by-token.
-    // We already have it as full text; emit as single token chunk.
-    const text = choice?.message?.content ?? '';
-    if (text) args.onChunk({ type: 'token', payload: text });
-    return;
-  }
-
-  // Execute each tool call (only search_transcripts supported for now).
-  messages.push({
-    role: 'assistant',
-    content: choice?.message?.content ?? null,
-    tool_calls: toolCalls,
-  });
-
-  for (const tc of toolCalls) {
+    for (const tc of toolCalls) {
     if (tc.function.name === 'search_transcripts') {
       let parsedArgs: { query: string; top_k?: number; comision?: string; fecha_from?: string; fecha_to?: string };
       try {
@@ -2675,139 +2751,30 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     });
   }
 
-  // Pass 2 (REFACTORIZADO 2026-05-12): non-streaming + tool_choice='none' +
-  // fallback determinístico desde tool results.
-  //
-  // Historia del bug:
-  //   v1: pass2 streaming default 'auto' → modelo a veces emitía tool_calls
-  //       que streamCompletion ignoraba → assistantText vacío → fallback.
-  //   v2: pass2 streaming + tool_choice='none' → mejoró pero todavía falla
-  //       intermitente. Sospecha: streaming SSE de Cerebro no emite tokens
-  //       cuando el modelo "piensa" en hacer otra tool antes de decidir
-  //       responder. Las sesiones con resumen ejecutivo (pass1 → content
-  //       directo, sin tool) funcionaban; las sin resumen (pass1 → tool →
-  //       pass2) fallaban.
-  //   v3 (actual): pass2 NON-STREAMING. Capturamos message.content COMPLETO
-  //       igual que en pass1, lo emitimos como UN solo token chunk. No
-  //       depende del SSE de Cerebro que parece tener issue con
-  //       tool_choice='none'. Si el content sigue vacío, último recurso:
-  //       sintetizar respuesta determinística desde los tool results que
-  //       ya capturamos en `messages`.
-  // Pass2 messages: REFACTOR Phase 1 (2026-05-26 madrugada).
-  // Switched provider to Gemini 3.5 Flash (lexa.yaml default_model). El
-  // bug content:null era específico de Anthropic Sonnet 4.x. Gemini tiene
-  // tool use limpio sin ese patrón.
-  // v9 baseline: messages tal cual, tools originales, NO tool_choice.
-  // Modelo viene de agent.default_model (ahora gemini-3.5-flash).
-  const messagesForPass2 = [...messages];
-
-  let pass2Text = '';
-  try {
-    const pass2Res = await orFetch(
-      {
-        model,
-        messages: messagesForPass2,
-        tools,
-        max_tokens: 2048,
-        temperature: 0.2,
-        ...cerebroExtras,
-      },
-      orKey,
-      { timeoutMs: OR_PASS1_TIMEOUT_MS, label: 'openrouter pass2' },
-    );
-    if (pass2Res.ok) {
-      // Anthropic via OpenRouter puede devolver content como string (formato
-      // OpenAI clásico) O como array de bloques {type:'text',text:'...'} +
-      // {type:'thinking',thinking:'...'} (formato Anthropic nativo). El parser
-      // anterior solo manejaba string y devolvía '' cuando era array — lo que
-      // explicaba el 53% de Pass 2 con content_length=0.
-      const pass2Body = (await pass2Res.json()) as {
-        model?: string;
-        choices?: Array<{
-          message?: {
-            content?: string | Array<{ type: string; text?: string; thinking?: string }>;
-            reasoning?: string;
-          };
-          finish_reason?: string;
-        }>;
-        usage?: StreamUsage;
-      };
-      const msg = pass2Body.choices?.[0]?.message;
-      const raw = msg?.content as unknown;
-      if (typeof raw === 'string') {
-        pass2Text = raw;
-      } else if (Array.isArray(raw)) {
-        // Concatenar solo bloques type='text' — descartar 'thinking'/'reasoning'
-        pass2Text = raw
-          .filter((b: unknown) => {
-            const bb = b as { type?: string; text?: unknown };
-            return bb && bb.type === 'text' && typeof bb.text === 'string';
-          })
-          .map((b: unknown) => (b as { text: string }).text)
-          .join('');
-      } else if (raw && typeof raw === 'object') {
-        // OpenRouter a veces devuelve un single block como objeto sin wrap en array:
-        //   { type: 'text', text: '...' } ó { text: '...' }
-        // Intentamos extraer .text directamente.
-        const rawObj = raw as Record<string, unknown>;
-        if (typeof rawObj.text === 'string') {
-          pass2Text = rawObj.text;
-        }
-      }
-      // Diagnóstico v7: dump COMPLETO de message cuando content_length=0
-      // para revelar si hay tool_calls embedded, reasoning, etc.
-      const msgDump = pass2Text.length === 0
-        ? JSON.stringify(msg).slice(0, 800)
-        : undefined;
-      console.log('[chat] pass2 result:', {
-        finish_reason: pass2Body.choices?.[0]?.finish_reason,
-        content_length: pass2Text.length,
-        content_preview: pass2Text.slice(0, 200),
-        raw_content_type: Array.isArray(raw) ? `array[${raw.length}]` : (raw === null ? 'null' : typeof raw),
-        raw_array_types: Array.isArray(raw) ? raw.map((b: unknown) => (b as { type?: string })?.type ?? '?').join(',') : undefined,
-        msg_keys: msg ? Object.keys(msg).join(',') : undefined,
-        msg_dump_when_empty: msgDump,
-        has_reasoning: !!msg?.reasoning,
-      });
-      if (pass2Body.usage) {
-        void logChatStreamUsage({
-          args,
-          model: pass2Body.model ?? model,
-          usage: pass2Body.usage,
-          latencyMs: 0,
-          pass: 'pass2',
-        });
-      }
-    } else {
-      const errBody = await pass2Res.text();
-      console.warn('[chat] pass2 non-ok:', pass2Res.status, errBody.slice(0, 300));
-    }
-  } catch (err) {
-    console.warn('[chat] pass2 threw:', (err as Error).message);
+    // Fin del dispatch de esta ronda. El outer `for (round...)` continúa y
+    // vuelve a llamar al LLM con los `role:'tool'` messages recién pusheados.
   }
 
-  if (pass2Text.length > 0) {
-    args.onChunk({ type: 'token', payload: pass2Text });
-    return;
-  }
-
-  // Fallback determinístico DESACTIVADO 2026-05-25.
-  // Antes este código tomaba el tool result raw, le quitaba el preámbulo
-  // "INSTRUCCIONES" y lo emitía como respuesta. El resultado era texto del
-  // tipo "Encontré los siguientes extractos relevantes en la transcripción
-  // de esta sesión: Resultados SIL (1): [1] Exp. 23.511 — LEY MARCO..."
-  // que es el contenido CRUDO del dispatcher, no una respuesta sintetizada.
-  // Confundía al usuario porque parecía respuesta del agente cuando en
-  // realidad era plumbing interno leaking.
+  // ── Guardrail: salimos del loop sin emitir contenido ─────────────────────
+  // Pre-refactor (Pass 1 / Pass 2 esquema) este bloque estaba después del
+  // Pass 2 vacío. Ahora cubre dos casos:
+  //   (A) MAX_ROUNDS agotados sin que el modelo decidiera responder.
+  //   (B) Ronda final emitió content vacío + no tool_calls (break del loop).
   //
-  // Pass 2 emitió content vacío. Hay dos sub-casos:
-  //   (A) hubo tool messages (search_transcripts/search_sil_expedientes
+  // En ambos casos diferenciamos:
+  //   (1) hubo tool messages (search_transcripts/search_sil_expedientes
   //       se ejecutó) — el chat.ts guardrail va a mostrar las citations
   //       cuando las haya, pero si las tools devolvieron 0 hits NO hay
   //       citations. Emitimos un mensaje natural acá para que el usuario
   //       no vea el fallback genérico tonto.
-  //   (B) no hubo tools — el modelo no quiso/no pudo llamar nada. Dejamos
+  //   (2) no hubo tools — el modelo no quiso/no pudo llamar nada. Dejamos
   //       vacío y chat.ts emite el genérico ("reformulá con detalles").
+  //
+  // `assistantText` queda vacío en ambos casos — el `return` con onChunk
+  // en el loop ya habría cortado la ejecución si hubo contenido real.
+  void assistantText; // referenciado para clarity; el guardrail decide igual.
+  void lastRoundResponse; // disponible para tracing si lo necesitamos a futuro.
+
   const toolMessages = messages.filter((m) => (m as { role?: string }).role === 'tool');
   const hasToolMessages = toolMessages.length > 0;
 
@@ -2829,23 +2796,24 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
           'Probá reformularla con más detalle — por ejemplo, un número de expediente (ej. 23.511), una fecha exacta (DD/MM/AAAA), ' +
           'el nombre de un proyecto de ley o de una comisión.',
       });
-      console.warn('[chat] pass2 empty + tools empty — emitio fallback natural', {
+      console.warn('[chat] agentic loop exited empty + tools empty — emitio fallback natural', {
         tool_count: toolMessages.length,
         tools_results: tools_that_ran.join(','),
       });
       return;
     }
-    // Si llegamos acá, había tools con data PERO Pass 2 igual vacío.
-    // Eso es el caso del citation event sin Pass 2 — chat.ts guardrail
-    // maneja con citations.
-    console.warn('[chat] pass2 empty + tools con data — chat.ts guardrail decide', {
+    // Si llegamos acá, había tools con data PERO el modelo nunca compuso
+    // respuesta final (loop agotado o break por completion vacío). Es el
+    // caso del citation event sin texto sintético — chat.ts guardrail maneja
+    // con citations.
+    console.warn('[chat] agentic loop exited empty + tools con data — chat.ts guardrail decide', {
       tool_count: toolMessages.length,
       tools_results: tools_that_ran.join(','),
     });
     return;
   }
 
-  console.warn('[chat] pass2 emitio content vacio — chat.ts guardrail decidira fallback', {
+  console.warn('[chat] agentic loop exited empty — chat.ts guardrail decidira fallback', {
     has_tool_messages: false,
   });
   return;
@@ -2879,15 +2847,21 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
 //
 // Hook centralizado para emitir a ai_call_log el usage del provider en cada
 // turno de chat. Se invoca side-effect-only desde streamCompletion (single
-// pass) y desde el 2-pass tool loop (pass1 + pass2). Fail-open: si falla el
-// log no aborta el chat — la columna cost_usd_estimated se va a 0 para esa
-// row pero la respuesta llega al user.
+// pass) y desde cada iteración del agentic loop (pass='agentic_round_<N>').
+// Las labels 'pass1' / 'pass2' quedan en el union type por back-compat (por
+// si algún caller externo importa el tipo) pero no se emiten más desde acá.
+// Fail-open: si falla el log no aborta el chat — la columna
+// cost_usd_estimated se va a 0 para esa row pero la respuesta llega al user.
 async function logChatStreamUsage(opts: {
   args: StreamArgs;
   model: string;
   usage: StreamUsage;
   latencyMs: number;
-  pass: 'single' | 'pass1' | 'pass2';
+  // 'single' = no-tools single stream
+  // 'pass1' = legacy first pass (kept for back-compat with non-agentic callers)
+  // 'pass2' = legacy second pass (kept for back-compat; emitted by no caller after agentic refactor)
+  // 'agentic_round_<N>' = per-round token usage in the new agentic loop (round 0..MAX_ROUNDS-1)
+  pass: 'single' | 'pass1' | 'pass2' | `agentic_round_${number}`;
 }): Promise<void> {
   try {
     const { logLLMCall } = await import('./tokenAccounting.js');
