@@ -1189,7 +1189,14 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // 2026-05-26: subido 5→8. Lawyer test L12 demostró que queries
   // multi-step (buscar + detallar) a veces necesitan 3-4 rounds.
   // 8 es safety margin razonable contra loops infinitos.
-  const MAX_ROUNDS = 8;
+  // 2026-05-26 (Wave 4 #7 follow-up): 8→12. Doctrina cliente actualizada:
+  // resultado correcto > rapidez. Logs muestran que queries específicas
+  // sobre votaciones agotan los 8 rounds buscando + reconciliando datos
+  // entre tools, y Lexa responde "no encontré" no porque no esté el dato,
+  // sino porque se quedó sin rounds. 12 da espacio suficiente; si una
+  // query genuinamente loopa, hay límite. Bajaremos cuando validemos el
+  // p95 de rounds reales con telemetría.
+  const MAX_ROUNDS = 12;
   // Conservamos la variable `assistantText` para que el guardrail final pueda
   // distinguir "el modelo emitió algo" vs "salimos del loop sin contenido".
   let assistantText = '';

@@ -313,7 +313,10 @@ export async function searchSilCorpus(args: {
           const hits = (data ?? []) as Array<SilChunkHit & { source_type?: string }>;
           return hits.filter((h) => typeof h.source_type === 'string' && h.source_type.startsWith('sil_'));
         },
-        { ms: 8_000, label: 'sil:search_corpus' },
+        // 2026-05-26 Wave 4 #7 follow-up: 8s → 20s. Igual que searchTranscripts,
+        // HNSW pgvector p95 ~10s en queries amplias. Doctrina cliente:
+        // resultado correcto > rapidez; bajamos después de validar.
+        { ms: 20_000, label: 'sil:search_corpus' },
       ),
     { attempts: 2, baseDelayMs: 300, label: 'sil:search_corpus' },
   );
@@ -468,7 +471,8 @@ export async function searchReglamento(args: {
             };
           });
         },
-        { ms: 8_000, label: 'reglamento:search' },
+        // 2026-05-26 Wave 4 #7 follow-up: 8s → 20s. Mismo razonamiento que sil:search_corpus.
+        { ms: 20_000, label: 'reglamento:search' },
       ),
     { attempts: 2, baseDelayMs: 250, label: 'reglamento:search' },
   );
@@ -1050,7 +1054,8 @@ export async function searchConstitucionLoal(args: {
             };
           });
         },
-        { ms: 8_000, label: 'constitucion_loal:search' },
+        // 2026-05-26 Wave 4 #7 follow-up: 8s → 20s. Mismo razonamiento que sil:search_corpus.
+        { ms: 20_000, label: 'constitucion_loal:search' },
       ),
     { attempts: 2, baseDelayMs: 250, label: 'constitucion_loal:search' },
   );
