@@ -158,7 +158,13 @@ export async function searchTranscripts(args: SearchArgs): Promise<ChunkHit[]> {
           if (v1.error) throw new Error(`match_chunks fallback: ${v1.error.message}`);
           return (v1.data ?? []) as ChunkHit[];
         },
-        { ms: 8_000, label: 'supabase:match_chunks_v3' },
+        // 2026-05-26 Wave 4 #7: subido de 8s → 20s. El HNSW index pgvector
+        // sobre 800k+ chunks toma ~10s en queries amplias (sin session_id
+        // filter). 8s causaba aborts en queries legítimas y Lexa devolvía
+        // "no encontré". 20s deja margen para el 95-percentil. Sentry alerta
+        // si excede consistentemente — entonces investigar REINDEX o
+        // particionar el index por source_type.
+        { ms: 20_000, label: 'supabase:match_chunks_v3' },
       ),
     { attempts: 2, baseDelayMs: 300, label: 'supabase:match_chunks_v3' },
   );
