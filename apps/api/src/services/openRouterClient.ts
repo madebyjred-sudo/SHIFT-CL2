@@ -2717,13 +2717,17 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
       {
         model,
         messages: messagesForPass2,
-        // v9 (2026-05-26): SIN tool_choice — el modelo decide. Con tools
-        // disponibles + conversación que ya tiene tool_result, el patrón
-        // canónico Anthropic es generar texto (no más tool_use) porque
-        // la información necesaria ya está en context. tool_choice:'none'
-        // causaba {content:null} en Anthropic via OR — confirmado por
-        // diag v7 (msg_dump_when_empty mostró exactamente eso).
+        // v11 (2026-05-26): prefill + tool_choice='none' (combinación final).
+        // v9 sin tool_choice (67% success) — pero v10 con prefill solo
+        // hizo que el modelo emitiera finish_reason='tool_calls' (quiere
+        // más tools). Necesitamos AMBAS guardas:
+        //   - prefill: garantiza non-null content (modo "continuar turn")
+        //   - tool_choice='none': prohíbe nuevos tool_calls, forzando texto
+        // Diagnóstico v10: logs mostraban "finish_reason: 'tool_calls',
+        // content_length: 0" repetidamente — sin tool_choice, el modelo
+        // saltaba a más tool_use en vez de continuar el prefill.
         tools,
+        tool_choice: 'none',
         max_tokens: 2048,
         temperature: 0.2,
         ...cerebroExtras,
