@@ -16,6 +16,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { withRetry, withTimeout } from './resilience.js';
 import { normalizeSilEstado } from './silEstadoNormalizer.js';
+import { logger } from './logger.js';
 
 /**
  * Convierte `sil_expedientes.estado` (string crudo del SIL) a texto coherente
@@ -220,6 +221,7 @@ export async function searchExpedientes(args: {
     () =>
       withTimeout(
         async (signal) => {
+          const t0 = Date.now();
           const { data, error } = await supa()
             .rpc('search_sil_expedientes_by_text', {
               query_text: args.query,
@@ -229,12 +231,29 @@ export async function searchExpedientes(args: {
               filter_fecha_to: effectiveFechaTo ?? null,
             })
             .abortSignal(signal);
-          if (error) throw new Error(`search_sil_expedientes_by_text: ${error.message}`);
+          const ms = Date.now() - t0;
+          if (error) {
+            logger.warn('sil_search_expedientes_rpc_error', {
+              query: args.query,
+              error: error.message,
+              ms,
+            });
+            throw new Error(`search_sil_expedientes_by_text: ${error.message}`);
+          }
+          const hits = (data ?? []) as Array<SilExpedienteRow & { rank?: number }>;
+          logger.info('sil_search_expedientes_ok', {
+            query: args.query,
+            limit: k,
+            comision: args.comision ?? null,
+            fecha_from: effectiveFechaFrom ?? null,
+            fecha_to: effectiveFechaTo ?? null,
+            hits: hits.length,
+            top_numeros: hits.slice(0, 5).map((h) => h.numero),
+            ms,
+          });
           // RPC retorna un campo extra `rank` que la interface no espera.
           // Lo pelamos antes de retornar para no contaminar el shape.
-          return ((data ?? []) as Array<SilExpedienteRow & { rank?: number }>).map(
-            ({ rank: _rank, ...row }) => row as SilExpedienteRow,
-          );
+          return hits.map(({ rank: _rank, ...row }) => row as SilExpedienteRow);
         },
         { ms: SUPA_TIMEOUT_MS, label: 'sil:search_expedientes' },
       ),

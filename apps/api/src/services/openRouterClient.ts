@@ -711,8 +711,16 @@ const SEARCH_SIL_EXPEDIENTES_TOOL = {
           type: 'string',
           description: 'Filtrar por comisión específica (omitir si no aplica).',
         },
-        fecha_from: { type: 'string', description: 'Fecha desde (YYYY-MM-DD), opcional.' },
-        fecha_to: { type: 'string', description: 'Fecha hasta (YYYY-MM-DD), opcional.' },
+        fecha_from: {
+          type: 'string',
+          description:
+            'Fecha desde (YYYY-MM-DD), OPCIONAL. Filtra por fecha de PRESENTACIÓN del expediente en la Asamblea, NO por cuándo se discutió en plenarias ni cuándo se votó. Solo pasalo cuando el usuario explícitamente busca expedientes presentados en un período ("iniciativas presentadas en 2024", "expedientes de la legislatura 2022-2026"). NO lo pases para preguntas sobre cuándo se DEBATIÓ o se VOTÓ un expediente — para eso usá search_transcripts.',
+        },
+        fecha_to: {
+          type: 'string',
+          description:
+            'Fecha hasta (YYYY-MM-DD), OPCIONAL. Mismo criterio que fecha_from: filtra por fecha de presentación, NO de discusión. Omitilo en preguntas tipo "qué se discutió en X período".',
+        },
       },
       required: ['query'],
     },
