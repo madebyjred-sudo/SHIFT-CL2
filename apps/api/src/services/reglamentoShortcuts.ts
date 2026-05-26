@@ -134,7 +134,9 @@ export const REGLAMENTO_SHORTCUTS: Shortcut[] = [
 
   // ─── Veto ─────────────────────────────────────────────────────────
   {
-    pattern: /veto|resello/i,
+    // 2026-05-26: agregado "vetar" como verbo, revelado por test
+    // ("Cuál es el plazo para vetar un proyecto").
+    pattern: /\bveto\b|\bvetar\b|\bresello\b|\bresellar\b/i,
     articulos: ['Art. 178', 'Art. 179'],
     hint: 'Art. 178 plazo para vetar (10 días hábiles). Art. 179 procedimiento de resello (mayoría calificada).',
   },
@@ -145,15 +147,22 @@ export const REGLAMENTO_SHORTCUTS: Shortcut[] = [
     articulos: ['Art. 138'],
   },
   {
-    pattern: /publicaci[óo]n.*proyecto|gaceta.*proyecto/i,
+    // 2026-05-26: ampliado para capturar verbo "publica" (no solo sustantivo
+    // "publicación"), revelado por tests reglamentoShortcuts.test.ts.
+    pattern: /publicaci[óo]n.*proyecto|publica.*proyecto.*gaceta|gaceta.*proyecto/i,
     articulos: ['Art. 117'],
   },
   {
-    pattern: /retiro.*proyecto|retirar.*expediente/i,
+    // 2026-05-26: ampliado para verbo "se retira"/"retirar"/"retiro",
+    // revelado por test "retiro de proyecto".
+    pattern: /retiro.*proyecto|retirar.*expediente|se retira.*expediente|retir[áa].*expediente/i,
     articulos: ['Art. 121'],
   },
   {
-    pattern: /caducidad|cuatrien|venci.*4 a[ñn]os/i,
+    // 2026-05-26: ampliado `venci` → `venc` (cubre "vence", "vencer",
+    // "vencido"), revelado por test "Cuándo se vence un expediente a
+    // los 4 años".
+    pattern: /caducidad|cuatrien|venc[a-z]*.*4 a[ñn]os|4 a[ñn]os.*venc/i,
     articulos: ['Art. 119'],
     hint: 'Art. 119 caducidad cuatrienal: 4 años calendario desde iniciación, salvo prórroga por 2/3 antes del vencimiento.',
   },
@@ -204,16 +213,26 @@ export const REGLAMENTO_SHORTCUTS: Shortcut[] = [
  * Wave 2.1 (mi shortcut fire para "dispensa" + "iniciativas" → Lexa
  * buscó Art 177 en vez de expedientes).
  */
+// 2026-05-26 v2: refinado tras tests reglamentoShortcuts.test.ts.
+// Versión inicial era too aggressive — skipeaba cualquier query con
+// "expediente" o "proyecto" como noun, lo que rompía queries
+// procedurales legítimas (caducidad de un expediente, vetar un
+// proyecto, etc.). Ahora requiere SEARCH ACTION + noun, no solo noun.
 const EXPEDIENTE_QUERY_PATTERNS = [
-  /\biniciativas?\b/i,
-  /\bexpedientes?\b/i,
-  /\bproyectos? de ley\b/i,
   /\bbuscame\b/i,
   /\bbusc[áa]\b/i,
-  /\bquerés? que.*busque\b/i,
+  /\bquer[ée]s? que.*busque\b/i,
+  /\bqu[ée] iniciativas.*hay\b/i,
+  /\bqu[ée] expedientes.*hay\b/i,
+  /\bqu[ée] proyectos.*hay\b/i,
   /\bqu[ée] hay sobre\b/i,
   /\bhay alguna iniciativa\b/i,
+  /\bhay alg[uú]n.*(expediente|proyecto)\b/i,
+  /\blistame (iniciativas?|expedientes?|proyectos?)/i,
+  /\bmostrame (iniciativas?|expedientes?|proyectos?)/i,
   /\bencontr[áa].*expedientes?\b/i,
+  /\biniciativas? (vigentes?|recientes?|sobre)\b/i,
+  /\bproyectos? de ley sobre\b/i,
 ];
 
 function looksLikeExpedienteQuery(query: string): boolean {
