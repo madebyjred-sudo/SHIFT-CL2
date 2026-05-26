@@ -1,5 +1,6 @@
 import type { CerebroStreamChunk, AgentId } from '@shift-cl2/shared-types';
 import { getAgent, buildAgentSystemPrompt } from './agentLoader.js';
+import { matchReglamentoShortcut, buildReglamentoHintMessage } from './reglamentoShortcuts.js';
 import { searchTranscripts, type ChunkHit } from './searchTranscripts.js';
 import { searchSessionTranscript, searchSessionTranscriptByUuid } from './searchSessionTranscript.js';
 import {
@@ -942,6 +943,18 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // migración) lo va a necesitar como `user_id` en el payload de
   // Cerebro. No se usa acá todavía.
 
+  // 2026-05-26 Wave 2: hand-curated shortcuts del Reglamento.
+  // Lawyer test L1/L4 demostró que search_reglamento semantic falla
+  // en queries procedimentales abstractas (e.g. "plazo dictamen comisión
+  // permanente" retorna Art 131 cuando la respuesta correcta es Art 80).
+  // El shortcut detecta query pattern y le pasa una hint INTERNA con
+  // el artículo correcto para que Lexa lo busque y cite. NO se expone
+  // al usuario (el system prompt instruye a no leakear el hint).
+  const reglamentoShortcut = matchReglamentoShortcut(args.query);
+  const reglamentoHintBlock = reglamentoShortcut
+    ? [{ role: 'system' as const, content: buildReglamentoHintMessage(reglamentoShortcut) }]
+    : [];
+
   const messages: OAMessage[] = [
     { role: 'system', content: systemPrompt },
     ...(args.dynamic_rag_prompt
@@ -950,6 +963,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     ...(args.scope_system_prompt
       ? [{ role: 'system' as const, content: args.scope_system_prompt }]
       : []),
+    ...reglamentoHintBlock,
     ...trimmedHistory,
     { role: 'user', content: args.query },
   ];
