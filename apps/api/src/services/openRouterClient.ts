@@ -2693,21 +2693,19 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   //       tool_choice='none'. Si el content sigue vacío, último recurso:
   //       sintetizar respuesta determinística desde los tool results que
   //       ya capturamos en `messages`.
-  // Pass2 messages: añadimos un nudge user message al final para forzar
-  // al modelo a responder. Sin esto, Anthropic a veces decide
-  // finish_reason='stop' con content vacío después de procesar tool results
-  // (especialmente con sonnet-4.6 + tool_choice='none' + tools array).
-  // Diagnóstico 2026-05-12: pass2 devolvía exactamente "" con stop natural.
-  const messagesForPass2 = [
-    ...messages,
-    {
-      role: 'user' as const,
-      content:
-        'Ahora respondé al usuario usando los extractos que devolvió la tool. ' +
-        'Citá [N] inline después de cada afirmación. Si los extractos no son suficientes, ' +
-        'decilo explícitamente pero igual respondé con lo que tenés.',
-    },
-  ];
+  // Pass2 messages: enviar la conversación TAL CUAL — la última entrada
+  // es un role:'tool' con tool_result, y el modelo DEBE responder con
+  // texto. El nudge user message anterior estaba causando que Anthropic
+  // devolviera {content:null} (diagnosticado 2026-05-26 vía v7 dump):
+  // el modelo interpretaba el doble user (tool_result + nudge) como
+  // "conversación cerrada, ya respondí con tool_use, fin".
+  //
+  // Cambiamos a un enfoque assistant-prefill: agregamos un assistant
+  // message vacío al final para que el modelo "continúe" la respuesta
+  // natural post-tool_result, no la inicie desde cero.
+  // En OpenAI format eso es simplemente NO añadir nada extra y dejar
+  // que el modelo emita su turn-of-assistant.
+  const messagesForPass2 = [...messages];
 
   let pass2Text = '';
   try {
