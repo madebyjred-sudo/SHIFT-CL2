@@ -2715,20 +2715,18 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
       {
         model,
         messages: messagesForPass2,
-        // tools=[] + tool_choice='none' — fix 2026-05-25. Antes (v3)
-        // omitíamos ambos, pero el modelo seguía emitiendo
-        // finish_reason='tool_calls' con content vacío porque la
-        // conversación contenía mensajes role='tool' y assistant con
-        // tool_calls — Anthropic lo interpreta como contexto válido para
-        // emitir más tool_calls. Forzar tools=[] + 'none' deja explícito
-        // que NO hay herramientas en este turno y el modelo responde
-        // con texto. Comentario v2 que sugería que esto confundía a
-        // sonnet ya no aplica: era con tools NO vacíos. Verificado vía
-        // smoke + curl directo al endpoint (logs Cloud Run mostraban
-        // finish_reason='tool_calls' content_length=0 → fallback
-        // determinístico → "Encontré los siguientes extractos…" leaking
-        // tool content raw al usuario).
-        tools: [],
+        // tools=<originales> + tool_choice='none' — fix 2026-05-25 v4.
+        // v3 (tools=[]) hacía que Anthropic devolviera finish_reason='stop'
+        // con content_length=0 en el 53% de los casos (medido via suite
+        // lexa-tools-30: 16/30 prompts caían a guardrail sintetizando
+        // desde citations en vez de prosa Pass 2 real). Hipótesis: Anthropic
+        // interpreta el array vacío de tools como "el assistant no tiene
+        // contexto para responder" y aborta.
+        // v4: pasamos el array ORIGINAL de tools (mismo que Pass 1) + 'none'.
+        // Eso le dice al modelo "conocés estas tools pero NO las llames en
+        // este turno, respondé con texto basado en los tool_results que ya
+        // recibiste". Es el patrón canónico de tool use de Anthropic.
+        tools,
         tool_choice: 'none',
         max_tokens: 2048,
         temperature: 0.2,
