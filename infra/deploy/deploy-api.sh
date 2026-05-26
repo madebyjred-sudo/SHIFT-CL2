@@ -117,12 +117,50 @@ gcloud run deploy "$SERVICE_NAME" \
   --set-env-vars "GEMINI_TRANSCRIPT_ENABLED=true" \
   --set-env-vars "YT_COOKIES_PATH=/secrets/youtube-cookies.txt" \
   --set-env-vars "SHIFT_INTERNAL_TOKEN=$SHIFT_INTERNAL_TOKEN" \
+  --set-env-vars "AI_QUOTA_CHAT_DAILY=${AI_QUOTA_CHAT_DAILY:-5000}" \
   --set-env-vars "CEREBRO_API_KEY=$CEREBRO_API_KEY"
 # IMPORTANTE: `gcloud run deploy --set-env-vars` REEMPLAZA todas las env vars
 # del revision. Cualquier env seteada vía `gcloud run services update` después
 # del último deploy se PIERDE en el próximo deploy. Por eso GEMINI_TRANSCRIPT_ENABLED
 # y YT_COOKIES_PATH viven acá, no en `update`. Si agregás otra env, agregala
 # acá también para que sobreviva los redeploys.
+
+# ─── 2.5. Post-deploy hardening (Wave 4 lessons 2026-05-26) ───────────
+# Dos cosas que han fallado silenciosamente en deploys anteriores y que
+# necesitan ejecutarse explícitamente para que el deploy sea idempotente:
+#
+#   (a) `--to-latest` por si el traffic split quedó pegado en una revision
+#       vieja (preview tags históricos pueden bloquear el reroute auto).
+#       Ver CRITICAL-DEBT.md #16.
+#
+#   (b) Re-aplicar bypass Cerebro si la flag CL2_FORCE_CEREBRO_BYPASS=1
+#       está seteada. El bypass override (CEREBRO_BASE_URL=https://openrouter.ai/api)
+#       sobrevive deploys solo si está en este script. Sin esto, cada deploy
+#       reintroduce el bug de Cerebro proxy mangling responses → Lexa
+#       devuelve content:null. Ver locks/06-bypass-cerebro-temporal.md.
+#
+# Cualquiera de estas que ya esté correcta se vuelve un no-op silencioso.
+
+if [[ "$PREVIEW_MODE" != "1" ]]; then
+  echo
+  echo "→ Hardening: routing traffic to latest revision"
+  gcloud run services update-traffic "$SERVICE_NAME" \
+    --project="$PROJECT_ID" --region="$REGION" \
+    --to-latest --quiet
+
+  if [[ "${CL2_FORCE_CEREBRO_BYPASS:-0}" == "1" ]]; then
+    if [[ -z "${BYPASS_LLM_BASE_URL:-}" ]] || [[ -z "${BYPASS_LLM_API_KEY:-}" ]]; then
+      echo "⚠️  CL2_FORCE_CEREBRO_BYPASS=1 pero BYPASS_LLM_BASE_URL o BYPASS_LLM_API_KEY no setados."
+      echo "    Setealos en .env.production para que el bypass sea persistente." >&2
+    else
+      echo "→ Hardening: re-aplicando bypass Cerebro (lock 06)"
+      gcloud run services update "$SERVICE_NAME" \
+        --project="$PROJECT_ID" --region="$REGION" \
+        --update-env-vars="CEREBRO_BASE_URL=$BYPASS_LLM_BASE_URL,CEREBRO_API_KEY=$BYPASS_LLM_API_KEY" \
+        --quiet
+    fi
+  fi
+fi
 
 # ─── 3. Print the service URL so the next step can grab it ────────────
 SERVICE_URL=$(gcloud run services describe "$SERVICE_NAME" \
