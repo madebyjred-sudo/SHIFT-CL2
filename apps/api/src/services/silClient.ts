@@ -208,76 +208,33 @@ export async function searchExpedientes(args: {
     }
   }
 
+  // 2026-05-26 audit asesor: refactor a RPC `search_sil_expedientes_by_text`.
+  // Antes el código hacía `.textSearch(...)` sobre una columna que NO existía,
+  // siempre fallaba, y caía a un fallback ilike sin recall útil. Ahora:
+  //   1. Migration 0055 creó la columna generated `titulo_proponente_tsv`
+  //      (tsvector materializado) + GIN index.
+  //   2. Migration 0056 creó la function `search_sil_expedientes_by_text`
+  //      que tokeniza + arma to_tsquery con OR + ranquea por ts_rank.
+  // Sin fallback — si esto rompe, queremos saberlo.
   return withRetry(
     () =>
       withTimeout(
         async (signal) => {
-          // Use Postgres `websearch_to_tsquery` for natural language input.
-          // Supabase exposes this via .textSearch with config 'spanish'.
-          let q = supa()
-            .from('sil_expedientes')
-            .select('id, numero, titulo, proponente, comision, fecha_presentacion, estado, tipo, legislatura, url_detalle, extras')
-            .textSearch(
-              'titulo_proponente_tsv',  // virtual: see migration index
-              args.query,
-              { type: 'websearch', config: 'spanish' },
-            )
-            .limit(k)
+          const { data, error } = await supa()
+            .rpc('search_sil_expedientes_by_text', {
+              query_text: args.query,
+              match_limit: k,
+              filter_comision: args.comision ?? null,
+              filter_fecha_from: effectiveFechaFrom ?? null,
+              filter_fecha_to: effectiveFechaTo ?? null,
+            })
             .abortSignal(signal);
-          if (args.comision) q = q.eq('comision', args.comision);
-          if (effectiveFechaFrom) q = q.gte('fecha_presentacion', effectiveFechaFrom);
-          if (effectiveFechaTo) q = q.lte('fecha_presentacion', effectiveFechaTo);
-          const { data, error } = await q;
-          if (error) {
-            // 2026-05-26 audit asesor: el textSearch falla siempre porque
-            // la columna `titulo_proponente_tsv` no existe (existe el GIN
-            // index sobre la expresión `to_tsvector(spanish, titulo || ' '
-            // || proponente)` pero Supabase JS no puede usarlo via
-            // textSearch). Caemos al fallback. El fallback PREVIO hacía
-            // ilike por la frase completa — "Polo Turístico Golfo de
-            // Papagayo" no matcheaba "PROYECTO TURÍSTICO DE PAPAGAYO"
-            // (substring mismatch). Fix: split en tokens significativos
-            // (≥4 chars sin acentos, sin stopwords) y OR por cada uno.
-            // Trade-off: más ruido para queries cortas, pero asegura recall.
-            // Deuda Sprint 5: crear columna generated o RPC custom para
-            // usar el GIN index existente.
-            const STOPWORDS = new Set([
-              'sobre', 'para', 'desde', 'hasta', 'entre', 'esta', 'este',
-              'estos', 'estas', 'cual', 'cuales', 'donde', 'cuando',
-              'expediente', 'proyecto', 'iniciativa', 'algun', 'alguna',
-              'algunos', 'algunas',
-            ]);
-            const stripAccents = (s: string) =>
-              s.normalize('NFD').replace(/[̀-ͯ]/g, '');
-            const tokens = stripAccents(args.query.toLowerCase())
-              .split(/[^a-z0-9]+/)
-              .filter((t) => t.length >= 4 && !STOPWORDS.has(t));
-            if (tokens.length === 0) {
-              // Sin tokens útiles → ilike por la query cruda como último resort.
-              const fb = await supa()
-                .from('sil_expedientes')
-                .select('id, numero, titulo, proponente, comision, fecha_presentacion, estado, tipo, legislatura, url_detalle, extras')
-                .ilike('titulo', `%${args.query}%`)
-                .limit(k);
-              if (fb.error) throw new Error(fb.error.message);
-              return (fb.data ?? []) as SilExpedienteRow[];
-            }
-            // OR por todos los tokens. Supabase .or() acepta CSV de filtros.
-            // Buscamos en titulo Y en proponente para cubrir queries por
-            // diputado también.
-            const orFilters = tokens.flatMap((t) => [
-              `titulo.ilike.%${t}%`,
-              `proponente.ilike.%${t}%`,
-            ]).join(',');
-            const fb = await supa()
-              .from('sil_expedientes')
-              .select('id, numero, titulo, proponente, comision, fecha_presentacion, estado, tipo, legislatura, url_detalle, extras')
-              .or(orFilters)
-              .limit(k);
-            if (fb.error) throw new Error(fb.error.message);
-            return (fb.data ?? []) as SilExpedienteRow[];
-          }
-          return (data ?? []) as SilExpedienteRow[];
+          if (error) throw new Error(`search_sil_expedientes_by_text: ${error.message}`);
+          // RPC retorna un campo extra `rank` que la interface no espera.
+          // Lo pelamos antes de retornar para no contaminar el shape.
+          return ((data ?? []) as Array<SilExpedienteRow & { rank?: number }>).map(
+            ({ rank: _rank, ...row }) => row as SilExpedienteRow,
+          );
         },
         { ms: SUPA_TIMEOUT_MS, label: 'sil:search_expedientes' },
       ),
