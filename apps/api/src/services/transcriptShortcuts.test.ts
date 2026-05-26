@@ -187,6 +187,36 @@ describe('buildTranscriptHintMessage', () => {
   });
 });
 
+describe('Wave 3.1 — vote hint reforzado (L9 fix)', () => {
+  it('vote hint contiene directivas explícitas ("CRÍTICO", "PROTOCOLO OBLIGATORIO")', () => {
+    const r = matchTranscriptShortcut('cuántos votos a favor');
+    expect(r?.hint).toContain('CRÍTICO');
+    expect(r?.hint).toContain('PROTOCOLO OBLIGATORIO');
+  });
+
+  it('vote hint exige llamada explícita a search_transcripts (no solo sugerencia)', () => {
+    const r = matchTranscriptShortcut('votación 21 de mayo');
+    expect(r?.hint).toContain('SIEMPRE llamá AMBAS tools');
+    expect(r?.hint).toContain('search_transcripts');
+  });
+
+  it('vote hint provee query EXACTA "votos a favor cero en contra"', () => {
+    const r = matchTranscriptShortcut('cómo votó el Frente Amplio');
+    expect(r?.hint).toContain('"votos a favor cero en contra"');
+  });
+
+  it('vote hint advierte contra terminar sin la llamada', () => {
+    const r = matchTranscriptShortcut('votos a favor');
+    // /s flag (dotall) porque el hint tiene line breaks entre "termines" y "sin"
+    expect(r?.hint).toMatch(/NUNCA termines.*sin haber\s+llamado/is);
+  });
+
+  it('vote hint clarifica que resumen ejecutivo NO contiene cifras de votación', () => {
+    const r = matchTranscriptShortcut('cuántos votos');
+    expect(r?.hint).toMatch(/resumen ejecutivo NO contiene cifras/i);
+  });
+});
+
 describe('TRANSCRIPT_SHORTCUTS — integridad', () => {
   it('tiene al menos 5 shortcuts', () => {
     expect(TRANSCRIPT_SHORTCUTS.length).toBeGreaterThanOrEqual(5);

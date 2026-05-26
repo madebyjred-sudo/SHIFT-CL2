@@ -29,13 +29,37 @@ interface TranscriptShortcut {
 export const TRANSCRIPT_SHORTCUTS: TranscriptShortcut[] = [
   // ─── Votaciones específicas ─────────────────────────────────────
   {
+    // 2026-05-26 Wave 3.1: hint REFORZADO para L9 fix. La versión Wave 2
+    // era "sugestiva" — el modelo decidía si llamar search_transcripts
+    // o no. En lawyer test L9, después de get_session_by_date el modelo
+    // pensaba "ya tengo la sesión, fin" y NO llamaba search_transcripts.
+    // Esta versión es directiva — exige la llamada explícita ANTES de
+    // responder "no encontré votación".
     pattern: /votaci[óo]n|cu[áa]ntos votos|votos a favor|votos en contra|c[óo]mo vot[óa]|nominal|votaron a favor/i,
     hint:
-      'BÚSQUEDA DE VOTACIONES: cuando el usuario pregunta por votos específicos en una sesión, search_transcripts debe usar query con keywords directos:\n' +
-      '  • "votos a favor cero en contra" — captura los chunks típicos de votación legislativa CR\n' +
-      '  • "aprobado por X votos" — alternativa\n' +
-      '  • SIEMPRE incluí la fecha del query original como filtro fecha_from/fecha_to si se mencionó\n' +
-      'NO uses queries abstractas tipo "votación expedientes" — los chunks con votos no se ranking por esos términos.',
+      'CRÍTICO — QUERY DE VOTACIÓN ESPECÍFICA detectado.\n' +
+      '\n' +
+      'La pregunta del usuario pide CIFRAS de votación (cuántos votos a favor,\n' +
+      'cuántos en contra, votación nominal). Las votaciones aparecen LITERAL en\n' +
+      'las transcripciones como "56 votos a favor, cero en contra", "39 votos a\n' +
+      'favor", "aprobado por X votos". El semantic search con queries abstractas\n' +
+      'tipo "votación expedientes" NO surface esos chunks.\n' +
+      '\n' +
+      'PROTOCOLO OBLIGATORIO:\n' +
+      '1. Si la query menciona una fecha de sesión: SIEMPRE llamá AMBAS tools en\n' +
+      '   sequence — primero get_session_by_date(fecha) para contexto, luego\n' +
+      '   search_transcripts({query: "votos a favor cero en contra", fecha_from:\n' +
+      '   "YYYY-MM-DD", fecha_to: "YYYY-MM-DD"}) para los números literales.\n' +
+      '2. Si search_transcripts retorna chunks con "N votos a favor", CITALOS\n' +
+      '   tal cual con timecode.\n' +
+      '3. Si search_transcripts retorna vacío DESPUÉS de la llamada explícita,\n' +
+      '   entonces SÍ es válido decir "no encontré la votación específica".\n' +
+      '4. NUNCA termines la respuesta diciendo "no encontré votación" sin haber\n' +
+      '   llamado search_transcripts con el query keyword exacto arriba.\n' +
+      '\n' +
+      'Este protocolo aplica también cuando get_session_by_date ya devolvió un\n' +
+      'resumen — el resumen ejecutivo NO contiene cifras de votación, solo\n' +
+      'aprobaciones. Para los números hay que ir a las transcripciones literales.',
   },
 
   // ─── Mociones de censura ─────────────────────────────────────────
