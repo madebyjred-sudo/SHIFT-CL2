@@ -220,51 +220,80 @@ export async function searchExpedientes(args: {
     }
   }
 
-  // 2026-05-26 audit asesor: refactor a RPC `search_sil_expedientes_by_text`.
-  // Antes el código hacía `.textSearch(...)` sobre una columna que NO existía,
-  // siempre fallaba, y caía a un fallback ilike sin recall útil. Ahora:
-  //   1. Migration 0055 creó la columna generated `titulo_proponente_tsv`
-  //      (tsvector materializado) + GIN index.
-  //   2. Migration 0056 creó la function `search_sil_expedientes_by_text`
-  //      que tokeniza + arma to_tsquery con OR + ranquea por ts_rank.
-  // Sin fallback — si esto rompe, queremos saberlo.
+  // 2026-05-26 audit asesor bug 6: refactor a fetch directo a PostgREST.
+  // Antes usaba supa.rpc() pero retornaba 0 hits desde Cloud Run aunque
+  // el RPC funciona desde fetch directo + SQL psql + Supabase JS local.
+  // Causa raíz no identificada (singleton stale? abortSignal issue?
+  // schema cache?), pero descartamos al cliente JS como fuente al hacer
+  // fetch directo. Si esto retorna 0 también, el problema es server-side.
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !serviceKey) {
+    throw new Error('Supabase env not set for searchExpedientes');
+  }
+
   return withRetry(
     () =>
       withTimeout(
         async (signal) => {
           const t0 = Date.now();
-          const { data, error } = await supa()
-            .rpc('search_sil_expedientes_by_text', {
-              query_text: args.query,
-              match_limit: k,
-              filter_comision: args.comision ?? null,
-              filter_fecha_from: effectiveFechaFrom ?? null,
-              filter_fecha_to: effectiveFechaTo ?? null,
-            })
-            .abortSignal(signal);
+          const reqBody = {
+            query_text: args.query,
+            match_limit: k,
+            filter_comision: args.comision ?? null,
+            filter_fecha_from: effectiveFechaFrom ?? null,
+            filter_fecha_to: effectiveFechaTo ?? null,
+          };
+          const res = await fetch(
+            `${supabaseUrl}/rest/v1/rpc/search_sil_expedientes_by_text`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                apikey: serviceKey,
+                Authorization: `Bearer ${serviceKey}`,
+              },
+              body: JSON.stringify(reqBody),
+              signal,
+            },
+          );
           const ms = Date.now() - t0;
-          if (error) {
-            logger.warn('sil_search_expedientes_rpc_error', {
+          const rawText = await res.text();
+          if (!res.ok) {
+            logger.warn('sil_search_expedientes_http_error', {
               query: args.query,
-              error: error.message,
+              status: res.status,
+              raw: rawText.slice(0, 300),
               ms,
             });
-            throw new Error(`search_sil_expedientes_by_text: ${error.message}`);
+            throw new Error(`search_sil_expedientes_by_text HTTP ${res.status}: ${rawText.slice(0, 200)}`);
           }
-          const hits = (data ?? []) as Array<SilExpedienteRow & { rank?: number }>;
+          let data: Array<SilExpedienteRow & { rank?: number }>;
+          try {
+            data = JSON.parse(rawText) as Array<SilExpedienteRow & { rank?: number }>;
+          } catch (parseErr) {
+            logger.warn('sil_search_expedientes_parse_error', {
+              query: args.query,
+              raw: rawText.slice(0, 300),
+              err: (parseErr as Error).message,
+              ms,
+            });
+            throw new Error(`search_sil_expedientes_by_text parse: ${(parseErr as Error).message}`);
+          }
           logger.info('sil_search_expedientes_ok', {
             query: args.query,
             limit: k,
             comision: args.comision ?? null,
             fecha_from: effectiveFechaFrom ?? null,
             fecha_to: effectiveFechaTo ?? null,
-            hits: hits.length,
-            top_numeros: hits.slice(0, 5).map((h) => h.numero),
+            hits: data.length,
+            top_numeros: data.slice(0, 5).map((h) => h.numero),
+            raw_len: rawText.length,
             ms,
           });
           // RPC retorna un campo extra `rank` que la interface no espera.
           // Lo pelamos antes de retornar para no contaminar el shape.
-          return hits.map(({ rank: _rank, ...row }) => row as SilExpedienteRow);
+          return data.map(({ rank: _rank, ...row }) => row as SilExpedienteRow);
         },
         { ms: SUPA_TIMEOUT_MS, label: 'sil:search_expedientes' },
       ),
