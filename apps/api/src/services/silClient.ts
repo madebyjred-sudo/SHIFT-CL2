@@ -52,7 +52,12 @@ function supa(): SupabaseClient {
   return _supa;
 }
 
-const SUPA_TIMEOUT_MS = 5_000;
+// 2026-05-26 audit asesor bug 5b: subido de 5s → 20s.
+// search_sil_expedientes_by_text RPC desde Cloud Run a veces toma 6-10s
+// (postgres tokenization + GIN scan + ranking sobre 21k rows). Timeout
+// de 5s abortaba silenciosamente retornando []. Consistencia con
+// sil:search_corpus que ya estaba en 20s.
+const SUPA_TIMEOUT_MS = 20_000;
 
 /**
  * Datos paralelos al estado del expediente que el SIL guarda. Estos campos
