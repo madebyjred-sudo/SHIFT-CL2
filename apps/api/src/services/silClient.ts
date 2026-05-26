@@ -155,11 +155,17 @@ export async function searchExpedientes(args: {
   // antes devolvía expedientes de cualquier año ranqueados; ahora
   // limita el WHERE a expedientes con fecha_presentacion en 2018.
   // Los filtros explícitos del caller siempre ganan sobre la extracción.
-  const yearRange = (!args.fecha_from && !args.fecha_to)
+  // 2026-05-26 audit asesor bug 4: Lexa a veces pasa fecha_from="" (string
+  // vacío) cuando no quiere filtrar. El RPC trata "" como date → "invalid
+  // input syntax for type date" → withRetry x2 → throw → Lexa cree que el
+  // tool está broken. Normalizamos: trim + empty → null.
+  const cleanFechaFrom = (args.fecha_from ?? '').trim() || null;
+  const cleanFechaTo = (args.fecha_to ?? '').trim() || null;
+  const yearRange = (!cleanFechaFrom && !cleanFechaTo)
     ? extractDateRangeFromQuery(args.query)
     : {};
-  const effectiveFechaFrom = args.fecha_from ?? yearRange.fecha_from;
-  const effectiveFechaTo = args.fecha_to ?? yearRange.fecha_to;
+  const effectiveFechaFrom = cleanFechaFrom ?? yearRange.fecha_from ?? null;
+  const effectiveFechaTo = cleanFechaTo ?? yearRange.fecha_to ?? null;
 
   // Detección de "número de expediente". Lexa suele pasar el query con
   // el número crudo ("23.511", "24.018", "Exp. 25.262"). El full-text
