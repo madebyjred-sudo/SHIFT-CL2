@@ -199,7 +199,7 @@ persona: |
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 domain: legislativo
-default_model: anthropic/claude-sonnet-4.6
+default_model: google/gemini-3.5-flash
 deep_insight_model: anthropic/claude-opus-4.7
 
 routing:

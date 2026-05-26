@@ -2693,48 +2693,21 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   //       tool_choice='none'. Si el content sigue vacío, último recurso:
   //       sintetizar respuesta determinística desde los tool results que
   //       ya capturamos en `messages`.
-  // Pass2 messages: ASSISTANT PREFILL TURN (v10, fix definitivo según
-  // Cerebro padre handoff 2026-05-26).
-  //
-  // Anthropic Sonnet 4.5/4.6 tiene un patrón conocido: post-tool_result,
-  // a veces "decide" que ya completó la tarea con el tool y devuelve
-  // {content:null}. v9 (sin tool_choice) bajó el rate de 53% → 17% (UI)
-  // pero quedaba un residual.
-  //
-  // Solución canónica de Anthropic Cookbook: agregar un message
-  // role:'assistant' al final con un prefill — el modelo COMPLETA ese
-  // turn, no puede devolver null porque ya hay texto del assistant.
-  // El parser de Pass 2 luego strippea el prefijo del output final.
-  const PASS2_PREFILL = 'Acá te resumo lo que encontré:';
-  const messagesForPass2 = [
-    ...messages,
-    { role: 'assistant' as const, content: PASS2_PREFILL },
-  ];
-
-  // v12 (2026-05-26): Pass 2 con Haiku 4.6 (Opción C del padre Cerebro).
-  // Sonnet 4.5/4.6 ignora tool_choice='none' y devuelve finish_reason='tool_calls'
-  // con content vacío, incluso con assistant prefill. Haiku tiene menos
-  // reasoning interno → más obediente, ~3× más barato, más rápido. Pass 1
-  // sigue con Sonnet (selección de tool), Pass 2 con Haiku (prosa).
-  const PASS2_MODEL = 'anthropic/claude-haiku-4.6';
+  // Pass2 messages: REFACTOR Phase 1 (2026-05-26 madrugada).
+  // Switched provider to Gemini 3.5 Flash (lexa.yaml default_model). El
+  // bug content:null era específico de Anthropic Sonnet 4.x. Gemini tiene
+  // tool use limpio sin ese patrón.
+  // v9 baseline: messages tal cual, tools originales, NO tool_choice.
+  // Modelo viene de agent.default_model (ahora gemini-3.5-flash).
+  const messagesForPass2 = [...messages];
 
   let pass2Text = '';
   try {
     const pass2Res = await orFetch(
       {
-        model: PASS2_MODEL,
+        model,
         messages: messagesForPass2,
-        // v11 (2026-05-26): prefill + tool_choice='none' (combinación final).
-        // v9 sin tool_choice (67% success) — pero v10 con prefill solo
-        // hizo que el modelo emitiera finish_reason='tool_calls' (quiere
-        // más tools). Necesitamos AMBAS guardas:
-        //   - prefill: garantiza non-null content (modo "continuar turn")
-        //   - tool_choice='none': prohíbe nuevos tool_calls, forzando texto
-        // Diagnóstico v10: logs mostraban "finish_reason: 'tool_calls',
-        // content_length: 0" repetidamente — sin tool_choice, el modelo
-        // saltaba a más tool_use en vez de continuar el prefill.
         tools,
-        tool_choice: 'none',
         max_tokens: 2048,
         temperature: 0.2,
         ...cerebroExtras,
@@ -2763,13 +2736,6 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
       const raw = msg?.content as unknown;
       if (typeof raw === 'string') {
         pass2Text = raw;
-        // v10: si Anthropic via OR ya incluyó el prefill en la respuesta,
-        // lo dejamos como prefijo natural. Si NO (Anthropic native style)
-        // se devuelve solo la continuación → prepend el prefill para que
-        // el usuario vea la frase completa.
-        if (!pass2Text.startsWith(PASS2_PREFILL) && pass2Text.length > 0) {
-          pass2Text = `${PASS2_PREFILL} ${pass2Text}`;
-        }
       } else if (Array.isArray(raw)) {
         // Concatenar solo bloques type='text' — descartar 'thinking'/'reasoning'
         pass2Text = raw
