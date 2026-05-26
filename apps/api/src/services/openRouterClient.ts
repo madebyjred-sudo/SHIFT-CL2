@@ -1,6 +1,7 @@
 import type { CerebroStreamChunk, AgentId } from '@shift-cl2/shared-types';
 import { getAgent, buildAgentSystemPrompt } from './agentLoader.js';
 import { matchReglamentoShortcut, buildReglamentoHintMessage } from './reglamentoShortcuts.js';
+import { matchTranscriptShortcut, buildTranscriptHintMessage } from './transcriptShortcuts.js';
 import { searchTranscripts, type ChunkHit } from './searchTranscripts.js';
 import { searchSessionTranscript, searchSessionTranscriptByUuid } from './searchSessionTranscript.js';
 import {
@@ -955,6 +956,15 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     ? [{ role: 'system' as const, content: buildReglamentoHintMessage(reglamentoShortcut) }]
     : [];
 
+  // 2026-05-26 Wave 2 (cont): transcript shortcuts para queries sobre
+  // votaciones, mociones, intervenciones de diputado, etc. Lawyer test
+  // L9 demostró que "votación en plenaria X" no surface "votos a favor"
+  // con semantic search. El hint guía a Lexa hacia keywords explícitos.
+  const transcriptShortcut = matchTranscriptShortcut(args.query);
+  const transcriptHintBlock = transcriptShortcut
+    ? [{ role: 'system' as const, content: buildTranscriptHintMessage(transcriptShortcut) }]
+    : [];
+
   const messages: OAMessage[] = [
     { role: 'system', content: systemPrompt },
     ...(args.dynamic_rag_prompt
@@ -964,6 +974,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
       ? [{ role: 'system' as const, content: args.scope_system_prompt }]
       : []),
     ...reglamentoHintBlock,
+    ...transcriptHintBlock,
     ...trimmedHistory,
     { role: 'user', content: args.query },
   ];
