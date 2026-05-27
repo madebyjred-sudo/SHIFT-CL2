@@ -171,6 +171,14 @@ export async function searchTranscripts(args: SearchArgs): Promise<ChunkHit[]> {
 
   const queryEmbedding = await embedQuery(args.query);
 
+  // 2026-05-26 audit asesor bug #6 simétrico: Lexa puede pasar comision/fecha
+  // como string vacío "" en lugar de omitirlos. El RPC con filter="" matchea
+  // ningún row (text) o crashea (date). Normalizamos defensivamente igual que
+  // searchExpedientes. Ver decisions/2026-05-26-audit-asesor-7-bugs-en-cascada.md
+  const cleanComision = (args.comision ?? '').trim() || null;
+  const cleanFechaFrom = (args.fecha_from ?? '').trim() || null;
+  const cleanFechaTo = (args.fecha_to ?? '').trim() || null;
+
   const semanticHits = await withRetry(
     () =>
       withTimeout(
@@ -182,9 +190,9 @@ export async function searchTranscripts(args: SearchArgs): Promise<ChunkHit[]> {
               query_embedding: queryEmbedding,
               match_count: topK,
               filter_session_id: null,
-              filter_comision: args.comision ?? null,
-              filter_fecha_from: args.fecha_from ?? null,
-              filter_fecha_to: args.fecha_to ?? null,
+              filter_comision: cleanComision,
+              filter_fecha_from: cleanFechaFrom,
+              filter_fecha_to: cleanFechaTo,
               filter_source_type: null,
               filter_source_ref_prefix: null,
             })
@@ -206,9 +214,9 @@ export async function searchTranscripts(args: SearchArgs): Promise<ChunkHit[]> {
               query_embedding: queryEmbedding,
               match_count: topK,
               filter_session_id: null,
-              filter_comision: args.comision ?? null,
-              filter_fecha_from: args.fecha_from ?? null,
-              filter_fecha_to: args.fecha_to ?? null,
+              filter_comision: cleanComision,
+              filter_fecha_from: cleanFechaFrom,
+              filter_fecha_to: cleanFechaTo,
             })
             .abortSignal(signal);
           if (v1.error) throw new Error(`match_chunks fallback: ${v1.error.message}`);
