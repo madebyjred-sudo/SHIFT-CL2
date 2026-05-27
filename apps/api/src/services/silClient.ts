@@ -244,6 +244,15 @@ export async function searchExpedientes(args: {
             filter_fecha_from: effectiveFechaFrom ?? null,
             filter_fecha_to: effectiveFechaTo ?? null,
           };
+          const bodyStr = JSON.stringify(reqBody);
+          // Log preview del body + key info para diagnóstico bug #6.
+          logger.info('sil_search_expedientes_req', {
+            query: args.query,
+            body_preview: bodyStr.slice(0, 200),
+            body_len: bodyStr.length,
+            key_prefix: serviceKey.slice(0, 10),
+            url_host: new URL(supabaseUrl).host,
+          });
           const res = await fetch(
             `${supabaseUrl}/rest/v1/rpc/search_sil_expedientes_by_text`,
             {
@@ -252,8 +261,10 @@ export async function searchExpedientes(args: {
                 'Content-Type': 'application/json',
                 apikey: serviceKey,
                 Authorization: `Bearer ${serviceKey}`,
+                'Accept-Profile': 'public',
+                'Content-Profile': 'public',
               },
-              body: JSON.stringify(reqBody),
+              body: bodyStr,
               signal,
             },
           );
