@@ -160,12 +160,16 @@ export async function searchExpedientes(args: {
   // antes devolvía expedientes de cualquier año ranqueados; ahora
   // limita el WHERE a expedientes con fecha_presentacion en 2018.
   // Los filtros explícitos del caller siempre ganan sobre la extracción.
-  // 2026-05-26 audit asesor bug 4: Lexa a veces pasa fecha_from="" (string
-  // vacío) cuando no quiere filtrar. El RPC trata "" como date → "invalid
-  // input syntax for type date" → withRetry x2 → throw → Lexa cree que el
-  // tool está broken. Normalizamos: trim + empty → null.
+  // 2026-05-26 audit asesor bugs 4 + 6: Lexa a veces pasa string vacío en
+  // los filtros opcionales en lugar de omitirlos. PostgREST + el RPC
+  // tratan "" como filtro real:
+  //   - fecha_from="" → cast date "" → "invalid input syntax for type date"
+  //   - comision=""   → match e.comision = '' → 0 rows (ninguna comisión
+  //                     real es string vacío)
+  // Normalizamos los 3 filtros opcionales: trim + empty → null.
   const cleanFechaFrom = (args.fecha_from ?? '').trim() || null;
   const cleanFechaTo = (args.fecha_to ?? '').trim() || null;
+  const cleanComision = (args.comision ?? '').trim() || null;
   const yearRange = (!cleanFechaFrom && !cleanFechaTo)
     ? extractDateRangeFromQuery(args.query)
     : {};
@@ -240,7 +244,7 @@ export async function searchExpedientes(args: {
           const reqBody = {
             query_text: args.query,
             match_limit: k,
-            filter_comision: args.comision ?? null,
+            filter_comision: cleanComision,
             filter_fecha_from: effectiveFechaFrom ?? null,
             filter_fecha_to: effectiveFechaTo ?? null,
           };
@@ -294,7 +298,7 @@ export async function searchExpedientes(args: {
           logger.info('sil_search_expedientes_ok', {
             query: args.query,
             limit: k,
-            comision: args.comision ?? null,
+            comision: cleanComision,
             fecha_from: effectiveFechaFrom ?? null,
             fecha_to: effectiveFechaTo ?? null,
             hits: data.length,
