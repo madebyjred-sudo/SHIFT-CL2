@@ -249,7 +249,19 @@ silRouter.get('/expedientes', async (req, res) => {
       // with ilike. Numero is a string column with the dotted format
       // ("23.456"), so substring works for partial typing.
       const escaped = q.replace(/[%_]/g, (m) => `\\${m}`);
-      q1 = q1.or(`numero.ilike.%${escaped}%,titulo.ilike.%${escaped}%`);
+      // Normalize expediente format: if user types "24009", also search for "24.009".
+      // If user types "24.009", also search for "24009". This handles both formats.
+      const normalizedAlt = /^\d{5}$/.test(q)
+        ? `${q.slice(0, 2)}.${q.slice(2)}`
+        : /^\d{1,2}\.\d{3}$/.test(q)
+          ? q.replace('.', '')
+          : null;
+      const orClauses = [`numero.ilike.%${escaped}%`, `titulo.ilike.%${escaped}%`];
+      if (normalizedAlt) {
+        const escapedAlt = normalizedAlt.replace(/[%_]/g, (m) => `\\${m}`);
+        orClauses.push(`numero.ilike.%${escapedAlt}%`);
+      }
+      q1 = q1.or(orClauses.join(','));
     }
 
     const { data: rows, error, count: totalRows } = await q1

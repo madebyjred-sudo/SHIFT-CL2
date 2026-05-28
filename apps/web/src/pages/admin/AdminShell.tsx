@@ -33,6 +33,8 @@ import {
   Settings2,
   Youtube,
   DollarSign,
+  Briefcase,
+  MessageCircle,
   type LucideIcon,
 } from 'lucide-react';
 import { TopDock } from '@/components/top-dock';
@@ -55,6 +57,8 @@ interface NavItem {
 //   • Lo que queda son las 8 secciones con data real y CTAs funcionales.
 const NAV: ReadonlyArray<NavItem> = [
   { id: 'overview',        label: 'Vista general',       icon: LayoutDashboard, group: 'Operación' },
+  { id: 'clientes',        label: 'Clientes',            icon: Briefcase,       group: 'Operación' },
+  { id: 'whatsapp-alerts', label: 'Alertas WhatsApp',    icon: MessageCircle,   group: 'Operación' },
   { id: 'transcripts',     label: 'Cola de revisión',    icon: Youtube,         group: 'Operación' },
   { id: 'agentes',         label: 'Agentes',             icon: Bot,             group: 'Operación' },
   { id: 'feedback',        label: 'Feedback · Bugs',     icon: MessageSquareWarning, group: 'Operación' },

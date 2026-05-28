@@ -26,6 +26,8 @@ import { UsuariosSection } from './sections/UsuariosSection';
 import { AuditoriaSection } from './sections/AuditoriaSection';
 import { FeedbackSection } from './sections/FeedbackSection';
 import { TokensSection } from './sections/TokensSection';
+import { ClientesSection } from './sections/ClientesSection';
+import { WhatsappAlertsSection } from './sections/WhatsappAlertsSection';
 // Eliminados (post-audit 2026-05-10): TranscripcionesSection (duplica),
 // PuntoMedioSection (Cerebro 404), ConfigSection (decoración).
 // Si llega un usuario a /admin/transcripciones, /admin/curaduria, /admin/config,
@@ -120,6 +122,8 @@ export function AdminApp({ section }: AdminAppProps): React.ReactElement {
         {section === 'auditoria' && <AuditoriaSection />}
         {section === 'feedback' && <FeedbackSection />}
         {section === 'tokens' && <TokensSection />}
+        {section === 'clientes' && <ClientesSection />}
+        {section === 'whatsapp-alerts' && <WhatsappAlertsSection />}
       </AdminShell>
     </ToastProvider>
   );

@@ -484,7 +484,7 @@ export function ChatProvider({ children, defaultTenantId = 'cl2' }: ChatProvider
       const idx = updated.findIndex((s) => s.id === targetSessionId);
 
       if (idx === -1) {
-        const newId = targetSessionId || Date.now().toString();
+        const newId = targetSessionId || crypto.randomUUID();
         const session: ChatSession = {
           id: newId,
           title:

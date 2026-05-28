@@ -209,6 +209,28 @@ adminRouter.get('/alerts', async (_req, res) => {
   }
 });
 
+// ─── WhatsApp Alerts ────────────────────────────────────────────────
+adminRouter.get('/whatsapp-alerts', async (req, res) => {
+  try {
+    const { listAlerts } = await import('../services/whatsappAlerts.js');
+    const status = (req.query.status as string | undefined) as 'pending' | 'sent' | 'failed' | 'skipped' | undefined;
+    const alerts = await listAlerts({ status, limit: 100 });
+    res.json(live({ items: alerts }));
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+adminRouter.post('/whatsapp-alerts/process', async (req, res) => {
+  try {
+    const { processPendingAlerts } = await import('../services/whatsappAlerts.js');
+    const result = await processPendingAlerts(50);
+    res.json(live(result));
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
 // ─── Transcripciones — sistema nuevo (Supabase sessions) × review state ────
 //
 // CAMBIO 2026-05-10: este endpoint pasó de leer la API legacy

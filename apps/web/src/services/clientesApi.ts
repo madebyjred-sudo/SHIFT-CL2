@@ -40,6 +40,8 @@ export interface Cliente {
   archived: boolean;
   created_at: string;
   updated_at: string;
+  context_prompt: string | null;
+  context_keywords: string[] | null;
 }
 
 export interface ClientePatch {
@@ -49,6 +51,8 @@ export interface ClientePatch {
   contact_email?: string | null;
   contact_whatsapp?: string | null;
   archived?: boolean;
+  context_prompt?: string | null;
+  context_keywords?: string[] | string | null;
 }
 
 export interface ClienteCreate {
@@ -57,6 +61,8 @@ export interface ClienteCreate {
   sector?: string;
   contact_email?: string;
   contact_whatsapp?: string;
+  context_prompt?: string;
+  context_keywords?: string[] | string;
 }
 
 export async function listClientes(includeArchived = false): Promise<Cliente[]> {

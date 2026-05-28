@@ -371,6 +371,7 @@ export async function getExpedienteById(numero: number): Promise<SilExpedienteFu
 export async function searchSilCorpus(args: {
   query: string;
   k?: number;
+  expediente_numero?: string;
 }): Promise<SilChunkHit[]> {
   const k = Math.min(Math.max(args.k ?? 6, 1), 20);
   // Over-fetch for the reranker — give the cross-encoder N*5 candidates
@@ -384,6 +385,7 @@ export async function searchSilCorpus(args: {
       withTimeout(
         async (signal) => {
           // Path A: hybrid (0009 applied).
+          const filterPrefix = args.expediente_numero ? `Exp. ${args.expediente_numero.replace(/[^\\d.]/g, '')}` : null;
           const { data, error } = await supa()
             .rpc('match_chunks_hybrid', {
               query_embedding: queryEmbedding,
@@ -391,14 +393,14 @@ export async function searchSilCorpus(args: {
               match_count: overFetch,
               filter_session_id: null,
               filter_source_type: null,
-              filter_source_ref_prefix: null,
+              filter_source_ref_prefix: filterPrefix,
               rrf_k: 60,
             })
             .abortSignal(signal);
           if (error) {
             // 42883 = function does not exist. Caller may not have applied 0009.
             if (error.code === '42883' || error.message.includes('match_chunks_hybrid')) {
-              return await fallbackDenseOnly(queryEmbedding, overFetch, signal);
+              return await fallbackDenseOnly(queryEmbedding, overFetch, filterPrefix, signal);
             }
             throw new Error(`match_chunks_hybrid: ${error.message}`);
           }
@@ -408,9 +410,9 @@ export async function searchSilCorpus(args: {
         // 2026-05-26 Wave 4 #7 follow-up: 8s → 20s. Igual que searchTranscripts,
         // HNSW pgvector p95 ~10s en queries amplias. Doctrina cliente:
         // resultado correcto > rapidez; bajamos después de validar.
-        { ms: 20_000, label: 'sil:search_corpus' },
+        { ms: 120_000, label: 'sil:search_corpus' },
       ),
-    { attempts: 2, baseDelayMs: 300, label: 'sil:search_corpus' },
+    { attempts: 1, baseDelayMs: 300, label: 'sil:search_corpus' },
   );
 
   // Cross-encoder rerank — falls through to identity (top-K untouched)
@@ -423,6 +425,7 @@ export async function searchSilCorpus(args: {
 async function fallbackDenseOnly(
   queryEmbedding: number[],
   k: number,
+  filterPrefix: string | null,
   signal: AbortSignal,
 ): Promise<SilChunkHit[]> {
   console.warn('[searchSilCorpus] 0009 not applied — falling back to dense-only via match_chunks_v2');
@@ -432,7 +435,7 @@ async function fallbackDenseOnly(
       match_count: k * 3,
       filter_session_id: null,
       filter_source_type: null,
-      filter_source_ref_prefix: null,
+      filter_source_ref_prefix: filterPrefix,
     })
     .abortSignal(signal);
   if (error) {

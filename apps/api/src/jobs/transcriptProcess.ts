@@ -832,6 +832,60 @@ export async function processSession(
         return result;
       }
 
+      // quality_rejected: all sources returned segments but they were garbage.
+      // Mark as transcript_broken (or error if DB constraint not yet migrated).
+      if (err.code === 'quality_rejected') {
+        const brokenStatus = 'transcript_broken' as const;
+        const { error: updErr } = await supa()
+          .from('sessions')
+          .update({
+            status: brokenStatus,
+            metadata: {
+              ...((session.metadata ?? {}) as Record<string, unknown>),
+              transcript_quality: 'unusable',
+              transcript_broken_reason: err.message,
+              transcript_broken_at: new Date().toISOString(),
+            },
+          })
+          .eq('id', sessionId);
+
+        if (updErr && updErr.message?.includes('violates check constraint')) {
+          // DB hasn't been migrated yet — fall back to 'error' status
+          await supa()
+            .from('sessions')
+            .update({
+              status: 'error',
+              metadata: {
+                ...((session.metadata ?? {}) as Record<string, unknown>),
+                transcript_quality: 'unusable',
+                transcript_broken_reason: err.message,
+                transcript_broken_at: new Date().toISOString(),
+              },
+            })
+            .eq('id', sessionId);
+          logger.warn('transcript_process_quality_rejected_fallback', {
+            session_id: sessionId,
+            reason: 'DB constraint missing transcript_broken; falling back to error',
+            error: err.message,
+          });
+        } else if (updErr) {
+          logger.error('transcript_process_broken_update_failed', {
+            session_id: sessionId,
+            error: updErr.message,
+          });
+        } else {
+          logger.error('transcript_process_quality_rejected', {
+            session_id: sessionId,
+            error: err.message,
+          });
+        }
+
+        result.duration_ms = Date.now() - startMs;
+        result.status = 'permanent_failure';
+        result.error = `quality_rejected: ${err.message}`;
+        return result;
+      }
+
       // video_not_found or parse_error: permanent failure
       if (err.code === 'video_not_found' || err.code === 'parse_error') {
         await supa()

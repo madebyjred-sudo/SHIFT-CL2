@@ -1,0 +1,528 @@
+
+
+<!DOCTYPE html>
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><meta name="viewport" content="width=device-width, initial-scale=1" /><meta http-equiv="Content-Type" content="text/html; charset=utf-8" /><title>
+
+</title>
+
+    
+    <script src="js/jquery.min.js"></script>
+    <script src="js/jquery-1.12.4.js"></script>
+    <script src="js/jquerypestanas.js"></script>
+       
+    <link rel="stylesheet" href="css/site.css" /><link rel="stylesheet" href="css/pestanas.css" />
+    <style type="text/css">
+        .auto-style1 {
+            text-align: left;
+        }
+        .auto-style2 {
+            height: 165px;
+            text-align: left;
+        }
+        .auto-style4 {
+            width: 364px;
+        }
+        .auto-style5 {
+            margin-left: 0px;
+        }
+        .auto-style7 {
+            width: 465px;
+        }
+        .auto-style8 {
+            width: 10px;
+        }
+        .auto-style9 {
+            text-align: center;
+        }
+        .auto-style12 {
+            width: 194px;
+        }
+        .auto-style13 {
+            text-align: left;
+            width: 208px;
+        }
+        .auto-style14 {
+            width: 26px;
+        }
+        .auto-style15 {
+            text-align: right;
+        }
+        .auto-style16 {
+            height: 25px;
+        }
+        .auto-style17 {
+            text-align: left;
+            width: 465px;
+            height: 2px;
+        }
+        .auto-style18 {
+            text-align: left;
+            width: 26px;
+            height: 2px;
+        }
+        .auto-style20 {
+            text-align: left;
+            height: 2px;
+        }
+        .auto-style21 {
+            font-family: "Century Gothic";
+            color: #000;
+            width: 100%;
+            align-content: center;
+        }
+        .auto-style22 {
+            text-align: center;
+            width: 477px;
+            height: 2px;
+        }
+        .auto-style23 {
+            text-align: center;
+            width: 141px;
+        }
+        .auto-style24 {
+            text-align: center;
+            width: 116px;
+        }
+        .auto-style25 {
+            text-align: left;
+            height: 25px;
+        }
+        .auto-style26 {
+            text-align: center;
+            height: 23px;
+        }
+        </style>
+</head>
+<body>
+    <form method="post" action="./frmConsultaProyectos.aspx" id="form1">
+<input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="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" />
+
+<input type="hidden" name="__VIEWSTATEGENERATOR" id="__VIEWSTATEGENERATOR" value="A6BC9771" />
+<input type="hidden" name="__VIEWSTATEENCRYPTED" id="__VIEWSTATEENCRYPTED" value="" />
+<input type="hidden" name="__EVENTVALIDATION" id="__EVENTVALIDATION" value="pvfQKpF/T0gpKOYitMidoeHdB8brJz62jMwCMaAw8hEC7gR6fVeDr1iVMBFfEPCu3QGLfFL7Lxut5OU5HCBWPQ/fBQeBvJSDI94x0VVCHWAV9+wOlddqcafHQ4HEvXGUGTQuljdfK9u7oaGVLGuNZEn5xt1jP1scT4sH496sieDH6XZspnAJ01NfmusABUjXjuPgGrMPxWFog4ToK42GTNH+fQe2L7kqF+v3JPV9u9ywBMqiTnQ6dQW1IPKZa6DP" />
+    <div>
+        
+    <div class="tabla enmarcado">
+          
+      <table class="tabla">
+       <tr>
+         <td></td>
+       </tr>
+       <tr>
+         <td>
+             <br />
+             <span id="ContentPlaceHolder1_Label1">Búsqueda por Número de Expediente Legislativo:   </span>
+             <input name="ctl00$ContentPlaceHolder1$tbxBuscaLey" type="number" value="25600" id="ContentPlaceHolder1_tbxBuscaLey" title="Número de expediente" />
+             <br />
+             <br />
+             <span id="ContentPlaceHolder1_Label2">Búsqueda por Título de Expediente Legislativo:  </span>
+             <input name="ctl00$ContentPlaceHolder1$tbxBuscaDescripcion" type="text" id="ContentPlaceHolder1_tbxBuscaDescripcion" title="Descripción de título de expediente" onkeyup="this.value=this.value.toUpperCase()" />
+             <br />
+             <br />
+             <br />
+             <input type="submit" name="ctl00$ContentPlaceHolder1$btnBuscar" value="Buscar" id="ContentPlaceHolder1_btnBuscar" title="Buscar expediente" />
+             <input type="submit" name="ctl00$ContentPlaceHolder1$btnCancelar" value="Limpiar campos" id="ContentPlaceHolder1_btnCancelar" title="Limpiar campos de búsqueda" />
+           </td>
+       </tr>
+      </table>
+    <fieldset>
+        <legend class="titulo">Consulta de Expedientes Legislativos</legend>
+        
+        <span id="ContentPlaceHolder1_lblMensaje"><font color="#000000"></font></span>
+        <br />
+        <br />
+        <table class="tabla">
+            <tr>
+                <td>
+                    <div>
+	<table class="gridview" cellspacing="0" cellpadding="4" id="ContentPlaceHolder1_grvLey">
+		<tr bgcolor="#134F80">
+			<th scope="col"><font color="White"><b>&nbsp;</b></font></th><th scope="col"><font color="White"><b>Número de Expediente</b></font></th><th scope="col"><font color="White"><b>Título de Expediente</b></font></th>
+		</tr><tr bgcolor="#F3E2A9">
+			<td class="btn"><font color="#333333"><b><input type="image" class="btn" src="Resources/seleccionar.png" alt="Seleccionar" onclick="javascript:__doPostBack(&#39;ctl00$ContentPlaceHolder1$grvLey&#39;,&#39;Select$0&#39;);return false;" /></b></font></td><td><font color="#333333"><b>25600</b></font></td><td><font color="#333333"><b>LEY PARA EL FORTALECIMIENTO Y MODERNIZACI&#211;N DE LAS COMPETENCIAS DE LA JUNTA DE PROTECCI&#211;N SOCIAL Y REGULACI&#211;N DE LOS JUEGOS DE AZAR EN EL MARCO DE LA SEGURIDAD Y LA LUCHA CONTRA EL CRIMEN ORGANIZADO</b></font></td>
+		</tr>
+	</table>
+</div>
+                    
+                    
+                </td>
+                </tr>
+                <tr>
+                    <td class="auto-style25">
+                        </td>
+                </tr>
+                <tr>
+                    <td class="auto-style26" dir="ltr">
+                        <strong>Documento / Texto Base</strong></td>
+                </tr>
+                <tr>
+                    <td>
+                        <table class="auto-style4" align="center">
+                            <tr>
+                                <td class="auto-style17">
+                                    <dl>
+                                        <dd class="auto-style23"><strong class="auto-style21">Formato Editable</strong></dd>
+                                    </dl>
+                                </td>
+                                <td class="auto-style18">
+                                    <input type="submit" name="ctl00$ContentPlaceHolder1$btnDescargaTexto" value="Descargar" id="ContentPlaceHolder1_btnDescargaTexto" title="Descargar texto en formato editable" class="auto-style5" />
+                                </td>
+
+                                <td class="auto-style22">
+                                    <dl>
+                                        <dd class="auto-style24"><strong class="auto-style21">PDF Firmado</strong></dd>
+                                    </dl>
+                                </td>
+                                <td class="auto-style20">
+                                    <input type="submit" name="ctl00$ContentPlaceHolder1$btnDescargaPDF" value="Descargar" id="ContentPlaceHolder1_btnDescargaPDF" title="Descargar texto en formato PDF" class="auto-style5" />
+                                </td>
+
+                            </tr>
+                            <tr>
+                                <td class="auto-style7">
+                                    &nbsp;</td>
+                                <td class="auto-style14">
+                                    &nbsp;&nbsp;</td>
+                            </tr>
+                        </table>
+                    </td>
+                </tr>
+                <tr>
+                    <td class="auto-style2">
+                        <div class="auto-style1">
+                        </div>
+                        <div class="auto-style1">
+                        <div>
+	<table cellspacing="0" cellpadding="4" rules="rows" bordercolor="#CCCCCC" id="ContentPlaceHolder1_dvDetalleLey" bgcolor="White" height="50" width="100%">
+		<caption>
+			<b>Detalle del Expediente No. 25600</b>
+		</caption><tr bgcolor="#F7F6F3">
+			<td><font color="Black">Tipo de Expediente</font></td><td><font color="Black">PROCEDIMIENTO PROYECTO DE LEY ORDINARIO</font></td>
+		</tr><tr bgcolor="White">
+			<td><font color="#284775">Fecha de Inicio</font></td><td><font color="#284775"> 21-may.-2026</font></td>
+		</tr><tr bgcolor="#F7F6F3">
+			<td><font color="Black">Fecha de Publicaci&#243;n</font></td><td><font color="Black">&nbsp;</font></td>
+		</tr><tr bgcolor="White">
+			<td><font color="#284775">N&#250;mero de Gaceta</font></td><td><font color="#284775">&nbsp;</font></td>
+		</tr><tr bgcolor="#F7F6F3">
+			<td><font color="Black">N&#250;mero de Alcance</font></td><td><font color="Black">&nbsp;</font></td>
+		</tr><tr bgcolor="White">
+			<td><font color="#284775">N&#250;mero de Archivado</font></td><td><font color="#284775">&nbsp;</font></td>
+		</tr><tr bgcolor="#F7F6F3">
+			<td><font color="Black">Vencimiento Cuatrienal</font></td><td><font color="Black"> 21-may.-2030</font></td>
+		</tr><tr bgcolor="White">
+			<td><font color="#284775">Vencimiento Ordinario</font></td><td><font color="#284775">&nbsp;</font></td>
+		</tr><tr bgcolor="#F7F6F3">
+			<td><font color="Black">Fecha de Dispensa</font></td><td><font color="Black">&nbsp;</font></td>
+		</tr><tr bgcolor="White">
+			<td><font color="#284775">Descripci&#243;n de Dispensa</font></td><td><font color="#284775">&nbsp;</font></td>
+		</tr><tr bgcolor="#F7F6F3">
+			<td><font color="Black">N&#250;mero de Ley</font></td><td><font color="Black">&nbsp;</font></td>
+		</tr><tr bgcolor="White">
+			<td><font color="#284775">N&#250;mero de Acuerdo</font></td><td><font color="#284775">&nbsp;</font></td>
+		</tr>
+	</table>
+</div>
+                        </div>
+                        
+                        <br />
+                    </td>
+                </tr>
+            <tr>
+                <td>
+                    &nbsp;</td>
+            </tr>
+            <tr>
+                <td class="auto-style1">
+                    <div>
+	<table class="gridview" cellspacing="0" cellpadding="4" id="ContentPlaceHolder1_grvProponentes" bgcolor="White" width="100%">
+		<caption>
+			Proponentes
+		</caption><tr bgcolor="#134F80">
+			<th scope="col"><font color="White"><b>Secuencia de Firma</b></font></th><th scope="col"><font color="White"><b>Apellidos</b></font></th><th scope="col"><font color="White"><b>Nombre</b></font></th>
+		</tr><tr bgcolor="#F7F6F3">
+			<td><font color="#333333">1</font></td><td align="left"><font color="#333333">BRITTON GONZALEZ</font></td><td align="left"><font color="#333333">SADIE ESMERALDA</font></td>
+		</tr><tr bgcolor="White">
+			<td><font color="#284775">2</font></td><td align="left"><font color="#284775">ULATE ALVARADO</font></td><td align="left"><font color="#284775">KATTIA MARIA</font></td>
+		</tr><tr bgcolor="#F7F6F3">
+			<td><font color="#333333">3</font></td><td align="left"><font color="#333333">JIMENEZ CORDERO</font></td><td align="left"><font color="#333333">WILSON ALFREDO</font></td>
+		</tr><tr bgcolor="White">
+			<td><font color="#284775">4</font></td><td align="left"><font color="#284775">AVILA VARGAS</font></td><td align="left"><font color="#284775">GRETHEL MARIA</font></td>
+		</tr><tr bgcolor="#F7F6F3">
+			<td><font color="#333333">5</font></td><td align="left"><font color="#333333">GORDIENKO LOPEZ</font></td><td align="left"><font color="#333333">ABRIL</font></td>
+		</tr><tr bgcolor="White">
+			<td><font color="#284775">6</font></td><td align="left"><font color="#284775">CAMARENO CAMARENO</font></td><td align="left"><font color="#284775">MARIA ISABEL</font></td>
+		</tr>
+	</table>
+</div>
+                    
+                    </td>
+            </tr>
+            <tr>
+                <td>
+                     
+                    &nbsp;</td>
+            </tr>
+            <tr>
+                <td class="auto-style1">
+                     
+                    <div>
+	<table class="gridview" cellspacing="0" id="ContentPlaceHolder1_grvTramite" width="100%">
+		<caption>
+			Tramitación
+		</caption><tr bgcolor="#134F80">
+			<th scope="col"><font color="White"><b>&#211;rgano</b></font></th><th scope="col"><font color="White"><b>Fecha de Inicio</b></font></th><th scope="col"><font color="White"><b>Fecha de T&#233;rmino</b></font></th><th scope="col"><font color="White"><b>Tipo de Tr&#225;mite</b></font></th>
+		</tr><tr bgcolor="#F7F6F3">
+			<td align="left"><font color="#333333">PLENARIO</font></td><td><font color="#333333"> 21-may.-2026</font></td><td><font color="#333333"> 21-may.-2026</font></td><td align="left"><font color="#333333">PRESENTACI&#211;N DEL PROYECTO DE LEY</font></td>
+		</tr><tr bgcolor="White">
+			<td align="left"><font color="#284775">PARLAMENTARIOS</font></td><td><font color="#284775"> 21-may.-2026</font></td><td><font color="#284775"> 21-may.-2026</font></td><td align="left"><font color="#284775">RECEPCION DEL PROYECTO EN SERVICIOS PARLAMENTARIOS</font></td>
+		</tr><tr bgcolor="#F7F6F3">
+			<td align="left"><font color="#333333">PARLAMENTARIOS</font></td><td><font color="#333333"> 26-may.-2026</font></td><td><font color="#333333"> 26-may.-2026</font></td><td align="left"><font color="#333333">REMISI&#211;N DEL PROYECTO AL ARCHIVO PARA SU PUBLICACI&#211;N EN LA IMPRENTA NACIONA</font></td>
+		</tr><tr bgcolor="White">
+			<td align="left"><font color="#284775">ARCHIVO</font></td><td><font color="#284775"> 26-may.-2026</font></td><td><font color="#284775"> 26-may.-2026</font></td><td align="left"><font color="#284775">ENV&#205;O A IMPRENTA NACIONAL PARA SU PUBLICACI&#211;N</font></td>
+		</tr>
+	</table>
+</div>
+                    
+                </td>
+            </tr>
+            <tr>
+                <td>
+                     
+                    &nbsp;</td>
+            </tr>
+            <tr>
+                <td class="auto-style1">
+                    <div>
+
+</div>
+                    
+                </td>
+            </tr>
+            <tr>
+                <td>
+                     
+                </td>
+            </tr>
+            <tr>
+                <td class="auto-style1">
+                    <div>
+
+</div>
+                    
+                </td>
+            </tr>
+            <tr>
+                <td>
+                     
+                </td>
+            </tr>
+            <tr>
+                <td class="auto-style1">
+                    <div>
+
+</div>
+                    
+                </td>
+            </tr>
+            <tr>
+                <td>
+                     
+                </td>
+            </tr>
+            <tr>
+                <td>
+                     
+                    
+                     
+                </td>
+            </tr>
+            <tr>
+                <td>
+                     
+                    
+                    
+                     <table class="auto-style1" align="center">
+                            <tr>
+                                <td class="auto-style13">
+
+                                    
+                                </td>
+                                <td class="auto-style9">
+
+                                    <strong>
+
+                                    
+
+                                    </strong>
+
+                                </td>
+                                <td class="auto-style14"></td>
+                                <td class="auto-style12">
+                                    
+                                </td>
+                                <td>
+                                    <strong>
+                                    
+                                    </strong>
+                                </td>
+                            </tr>
+                        </table>
+                </td>
+            </tr>
+            <tr>
+                <td class="auto-style16">
+                     
+                                    <span id="ContentPlaceHolder1_lblResulMocOriginal"><font color="#CC0000"></font></span>
+
+                </td>
+            </tr>
+            <tr>
+                <td>
+                     
+                                    &nbsp;</td>
+            </tr>
+            <tr>
+                <td>
+                     
+                    
+                     
+                </td>
+            </tr>
+            <tr>
+                <td>
+                     
+                    <div>
+
+</div>
+                    
+                    
+                     
+                    <span id="ContentPlaceHolder1_lblSelectConsultaTexto"></span>
+                     
+                </td>
+            </tr>
+            <tr>
+                <td>
+                    
+                    <table align="center" width="100%">
+                        <tr>
+                            <td class="auto-style1">&nbsp;<div>
+
+</div>
+                                
+                            </td>
+                            <td width="5%">
+                                
+                            </td>
+                            <td class="auto-style8">&nbsp;<div class="auto-style15">
+                                
+                                </div>
+                                
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="auto-style8">&nbsp;</td>
+                            <td class="auto-style8">&nbsp;</td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+            <tr>
+                <td>
+                     
+                    <div>
+
+</div>
+                    
+                     
+                    <table align="center">
+                        <tr>
+                            <td class="auto-style8">
+                                
+                                <span id="ContentPlaceHolder1_lblResultConvocatoria"></span>
+                            </td>
+                        </tr>
+                    </table>
+                     
+                </td>
+            </tr>
+            <tr>
+                <td>
+                     
+                </td>
+            </tr>
+            <tr>
+                <td>
+                     
+                    
+                    
+                     
+                    <table align="center">
+                        <tr>
+                            <td class="auto-style8">
+                                <span id="ContentPlaceHolder1_lblResultOtroDoc"></span>
+                            </td>
+                        </tr>
+                    </table>
+                     
+                </td>
+            </tr>
+            <tr>
+                <td>
+                     
+                </td>
+            </tr>
+            <tr>
+                <td>
+                     
+                    <div>
+
+</div>
+                    
+                     
+                    <table align="center">
+                        <tr>
+                            <td class="auto-style8">
+                                <span id="ContentPlaceHolder1_lblResultAuto"></span>
+                            </td>
+                        </tr>
+                    </table>
+                     
+                </td>
+            </tr>
+            <tr>
+                <td>
+                     
+                </td>
+            </tr>
+            <tr>
+                <td>
+                     
+                </td>
+            </tr>
+            </table>
+        </fieldset>
+        <script type="text/JavaScript">
+            function msAlert()
+            {
+                alert('No existe texto asociado');
+            }
+            
+        </script>
+    </div>
+
+    </div>
+    </form>
+    <script type="text/javascript">
+        $(document).ready(function () {
+
+            $(".identificador").hide();
+
+        });
+
+    </script>
+</body>
+</html>

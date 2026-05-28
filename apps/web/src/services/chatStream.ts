@@ -177,11 +177,34 @@ export async function streamChat(opts: StreamChatOptions): Promise<void> {
         const parsed: Chunk = JSON.parse(payload);
         opts.onChunk(parsed);
         if (parsed.type === 'done') return;
-      } catch {
-        // ignore malformed
+      } catch (err) {
+        console.warn('[chatStream] malformed chunk:', payload, err);
       }
     }
   }
+
+  // Flush any bytes stuck in the TextDecoder and process tail events.
+  const tail = decoder.decode(undefined, { stream: false });
+  if (tail) buffer += tail;
+  if (buffer.trim()) {
+    const events = buffer.split('\n\n');
+    for (const evt of events) {
+      const line = evt.trim();
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (!payload) continue;
+      try {
+        const parsed: Chunk = JSON.parse(payload);
+        opts.onChunk(parsed);
+        if (parsed.type === 'done') return;
+      } catch (err) {
+        console.warn('[chatStream] malformed tail chunk:', payload, err);
+      }
+    }
+  }
+
+  // Safety: always signal completion so the caller never stays stuck.
+  opts.onChunk({ type: 'done' });
 }
 
 // ─── Workspace turn ───────────────────────────────────────────────────────────
@@ -312,7 +335,9 @@ export async function streamWorkspaceTurn(args: StreamWorkspaceTurnArgs): Promis
             intent_confidence: meta.intent_confidence,
             target_node_id: meta.target_node_id,
           });
-        } catch { /* ignore malformed */ }
+        } catch (err) {
+          console.warn('[chatStream] malformed meta chunk:', payload, err);
+        }
         continue;
       }
 
@@ -343,9 +368,71 @@ export async function streamWorkspaceTurn(args: StreamWorkspaceTurnArgs): Promis
           args.onChunk(parsed as ChatChunk);
           if (parsed.type === 'done') return;
         }
-      } catch {
-        // ignore malformed
+      } catch (err) {
+        console.warn('[chatStream] malformed workspace chunk:', payload, err);
       }
     }
   }
+
+  // Flush any bytes stuck in the TextDecoder and process tail events.
+  const tail = decoder.decode(undefined, { stream: false });
+  if (tail) buffer += tail;
+  if (buffer.trim()) {
+    const events = buffer.split('\n\n');
+    for (const evt of events) {
+      const lines = evt.trim().split('\n');
+      const eventLine = lines.find((l) => l.startsWith('event:'));
+      const dataLine = lines.find((l) => l.startsWith('data:'));
+      const eventName = eventLine ? eventLine.slice(6).trim() : 'message';
+      const payload = dataLine ? dataLine.slice(5).trim() : '';
+      if (!payload) continue;
+
+      if (eventName === 'meta' && !metaFired) {
+        metaFired = true;
+        try {
+          const meta = JSON.parse(payload) as {
+            intent?: string;
+            intent_confidence?: number;
+            target_node_id?: string | null;
+          };
+          args.onIntent?.({
+            intent: meta.intent ?? 'chat',
+            intent_confidence: meta.intent_confidence,
+            target_node_id: meta.target_node_id,
+          });
+        } catch (err) {
+          console.warn('[chatStream] malformed meta tail chunk:', payload, err);
+        }
+        continue;
+      }
+
+      if (payload === '[DONE]') return;
+
+      try {
+        const parsed = JSON.parse(payload) as {
+          choices?: Array<{ delta?: { content?: string } }>;
+          delta?: { text?: string };
+          type?: string;
+          payload?: unknown;
+        };
+        const tokenText =
+          parsed?.choices?.[0]?.delta?.content ??
+          parsed?.delta?.text ??
+          '';
+        if (tokenText) {
+          args.onChunk({ type: 'token', payload: tokenText });
+          continue;
+        }
+        if (parsed.type) {
+          args.onChunk(parsed as ChatChunk);
+          if (parsed.type === 'done') return;
+        }
+      } catch (err) {
+        console.warn('[chatStream] malformed workspace tail chunk:', payload, err);
+      }
+    }
+  }
+
+  // Safety: always signal completion so the caller never stays stuck.
+  args.onChunk({ type: 'done' });
 }

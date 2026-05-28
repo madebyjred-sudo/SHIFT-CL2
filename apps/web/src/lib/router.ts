@@ -127,7 +127,9 @@ export type AdminSection =
   | 'auditoria'
   | 'feedback'
   | 'tokens'
-  | 'config';
+  | 'config'
+  | 'clientes'
+  | 'whatsapp-alerts';
 
 const ADMIN_SECTIONS: ReadonlyArray<AdminSection> = [
   'overview',
@@ -143,6 +145,8 @@ const ADMIN_SECTIONS: ReadonlyArray<AdminSection> = [
   'feedback',
   'tokens',
   'config',
+  'clientes',
+  'whatsapp-alerts',
 ];
 
 /**
