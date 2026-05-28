@@ -16,6 +16,7 @@ import {
   loadExpedienteContext,
   buildExpedienteSystemPrompt,
 } from '../services/expedienteContextLoader.js';
+import { normalizeExpedienteNumero } from '../services/silClient.js';
 import {
   ensureConversation,
   insertUserMessage,
@@ -191,10 +192,7 @@ chatRouter.post('/stream', async (req, res) => {
   // client passes scope.expediente_numero. Loads enrichment context + enables
   // scoped search_sil_corpus over this expediente's documents.
   const scopeExpedienteNumeroRaw = (body.scope as { expediente_numero?: unknown } | undefined)?.expediente_numero;
-  const scopeExpedienteNumero =
-    typeof scopeExpedienteNumeroRaw === 'string' && /^\d{1,2}\.\d{3}$/.test(scopeExpedienteNumeroRaw)
-      ? scopeExpedienteNumeroRaw
-      : null;
+  const scopeExpedienteNumero = normalizeExpedienteNumero(scopeExpedienteNumeroRaw);
 
   let scopeSystemPrompt: string | undefined;
   if (scopeLegacySessionId !== null) {

@@ -16,6 +16,7 @@ import {
   renderReglamentoForLlm,
   renderRalComentadoForLlm,
   renderConstitucionLoalForLlm,
+  normalizeExpedienteNumero,
 } from './silClient.js';
 import {
   evaluateRalAplicacion,
@@ -1080,7 +1081,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   }
   const scopeId = args.scope_legacy_session_id ?? null;
   const scopeUuid = args.scope_session_uuid ?? null;
-  const scopeExpedienteNumero = args.scope_expediente_numero ?? null;
+  const scopeExpedienteNumero = normalizeExpedienteNumero(args.scope_expediente_numero) ?? args.scope_expediente_numero ?? null;
   // search_session_transcript se registra SOLO cuando NO tenemos el
   // transcript completo en el system prompt. Si scope_system_prompt
   // contiene "=== TRANSCRIPCIÓN COMPLETA ===" (sessions UUID con
@@ -2160,7 +2161,11 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
 
       let hits: Awaited<ReturnType<typeof searchSilCorpus>> = [];
       try {
-        hits = await searchSilCorpus(parsedArgs);
+        const normalizedArgs = {
+          ...parsedArgs,
+          expediente_numero: normalizeExpedienteNumero(parsedArgs.expediente_numero) ?? parsedArgs.expediente_numero,
+        };
+        hits = await searchSilCorpus(normalizedArgs);
       } catch (err) {
         messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: (err as Error).message }) });
         continue;

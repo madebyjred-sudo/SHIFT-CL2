@@ -368,6 +368,32 @@ export async function getExpedienteById(numero: number): Promise<SilExpedienteFu
  * applied yet (function-not-found error 42883). Final fallback to []
  * when the original match_chunks (v1) is the only one available.
  */
+/**
+ * Normaliza un número de expediente al formato canónico SIL (NN.NNN).
+ * Acepta: "24009", "24.009", "Exp. 24,009", "24-009", etc.
+ * Devuelve: "24.009" (5 dígitos → 2+punto+3) o el string limpio si no aplica.
+ */
+export function normalizeExpedienteNumero(input: string | number | undefined): string | null {
+  if (input === undefined || input === null) return null;
+  const raw = String(input).trim();
+  if (!raw) return null;
+  // Extraer solo dígitos
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length === 5) {
+    return `${digits.slice(0, 2)}.${digits.slice(2)}`;
+  }
+  if (digits.length === 6) {
+    return `${digits.slice(0, 3)}.${digits.slice(3)}`;
+  }
+  if (digits.length === 4) {
+    return `${digits[0]}.${digits.slice(1)}`;
+  }
+  // Si ya tiene punto y es válido, devolverlo limpio
+  const withDot = raw.replace(/[^\d.]/g, '');
+  if (/^\d{1,3}\.\d{3}$/.test(withDot)) return withDot;
+  return digits.length > 0 ? digits : null;
+}
+
 export async function searchSilCorpus(args: {
   query: string;
   k?: number;
@@ -385,7 +411,8 @@ export async function searchSilCorpus(args: {
       withTimeout(
         async (signal) => {
           // Path A: hybrid (0009 applied).
-          const filterPrefix = args.expediente_numero ? `Exp. ${args.expediente_numero.replace(/[^\\d.]/g, '')}` : null;
+          const normalizedNum = normalizeExpedienteNumero(args.expediente_numero);
+          const filterPrefix = normalizedNum ? `Exp. ${normalizedNum}` : null;
           const { data, error } = await supa()
             .rpc('match_chunks_hybrid', {
               query_embedding: queryEmbedding,
