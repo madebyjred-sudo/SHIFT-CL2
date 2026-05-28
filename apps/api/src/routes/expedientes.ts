@@ -116,6 +116,8 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
 
     const [
       tramiteRes, proponentesRes, consultasRes, leyRes, documentosRes,
+      // 2026-05-27: sil_documentos (bulk download pipeline)
+      bulkDocsRes,
       // Sprint v3 — tablas dedicadas (0037 + 0038)
       fechasRes, audienciasRes, actasRes, salaRes, ordenDiaRes,
       // Sprint 3 Track R — Lista de despacho
@@ -150,6 +152,15 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
         .select('*')
         .eq('expediente_id', numero)
         .order('tipo', { ascending: true }),
+
+      // 2026-05-27: also fetch from sil_documentos (bulk download pipeline).
+      // The detail page previously only showed sil_expediente_documentos
+      // (enrichment scraper), missing the 35k+ docs downloaded in bulk.
+      // We merge both tables below, deduplicating by tipo.
+      safeQuery(supClientRaw
+        .from('sil_documentos')
+        .select('id, expediente_id, tipo, titulo, source_url, gcs_path, status, text_chars, doc_class')
+        .eq('expediente_id', general.id)),
 
       // ── Sprint v3 dedicated tables (graceful degradation si 0037+0038 no aplicadas) ──
       safeQuery(supClientRaw
@@ -357,6 +368,37 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
     const novedadesFinales = novedadesDetectadas.length > 0
       ? novedadesDetectadas
       : (meta.novedades_detectadas ?? []);
+    // ── 2026-05-27 Merge documents from both tables ───────────────────
+    // sil_expediente_documentos = enrichment scraper (has tipo, titulo, url)
+    // sil_documentos = bulk download pipeline (has tipo, titulo, gcs_path, source_url)
+    // Priority: enrichment docs first, then add bulk docs that aren't duplicates.
+    const enrichDocs = documentosRes.data ?? [];
+    const bulkDocs = (bulkDocsRes ?? []) as Array<Record<string, unknown>>;
+
+    // Build a set of existing (tipo+titulo) pairs to detect duplicates
+    const enrichKeys = new Set(
+      enrichDocs.map((d: any) => `${d.tipo}::${(d.titulo ?? '').toLowerCase().slice(0, 40)}`),
+    );
+
+    // Convert bulk docs to the same shape as sil_expediente_documentos
+    const extraDocs = bulkDocs
+      .filter((bd) => {
+        const key = `${bd.tipo}::${((bd.titulo as string) ?? '').toLowerCase().slice(0, 40)}`;
+        return !enrichKeys.has(key);
+      })
+      .map((bd) => ({
+        id: bd.id,
+        expediente_id: numero,
+        tipo: bd.tipo ?? 'texto_base',
+        titulo: bd.titulo ?? null,
+        fecha: null,
+        url: (bd.source_url as string) ?? null,
+        storage_path: (bd.gcs_path as string) ?? null,
+        embed_status: bd.status === 'embedded' ? 'done' : (bd.status ?? 'pending'),
+        raw: { source: 'sil_documentos_bulk' },
+      }));
+
+    const mergedDocs = [...enrichDocs, ...extraDocs];
 
     res.json({
       ok: true,
@@ -366,7 +408,7 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
         proponentes: proponentesRes.data ?? [],
         consultas: consultasRes.data ?? [],
         ley: leyRes.data ?? null,
-        documentos: documentosRes.data ?? [],
+        documentos: mergedDocs,
         // Sprint v3 — keys top-level, fuente: tablas dedicadas con fallback metadata
         fechas_extraidas: fechasExtraidas,
         audiencias,

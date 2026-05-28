@@ -42,7 +42,9 @@ interface Props {
 }
 
 function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString('es-CR', {
+  // Parse as noon UTC to prevent timezone shift — Costa Rica is UTC-6,
+  // so "2026-07-29" parsed as midnight UTC would display as July 28.
+  return new Date(`${iso.slice(0, 10)}T12:00:00`).toLocaleDateString('es-CR', {
     day: '2-digit', month: 'long', year: 'numeric',
   });
 }
