@@ -120,7 +120,7 @@ const SEARCH_TRANSCRIPTS_TOOL = {
   function: {
     name: 'search_transcripts',
     description:
-      'Deep Insight: recupera información legislativa clasificando la pregunta del usuario en una dimensión (impacto normativo, contexto de debate, estado de expediente, riesgo de obstrucción, red de proponentes, o síntesis general) y buscando SOLO en los dominios relevantes. Retorna 5-8 chunks curados y etiquetados por fuente. Usá esta función cuando deep_insight esté activo y la pregunta requiera análisis agregado. NO la uses para consultas puntuales de un solo dominio (ej. "qué pasó en la sesión del 21 de mayo" → usá get_session_by_date; "qué dice el Art. 80" → usá search_reglamento).',
+      'Busca en transcripciones legislativas de la Asamblea de Costa Rica. Retorna extractos numerados [1], [2], ... con metadata (fecha, comisión, video URL). Llamá esta función SIEMPRE antes de responder consultas sobre actas, sesiones, votaciones, mociones o cualquier hecho legislativo. Después de llamarla, citá [N] inline después de cada afirmación. NO inferas ni combines info entre extractos distintos: si un extracto no contiene la respuesta literal, decí "no encontré". IMPORTANTE: nunca le hables al usuario de "chunks" — usá "transcripciones", "fuentes", "registros" o "lo documentado".',
     parameters: {
       type: 'object',
       properties: {
@@ -2208,19 +2208,17 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
 
       let hits: Awaited<ReturnType<typeof searchSilCorpus>> = [];
       try {
-        // FORCE expediente_numero when scoped: if the model omitted it or passed
-        // a different number, override with the scoped expediente. This prevents
-        // the model from doing a global corpus search when we already know
-        // exactly which expediente the user is asking about.
-        const effectiveExpedienteNumero = scopeExpedienteNumero
-          ? normalizeExpedienteNumero(scopeExpedienteNumero)
-          : normalizeExpedienteNumero(parsedArgs.expediente_numero) ?? parsedArgs.expediente_numero;
-
-        const normalizedArgs = {
-          ...parsedArgs,
+        // DEFENSIVE scope guard: only force the expediente filter when the model
+        // OMITTED expediente_numero. If the model explicitly passed a different
+        // number (e.g. user asked "compare with 24.018" while scoped to 25.590),
+        // respect the model's choice — don't block cross-expediente queries.
+        const effectiveExpedienteNumero = normalizeExpedienteNumero(parsedArgs.expediente_numero)
+          ?? (scopeExpedienteNumero ? normalizeExpedienteNumero(scopeExpedienteNumero) : undefined);
+        hits = await searchSilCorpus({
+          query: parsedArgs.query,
+          k: parsedArgs.k,
           expediente_numero: effectiveExpedienteNumero ?? undefined,
-        };
-        hits = await searchSilCorpus(normalizedArgs);
+        });
       } catch (err) {
         messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: (err as Error).message }) });
         continue;
@@ -2360,9 +2358,14 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
         continue;
       }
 
+      // Scopar expediente_numero: si el modelo no lo pasó pero hay scope activo,
+      // forzarlo para que la búsqueda respete el contexto del chat scopado.
+      const effectiveExpedienteNumero = normalizeExpedienteNumero(parsedArgs.expediente_numero)
+        ?? (scopeExpedienteNumero ? normalizeExpedienteNumero(scopeExpedienteNumero) : undefined);
+
       const result = await insightRetrieve({
         query: parsedArgs.query,
-        expediente_numero: parsedArgs.expediente_numero,
+        expediente_numero: effectiveExpedienteNumero ?? undefined,
         k_per_bucket: parsedArgs.k_per_bucket,
       });
 

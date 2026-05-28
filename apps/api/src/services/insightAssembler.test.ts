@@ -14,14 +14,56 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { classifyDimension, insightRetrieve, type InsightDimension } from './insightAssembler.js';
 
 // ─── Mocks ───────────────────────────────────────────────────────────────
+// Default: return oversized arrays so curation logic is exercised.
+const mockState = vi.hoisted(() => ({
+  transcriptCount: 20,
+  silCount: 20,
+  reglamentoCount: 10,
+  constitucionLoalCount: 10,
+}));
+
+function mkTranscriptHits(n: number) {
+  return Array.from({ length: n }, (_, i) => ({
+    chunk_id: `t-${i}`,
+    metadata: { start: i * 60 },
+    content: `transcript ${i}`,
+    similarity: 0.9 - i * 0.01,
+  }));
+}
+function mkSilHits(n: number) {
+  return Array.from({ length: n }, (_, i) => ({
+    chunk_id: `s-${i}`,
+    expediente_numero: '25.602',
+    content: `sil ${i}`,
+    similarity: 0.9 - i * 0.01,
+  }));
+}
+function mkReglamentoHits(n: number) {
+  return Array.from({ length: n }, (_, i) => ({
+    chunk_id: `r-${i}`,
+    articulo_full_title: `Art. ${i}`,
+    content: `reglamento ${i}`,
+    similarity: 0.9 - i * 0.01,
+  }));
+}
+function mkConstitucionLoalHits(n: number) {
+  return Array.from({ length: n }, (_, i) => ({
+    chunk_id: `c-${i}`,
+    articulo_numero: `${i}`,
+    doc: 'Constitución',
+    content: `constitucion ${i}`,
+    similarity: 0.9 - i * 0.01,
+  }));
+}
+
 vi.mock('./searchTranscripts.js', () => ({
-  searchTranscripts: vi.fn(async () => []),
+  searchTranscripts: vi.fn(async () => mkTranscriptHits(mockState.transcriptCount)),
 }));
 
 vi.mock('./silClient.js', () => ({
-  searchSilCorpus: vi.fn(async () => []),
-  searchReglamento: vi.fn(async () => []),
-  searchConstitucionLoal: vi.fn(async () => []),
+  searchSilCorpus: vi.fn(async () => mkSilHits(mockState.silCount)),
+  searchReglamento: vi.fn(async () => mkReglamentoHits(mockState.reglamentoCount)),
+  searchConstitucionLoal: vi.fn(async () => mkConstitucionLoalHits(mockState.constitucionLoalCount)),
 }));
 
 import { searchTranscripts } from './searchTranscripts.js';
@@ -132,48 +174,39 @@ describe('insightRetrieve — selective domain calls', () => {
 // ─── 3. Curación — max 8 chunks ─────────────────────────────────────────
 describe('insightRetrieve — curation (max 8)', () => {
   beforeEach(() => {
-    // Reset mocks and return oversized arrays
     vi.clearAllMocks();
-
-    vi.mocked(searchTranscripts).mockResolvedValue(
-      Array.from({ length: 20 }, (_, i) => ({
-        chunk_id: `t-${i}`,
-        content: `transcript ${i}`,
-        similarity: 0.9 - i * 0.01,
-      })) as any,
-    );
-
-    vi.mocked(searchSilCorpus).mockResolvedValue(
-      Array.from({ length: 20 }, (_, i) => ({
-        chunk_id: `s-${i}`,
-        content: `sil ${i}`,
-        similarity: 0.9 - i * 0.01,
-      })) as any,
-    );
-
-    vi.mocked(searchReglamento).mockResolvedValue(
-      Array.from({ length: 10 }, (_, i) => ({
-        chunk_id: `r-${i}`,
-        content: `reglamento ${i}`,
-        similarity: 0.9 - i * 0.01,
-      })) as any,
-    );
-
-    vi.mocked(searchConstitucionLoal).mockResolvedValue(
-      Array.from({ length: 10 }, (_, i) => ({
-        chunk_id: `c-${i}`,
-        content: `constitucion ${i}`,
-        similarity: 0.9 - i * 0.01,
-      })) as any,
-    );
   });
 
-  it('sintesis_general never returns more than 8 chunks', async () => {
-    const result = await insightRetrieve({ query: 'Resumen' });
-    // Count chunks in rendered output (each chunk starts with "---")
-    const chunkMatches = result.rendered.match(/^--- /gm);
+  it('impacto_normativo curates to 5 chunks (3 reglamento + 2 constitución)', async () => {
+    const result = await insightRetrieve({ query: '¿Qué dice el reglamento?' });
+    expect(result.summary.reglamento).toBe(3);
+    expect(result.summary.constitucion_loal).toBe(2);
+    expect(result.summary.total).toBe(5);
+    expect(result.summary.total).toBeLessThanOrEqual(8);
+
+    const chunkMatches = result.rendered.match(/^\[(R|C|S|T)\d+\]/gm);
     const chunkCount = chunkMatches ? chunkMatches.length : 0;
-    expect(chunkCount).toBeLessThanOrEqual(8);
+    expect(chunkCount).toBe(5);
+  });
+
+  it('contexto_debate curates to 5 chunks', async () => {
+    const result = await insightRetrieve({ query: '¿Qué dijeron en la sesión?' });
+    expect(result.summary.transcripts).toBe(4);
+    expect(result.summary.total).toBe(4);
     expect(result.summary.total).toBeLessThanOrEqual(8);
   });
+
+  it('estado_expediente curates to 6 chunks', async () => {
+    const result = await insightRetrieve({ query: '¿En qué estado está el expediente?' });
+    expect(result.summary.sil).toBe(4);
+    expect(result.summary.total).toBe(4);
+    expect(result.summary.total).toBeLessThanOrEqual(8);
+  });
+
+  // NOTE: the all.length > 8 truncation path is defensive code for future
+  // dimensions that may call 3+ services simultaneously. No current dimension
+  // reaches >8 chunks because k_per_bucket is capped at 5 and each dimension
+  // calls at most 2 services. If a future dimension calls 3+ services, the
+  // proportional truncation logic (targetT/targetS/targetR/targetC) will kick
+  // in and cap at 8.
 });

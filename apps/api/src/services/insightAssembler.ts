@@ -176,10 +176,10 @@ export async function insightRetrieve(args: {
 
   // ─── Curar: limitar a 8 chunks totales ────────────────────────────────
   const maxTotal = 8;
-  const t = transcripts.slice(0, 4);
-  const s = sil.slice(0, 4);
-  const r = reglamento.slice(0, 3);
-  const c = constitucionLoal.slice(0, 2);
+  let t = transcripts.slice(0, 4);
+  let s = sil.slice(0, 4);
+  let r = reglamento.slice(0, 3);
+  let c = constitucionLoal.slice(0, 2);
 
   // Si hay más de 8, recortar proporcionalmente
   let all = [...t, ...s, ...r, ...c];
@@ -198,16 +198,17 @@ export async function insightRetrieve(args: {
     if (curated.length > maxTotal) {
       curated = curated.slice(0, maxTotal);
     }
-    // Re-asignar a las variables originales según tipo
-    transcripts = curated.filter((h) => 'metadata' in h) as TranscriptHit[];
-    sil = curated.filter((h) => 'expediente_numero' in h) as SilChunkHit[];
-    reglamento = curated.filter((h) => 'articulo_full_title' in h) as ReglamentoHit[];
-    constitucionLoal = curated.filter(
+    // Re-asignar a las variables según tipo
+    t = curated.filter((h) => 'metadata' in h) as TranscriptHit[];
+    s = curated.filter((h) => 'expediente_numero' in h) as SilChunkHit[];
+    r = curated.filter((h) => 'articulo_full_title' in h) as ReglamentoHit[];
+    c = curated.filter(
       (h) => 'articulo_numero' in h && !('articulo_full_title' in h),
     ) as ConstitucionLoalHit[];
+    all = curated; // post-truncación: summary refleja chunks reales enviados
   }
 
-  const rendered = renderForLlm(dimension, transcripts, sil, reglamento, constitucionLoal);
+  const rendered = renderForLlm(dimension, t, s, r, c);
 
   return {
     dimension,
