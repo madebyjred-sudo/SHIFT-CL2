@@ -2,7 +2,7 @@ import { Router } from 'express';
 import type { CerebroRequest, CerebroStreamChunk } from '@shift-cl2/shared-types';
 import { openRouterStream } from '../services/openRouterClient.js';
 import { getAgent } from '../services/agentLoader.js';
-import { getUserFromRequest, getUserIdFromRequest } from '../services/auth.js';
+import { getUserFromRequest, getUserIdFromRequest, loadUserAccess } from '../services/auth.js';
 import { requireQuota, logAiCall } from '../services/aiQuota.js';
 import { ResilienceError } from '../services/resilience.js';
 import { estimateConfidence } from '../services/confidence.js';
@@ -12,6 +12,10 @@ import {
   buildSessionSystemPrompt,
   buildSessionSystemPromptByUuid,
 } from '../services/sessionContextLoader.js';
+import {
+  loadExpedienteContext,
+  buildExpedienteSystemPrompt,
+} from '../services/expedienteContextLoader.js';
 import {
   ensureConversation,
   insertUserMessage,
@@ -89,6 +93,18 @@ chatRouter.post('/stream', async (req, res) => {
   if (!userId) {
     res.status(401).json({ ok: false, error: 'auth_required', message: 'Iniciá sesión para chatear con Lexa.' });
     return;
+  }
+  // Wave 4 / Ronald F1 (2026-05-26): cargar el role del user. Best-effort —
+  // si falla la lectura, dejamos role=null (sin restricciones) en vez de
+  // bloquear al user. role='cliente' es el único que filtra tools editoriales.
+  let userRole: 'lector' | 'editor' | 'operador' | 'admin' | 'cliente' | null = null;
+  let userClienteId: string | null = null;
+  try {
+    const access = await loadUserAccess(userId);
+    userRole = (access?.role as typeof userRole) ?? null;
+    userClienteId = access?.cliente_id ?? null;
+  } catch {
+    // Tabla no disponible / transient — degradar a sin role (acceso completo).
   }
   const quotaCheck = await requireQuota(userId, 'chat.stream', res);
   if (quotaCheck === 'denied') {
@@ -171,6 +187,15 @@ chatRouter.post('/stream', async (req, res) => {
       ? scopeWorkspaceIdRaw
       : null;
 
+  // Expediente scope: when the user is chatting from /expediente/:numero, the
+  // client passes scope.expediente_numero. Loads enrichment context + enables
+  // scoped search_sil_corpus over this expediente's documents.
+  const scopeExpedienteNumeroRaw = (body.scope as { expediente_numero?: unknown } | undefined)?.expediente_numero;
+  const scopeExpedienteNumero =
+    typeof scopeExpedienteNumeroRaw === 'string' && /^\d{1,2}\.\d{3}$/.test(scopeExpedienteNumeroRaw)
+      ? scopeExpedienteNumeroRaw
+      : null;
+
   let scopeSystemPrompt: string | undefined;
   if (scopeLegacySessionId !== null) {
     try {
@@ -198,6 +223,81 @@ chatRouter.post('/stream', async (req, res) => {
       req.log.error('scope_uuid_load_failed', {
         error: (err as Error).message,
         uuid: scopeSessionUuid,
+      });
+    }
+  } else if (scopeExpedienteNumero !== null) {
+    try {
+      const ctx = await loadExpedienteContext(scopeExpedienteNumero);
+      if (ctx) {
+        scopeSystemPrompt = buildExpedienteSystemPrompt(ctx);
+      } else {
+        req.log.warn('scope_expediente_not_found', { numero: scopeExpedienteNumero });
+      }
+    } catch (err) {
+      req.log.error('scope_expediente_load_failed', {
+        error: (err as Error).message,
+        numero: scopeExpedienteNumero,
+      });
+    }
+  }
+
+  // 2026-05-26 Ronald F2: si el user está asociado a un cliente
+  // (user_access.cliente_id), inyectar el context_prompt + keywords
+  // como prefijo del system. Esto le da a Lexa/Atlas el contexto
+  // institucional (prioridades de FEDEFARMA, ICT, etc.) sin que el
+  // user tenga que repetirlo cada turno.
+  //
+  // Mecanismo: ensamblamos un bloque CLIENTE_ASOCIADO que se concatena
+  // al scopeSystemPrompt (si lo hay) o se usa solo. Best-effort: si la
+  // lectura del cliente falla, el chat sigue corriendo sin contexto.
+  if (userClienteId) {
+    try {
+      const { createClient } = await import('@supabase/supabase-js');
+      const supa = createClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.SUPABASE_SERVICE_ROLE_KEY!,
+        { auth: { persistSession: false } },
+      );
+      const { data: cli } = await supa
+        .from('cl2_clients')
+        .select('label, sector, context_prompt, context_keywords')
+        .eq('id', userClienteId)
+        .maybeSingle();
+      if (cli) {
+        const c = cli as {
+          label: string;
+          sector: string | null;
+          context_prompt: string | null;
+          context_keywords: string[] | null;
+        };
+        const parts: string[] = [];
+        parts.push(`[CONTEXTO DEL CLIENTE ASOCIADO — usar para priorizar y enmarcar tus respuestas]`);
+        parts.push(`Cliente: ${c.label}${c.sector ? ` (${c.sector})` : ''}`);
+        if (c.context_prompt && c.context_prompt.trim().length > 0) {
+          parts.push('');
+          parts.push(c.context_prompt.trim());
+        }
+        if (c.context_keywords && c.context_keywords.length > 0) {
+          parts.push('');
+          parts.push(`Temas prioritarios (matcher de alertas): ${c.context_keywords.join(', ')}`);
+        }
+        parts.push('');
+        parts.push(`Cuando el usuario haga preguntas, evaluá implicaciones desde la óptica de ${c.label} cuando aplique. NO inventes posiciones que no estén en este bloque.`);
+        const clienteBlock = parts.join('\n');
+        scopeSystemPrompt = scopeSystemPrompt
+          ? `${clienteBlock}\n\n---\n\n${scopeSystemPrompt}`
+          : clienteBlock;
+        req.log.info('cliente_context_injected', {
+          cliente_id: userClienteId,
+          cliente_label: c.label,
+          has_prompt: !!c.context_prompt,
+          keywords_count: c.context_keywords?.length ?? 0,
+        });
+      }
+    } catch (err) {
+      req.log.warn('cliente_context_load_failed', {
+        cliente_id: userClienteId,
+        error: (err as Error).message,
       });
     }
   }
@@ -269,12 +369,14 @@ chatRouter.post('/stream', async (req, res) => {
       scope_legacy_session_id: scopeLegacySessionId,
       scope_session_uuid: scopeSessionUuid,
       scope_workspace_id: scopeWorkspaceId,
+      scope_expediente_numero: scopeExpedienteNumero,
       // DEBUG: log de scope propagation — quitar tras confirmar el flow
       ...((): Record<string, never> => {
         req.log.info('chat_scope_propagated', {
           scope_legacy_session_id: scopeLegacySessionId,
           scope_session_uuid: scopeSessionUuid,
           scope_workspace_id: scopeWorkspaceId,
+          scope_expediente_numero: scopeExpedienteNumero,
           has_scope_system_prompt: scopeSystemPrompt !== undefined,
         });
         return {};
@@ -284,6 +386,10 @@ chatRouter.post('/stream', async (req, res) => {
       // realms ("cl2" realm here) — openRouterStream uses it to fetch
       // /memories before the LLM call and inject as a system block.
       user_email: userEmail,
+      // Wave 4 / Ronald F1 (2026-05-26): role filtra tools editoriales con
+      // marca CL2 cuando es 'cliente'. Cualquier otro rol/null deja acceso
+      // completo. Lookup hecho arriba — null si la consulta falló o no hay row.
+      user_role: userRole,
       // Forward conversation history sent by the client (keeps the model
       // aware of prior turns). The frontend trims to its own window; the
       // server caps at MAX_HISTORY_MESSAGES as a safety net.
@@ -309,10 +415,48 @@ chatRouter.post('/stream', async (req, res) => {
     // graceful fallback and emit a structured warning so ops can trace
     // WHY (LightRAG unreachable, tool empty hits, model refused, etc.).
     if (assistantText.length === 0) {
-      const fallback =
-        'No encontré una respuesta concreta para esta consulta en el corpus disponible. ' +
-        'Probá reformularla con detalles específicos — por ejemplo, una fecha (DD/MM/AAAA), ' +
-        'un número de expediente o el nombre exacto de una comisión.';
+      // Hubo citas (Pass 1 ejecutó tools con éxito y devolvieron data)
+      // pero Pass 2 no compuso respuesta — sintetizar desde citations.
+      // Esto es el caso "search_transcripts encontró X hits pero el
+      // modelo decidió 'stop' con content vacío" → no podemos dejar al
+      // usuario sin respuesta cuando la data sí se recuperó.
+      let fallback: string;
+      if (citations.length > 0) {
+        const top = citations.slice(0, 5);
+        const lines = top.map((c, i) => {
+          const cc = c as unknown as Record<string, unknown>;
+          const fecha = c.fecha ? ` (${c.fecha})` : '';
+          const ref = (c.source_ref ?? (cc['expediente_numero'] as string | undefined) ?? c.id ?? `[${i + 1}]`) as string;
+          // Para citations de sesión (get_session_by_date) mostramos el
+          // resumen completo (hasta 2000 chars) porque ES la respuesta.
+          // Para citations de SIL solo un preview corto, porque suelen
+          // ser muchos resultados y el usuario los ojea.
+          const sourceType = cc['source_type'] as string | undefined;
+          const isSession = sourceType === 'session';
+          const limit = isSession ? 2000 : 250;
+          const content = (c.content ?? '').slice(0, limit).replace(/\s+/g, ' ').trim();
+          return `[${i + 1}] **${ref}**${fecha}${content ? `\n\n${content}` : ''}`;
+        });
+        const more = citations.length > top.length ? ` (y ${citations.length - top.length} más)` : '';
+        const hasSession = citations.some((c) => {
+          const cc = c as unknown as Record<string, unknown>;
+          return cc['source_type'] === 'session';
+        });
+        const intro = hasSession
+          ? `Esto es lo que tengo registrado de la sesión${more}:`
+          : `Acá te dejo lo que encontré en el corpus${more}:`;
+        const closer = hasSession
+          ? '\n\n¿Querés que profundice en alguno de los temas o expedientes mencionados?'
+          : '\n\nSi querés profundizar en alguna, pedímelo por su número o nombre.';
+        fallback = `${intro}\n\n${lines.join('\n\n')}${closer}`;
+      } else {
+        // No hubo citas — el modelo no llamó tools o las tools no
+        // devolvieron data. Sugerimos reformular.
+        fallback =
+          'No encontré una respuesta concreta para esta consulta en el corpus disponible. ' +
+          'Probá reformularla con detalles específicos — por ejemplo, una fecha (DD/MM/AAAA), ' +
+          'un número de expediente o el nombre exacto de una comisión.';
+      }
       send({ type: 'token', payload: fallback });
       assistantText = fallback;
       req.log.warn('empty_completion_fallback', {
@@ -320,6 +464,7 @@ chatRouter.post('/stream', async (req, res) => {
         query: body.query.slice(0, 200),
         deep_insight: deepInsight,
         scope_legacy_session_id: scopeLegacySessionId,
+        citations_count: citations.length,
         ms: Date.now() - streamStart,
       });
     }

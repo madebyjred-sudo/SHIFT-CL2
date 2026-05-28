@@ -75,39 +75,59 @@ async function downloadDecretoPdf(fileRef: string): Promise<Buffer> {
   // FileRef viene como ruta relativa del sitio, ej: "/glcp/Decretos_Ejecutivos_Ampliacion/..."
   // La URL base del SharePoint público de la Asamblea es https://www.asamblea.go.cr
   const baseUrl = process.env.SIL_SHAREPOINT_BASE?.replace('/glcp', '') ?? 'https://www.asamblea.go.cr';
-  const url = fileRef.startsWith('http') ? fileRef : `${baseUrl}${fileRef}`;
+  // Encode cada segmento del path (espacios → %20, acentos → %XX) sin romper
+  // los slashes. Fix 2026-05-22: el SharePoint IIS devuelve 400/404 cuando
+  // recibe la URL cruda con espacios o caracteres acentuados.
+  const encodePath = (p: string) =>
+    p.split('/').map((seg) => encodeURIComponent(seg)).join('/');
+  const url = fileRef.startsWith('http') ? fileRef : `${baseUrl}${encodePath(fileRef)}`;
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), PDF_FETCH_TIMEOUT_MS);
+  // Retry x3 con backoff exponencial. "fetch failed" desde Cloud Run a un
+  // IIS público es típicamente un connection reset que se resuelve con retry.
+  const MAX_ATTEMPTS = 3;
+  let lastError: Error | null = null;
 
-  try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        // Algunos endpoints del GLCP requieren este header para servir el binario
-        Accept: 'application/pdf, application/octet-stream, */*',
-      },
-    });
-
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status} fetching PDF from ${url}`);
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), PDF_FETCH_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/pdf, application/octet-stream, */*',
+          // SharePoint IIS rechaza requests sin User-Agent porque asume bot
+          // genérico → 403/connection close. Identificarnos como browser
+          // mejora la tasa de éxito significativamente.
+          'User-Agent': 'Mozilla/5.0 (compatible; CL2-Ingest/1.0; +https://agentescl2.com)',
+        },
+      });
+      if (!res.ok) {
+        const bodyPreview = await res.text().then(t => t.slice(0, 200)).catch(() => '');
+        throw new Error(`HTTP ${res.status} fetching PDF — ${bodyPreview}`);
+      }
+      const arrayBuffer = await res.arrayBuffer();
+      if (arrayBuffer.byteLength > MAX_PDF_SIZE_BYTES) {
+        throw new Error(`PDF too large: ${arrayBuffer.byteLength} bytes`);
+      }
+      return Buffer.from(arrayBuffer);
+    } catch (err) {
+      lastError = err as Error;
+      const cause = (err as { cause?: { code?: string; message?: string } })?.cause;
+      logger.warn('[decretoIngestor] PDF fetch attempt failed', {
+        attempt,
+        url,
+        error: lastError.message,
+        cause_code: cause?.code,
+        cause_message: cause?.message,
+      });
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, 1000 * attempt));
+      }
+    } finally {
+      clearTimeout(timeoutId);
     }
-
-    const contentType = res.headers.get('content-type') ?? '';
-    if (!contentType.includes('pdf') && !contentType.includes('octet-stream')) {
-      logger.warn('[decretoIngestor] unexpected content-type for PDF', { url, contentType });
-      // No abortamos — algunos servidores sirven PDFs con content-type text/html
-    }
-
-    const arrayBuffer = await res.arrayBuffer();
-    if (arrayBuffer.byteLength > MAX_PDF_SIZE_BYTES) {
-      throw new Error(`PDF too large: ${arrayBuffer.byteLength} bytes > ${MAX_PDF_SIZE_BYTES}`);
-    }
-
-    return Buffer.from(arrayBuffer);
-  } finally {
-    clearTimeout(timeoutId);
   }
+  throw new Error(`PDF fetch failed after ${MAX_ATTEMPTS} attempts: ${lastError?.message ?? 'unknown'}`);
 }
 
 /**

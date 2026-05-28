@@ -361,7 +361,7 @@ export function AnimatedAiInput({
     }
     if (!value.trim()) return;
 
-    const activeSessionId = currentSessionId || Date.now().toString();
+    const activeSessionId = currentSessionId || crypto.randomUUID();
     const userTrimmed = value.trim();
 
     // Build query prefix for attachments
@@ -383,7 +383,7 @@ export function AnimatedAiInput({
     }
 
     const userMessage: Message = {
-      id: Date.now().toString(),
+      id: crypto.randomUUID(),
       role: 'user',
       content: userBubbleContent,
       // When the user attached a document or a workspace, the bubble
@@ -393,7 +393,7 @@ export function AnimatedAiInput({
       // it up (see history builder below).
       ...(userBubbleContent !== queryForAgent ? { llmContent: queryForAgent } : {}),
     };
-    const assistantId = (Date.now() + 1).toString();
+    const assistantId = crypto.randomUUID();
     const assistantMessage: Message = {
       id: assistantId,
       role: 'assistant',
@@ -437,6 +437,7 @@ export function AnimatedAiInput({
     let buffer = '';
 
     try {
+
       // ── Workspace scope path ─────────────────────────────────────────────
       if (scope?.kind === 'workspace') {
         // 2026-04-28: agent picker reemplaza el mode/intent toggle. Lexa
@@ -656,7 +657,9 @@ export function AnimatedAiInput({
             ? { kind: 'session', legacy_session_id: scope.legacy_session_id, label: scope.label }
             : scope?.kind === 'session_uuid'
               ? { kind: 'session_uuid', session_uuid: scope.session_uuid, label: scope.label }
-              : undefined,
+              : scope?.kind === 'expediente'
+                ? { kind: 'expediente', expediente_numero: scope.expediente_numero, label: scope.label }
+                : undefined,
           history,
           signal: abortControllerRef.current.signal,
           onChunk: (chunk) => {
@@ -903,6 +906,7 @@ export function AnimatedAiInput({
                         'w-full flex',
                         msg.role === 'user' ? 'justify-end' : 'justify-start',
                       )}
+                      data-testid={msg.role === 'assistant' ? 'message-assistant' : 'message-user'}
                     >
                       {msg.role === 'user' ? (
                         <div className="max-w-[80%] bg-blue-600/20 border border-blue-500/30 text-[#0e1745] dark:text-white rounded-2xl rounded-tr-sm p-chat-bubble text-[14px] leading-relaxed">
@@ -1211,6 +1215,7 @@ export function AnimatedAiInput({
                 rows={1}
                 disabled={isLoading}
                 spellCheck={false}
+                data-testid="chat-input"
               />
             </div>
 
@@ -1433,6 +1438,7 @@ export function AnimatedAiInput({
                   : undefined}
                 disabled={!value.trim() && !isLoading}
                 aria-label={isLoading ? 'Detener' : 'Enviar'}
+                data-testid="chat-send"
               >
                 {isLoading ? (
                   <Square className="w-4 h-4 fill-current" />

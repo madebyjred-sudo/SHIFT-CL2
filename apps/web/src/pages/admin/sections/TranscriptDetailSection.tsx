@@ -458,7 +458,7 @@ export function TranscriptDetailSection({
           </h2>
           {session.fecha && (
             <div className="text-[11.5px] text-[#0e1745]/50 dark:text-white/50">
-              {new Date(session.fecha).toLocaleDateString('es-CR', {
+              {new Date(`${session.fecha}T12:00:00`).toLocaleDateString('es-CR', {
                 day: '2-digit',
                 month: 'long',
                 year: 'numeric',

@@ -15,8 +15,32 @@
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { withRetry, withTimeout } from './resilience.js';
+import { normalizeSilEstado } from './silEstadoNormalizer.js';
+import { logger } from './logger.js';
+
+/**
+ * Convierte `sil_expedientes.estado` (string crudo del SIL) a texto coherente
+ * para el LLM. El SIL guarda ahí la "ubicación física actual" que puede ser:
+ *   - "ARCHIVO" / "PLENARIO" → estados canonical
+ *   - Nombre de comisión "JUVENTUD (ÁREA II)" → ubicación física, NO estado
+ *
+ * Para el LLM mostramos:
+ *   - "plenario" / "archivo" → texto explícito
+ *   - "en_comision" → omitir (la sección "Comisión física actual" ya lo dice)
+ *   - null → "sin estado registrado"
+ *
+ * Wave 4 Tier 2 C audit (2026-05-26).
+ */
+function renderEstadoForLlm(raw: string | null | undefined): string | null {
+  const canonical = normalizeSilEstado(raw);
+  if (canonical === 'plenario') return '🏛️ En debate plenario';
+  if (canonical === 'archivo') return '📦 Archivado';
+  if (canonical === 'en_comision') return null; // El campo "Comisión" lo cubre.
+  return null;
+}
 import { embedQuery } from './embeddings.js';
 import { rerankItems } from './rerankClient.js';
+import { extractDateRangeFromQuery } from './yearExtractor.js';
 
 let _supa: SupabaseClient | null = null;
 function supa(): SupabaseClient {
@@ -28,7 +52,12 @@ function supa(): SupabaseClient {
   return _supa;
 }
 
-const SUPA_TIMEOUT_MS = 5_000;
+// 2026-05-26 audit asesor bug 5b: subido de 5s → 20s.
+// search_sil_expedientes_by_text RPC desde Cloud Run a veces toma 6-10s
+// (postgres tokenization + GIN scan + ranking sobre 21k rows). Timeout
+// de 5s abortaba silenciosamente retornando []. Consistencia con
+// sil:search_corpus que ya estaba en 20s.
+const SUPA_TIMEOUT_MS = 20_000;
 
 /**
  * Datos paralelos al estado del expediente que el SIL guarda. Estos campos
@@ -124,37 +153,162 @@ export async function searchExpedientes(args: {
 }): Promise<SilExpedienteRow[]> {
   const k = Math.min(Math.max(args.k ?? 10, 1), 50);
 
+  // 2026-05-26 Wave 4 #1: year hard-filter.
+  // Si el caller (Lexa) no pasó fecha_from/to explícitos, intentamos
+  // extraer el año mencionado en la query y aplicarlo como hard-filter.
+  // Esto cierra el gap audit-D4: "iniciativas de 2018 sobre seguridad"
+  // antes devolvía expedientes de cualquier año ranqueados; ahora
+  // limita el WHERE a expedientes con fecha_presentacion en 2018.
+  // Los filtros explícitos del caller siempre ganan sobre la extracción.
+  // 2026-05-26 audit asesor bugs 4 + 6: Lexa a veces pasa string vacío en
+  // los filtros opcionales en lugar de omitirlos. PostgREST + el RPC
+  // tratan "" como filtro real:
+  //   - fecha_from="" → cast date "" → "invalid input syntax for type date"
+  //   - comision=""   → match e.comision = '' → 0 rows (ninguna comisión
+  //                     real es string vacío)
+  // Normalizamos los 3 filtros opcionales: trim + empty → null.
+  const cleanFechaFrom = (args.fecha_from ?? '').trim() || null;
+  const cleanFechaTo = (args.fecha_to ?? '').trim() || null;
+  const cleanComision = (args.comision ?? '').trim() || null;
+  const yearRange = (!cleanFechaFrom && !cleanFechaTo)
+    ? extractDateRangeFromQuery(args.query)
+    : {};
+  const effectiveFechaFrom = cleanFechaFrom ?? yearRange.fecha_from ?? null;
+  const effectiveFechaTo = cleanFechaTo ?? yearRange.fecha_to ?? null;
+
+  // Detección de "número de expediente". Lexa suele pasar el query con
+  // el número crudo ("23.511", "24.018", "Exp. 25.262"). El full-text
+  // en español stemming NO matchea esos tokens — los devuelve 0 hits y
+  // Lexa reporta "no encontré expedientes". Antes del path full-text,
+  // intentamos un lookup directo por número/id. Si encuentra, devolvemos
+  // ese row (lo importante es el match). Si no, caemos al full-text
+  // normal para queries de texto natural.
+  const numTokens = args.query.match(/\d[\d.,\s-]*\d|\d/g) ?? [];
+  if (numTokens.length > 0) {
+    const ids: number[] = [];
+    const numeros: string[] = [];
+    for (const tok of numTokens) {
+      const digits = tok.replace(/\D/g, '');
+      if (digits.length >= 4 && digits.length <= 6) {
+        const n = Number(digits);
+        if (Number.isInteger(n) && n > 0) ids.push(n);
+        // Formato canónico SIL: NN.NNN o N.NNN (números con punto cada 3 dígitos)
+        if (digits.length === 5) numeros.push(`${digits[0]}${digits[1]}.${digits.slice(2)}`);
+        else if (digits.length === 6) numeros.push(`${digits.slice(0, 3)}.${digits.slice(3)}`);
+        else if (digits.length === 4) numeros.push(`${digits[0]}.${digits.slice(1)}`);
+      }
+    }
+    if (ids.length > 0 || numeros.length > 0) {
+      try {
+        const orParts: string[] = [];
+        if (ids.length > 0) orParts.push(`id.in.(${ids.join(',')})`);
+        if (numeros.length > 0) orParts.push(`numero.in.(${numeros.map((n) => `"${n}"`).join(',')})`);
+        const lookup = await withTimeout(
+          async (signal) => {
+            const res = await supa()
+              .from('sil_expedientes')
+              .select('id, numero, titulo, proponente, comision, fecha_presentacion, estado, tipo, legislatura, url_detalle, extras')
+              .or(orParts.join(','))
+              .limit(k)
+              .abortSignal(signal);
+            return res;
+          },
+          { ms: SUPA_TIMEOUT_MS, label: 'sil:search_expedientes:lookup_by_number' },
+        );
+        if (!lookup.error && lookup.data && lookup.data.length > 0) {
+          return lookup.data as SilExpedienteRow[];
+        }
+      } catch {
+        // Lookup directo fall — continuar con full-text
+      }
+    }
+  }
+
+  // 2026-05-26 audit asesor bug 6: refactor a fetch directo a PostgREST.
+  // Antes usaba supa.rpc() pero retornaba 0 hits desde Cloud Run aunque
+  // el RPC funciona desde fetch directo + SQL psql + Supabase JS local.
+  // Causa raíz no identificada (singleton stale? abortSignal issue?
+  // schema cache?), pero descartamos al cliente JS como fuente al hacer
+  // fetch directo. Si esto retorna 0 también, el problema es server-side.
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !serviceKey) {
+    throw new Error('Supabase env not set for searchExpedientes');
+  }
+
   return withRetry(
     () =>
       withTimeout(
         async (signal) => {
-          // Use Postgres `websearch_to_tsquery` for natural language input.
-          // Supabase exposes this via .textSearch with config 'spanish'.
-          let q = supa()
-            .from('sil_expedientes')
-            .select('id, numero, titulo, proponente, comision, fecha_presentacion, estado, tipo, legislatura, url_detalle')
-            .textSearch(
-              'titulo_proponente_tsv',  // virtual: see migration index
-              args.query,
-              { type: 'websearch', config: 'spanish' },
-            )
-            .limit(k)
-            .abortSignal(signal);
-          if (args.comision) q = q.eq('comision', args.comision);
-          if (args.fecha_from) q = q.gte('fecha_presentacion', args.fecha_from);
-          if (args.fecha_to) q = q.lte('fecha_presentacion', args.fecha_to);
-          const { data, error } = await q;
-          if (error) {
-            // textSearch on a non-tsvector column will fail. Fall back to ilike on titulo.
-            const fb = await supa()
-              .from('sil_expedientes')
-              .select('id, numero, titulo, proponente, comision, fecha_presentacion, estado, tipo, legislatura, url_detalle')
-              .ilike('titulo', `%${args.query}%`)
-              .limit(k);
-            if (fb.error) throw new Error(fb.error.message);
-            return (fb.data ?? []) as SilExpedienteRow[];
+          const t0 = Date.now();
+          const reqBody = {
+            query_text: args.query,
+            match_limit: k,
+            filter_comision: cleanComision,
+            filter_fecha_from: effectiveFechaFrom ?? null,
+            filter_fecha_to: effectiveFechaTo ?? null,
+          };
+          const bodyStr = JSON.stringify(reqBody);
+          // Log preview del body + key info para diagnóstico bug #6.
+          logger.info('sil_search_expedientes_req', {
+            query: args.query,
+            body_preview: bodyStr.slice(0, 200),
+            body_len: bodyStr.length,
+            key_prefix: serviceKey.slice(0, 10),
+            url_host: new URL(supabaseUrl).host,
+          });
+          const res = await fetch(
+            `${supabaseUrl}/rest/v1/rpc/search_sil_expedientes_by_text`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                apikey: serviceKey,
+                Authorization: `Bearer ${serviceKey}`,
+                'Accept-Profile': 'public',
+                'Content-Profile': 'public',
+              },
+              body: bodyStr,
+              signal,
+            },
+          );
+          const ms = Date.now() - t0;
+          const rawText = await res.text();
+          if (!res.ok) {
+            logger.warn('sil_search_expedientes_http_error', {
+              query: args.query,
+              status: res.status,
+              raw: rawText.slice(0, 300),
+              ms,
+            });
+            throw new Error(`search_sil_expedientes_by_text HTTP ${res.status}: ${rawText.slice(0, 200)}`);
           }
-          return (data ?? []) as SilExpedienteRow[];
+          let data: Array<SilExpedienteRow & { rank?: number }>;
+          try {
+            data = JSON.parse(rawText) as Array<SilExpedienteRow & { rank?: number }>;
+          } catch (parseErr) {
+            logger.warn('sil_search_expedientes_parse_error', {
+              query: args.query,
+              raw: rawText.slice(0, 300),
+              err: (parseErr as Error).message,
+              ms,
+            });
+            throw new Error(`search_sil_expedientes_by_text parse: ${(parseErr as Error).message}`);
+          }
+          logger.info('sil_search_expedientes_ok', {
+            query: args.query,
+            limit: k,
+            comision: cleanComision,
+            fecha_from: effectiveFechaFrom ?? null,
+            fecha_to: effectiveFechaTo ?? null,
+            hits: data.length,
+            top_numeros: data.slice(0, 5).map((h) => h.numero),
+            raw_len: rawText.length,
+            ms,
+          });
+          // RPC retorna un campo extra `rank` que la interface no espera.
+          // Lo pelamos antes de retornar para no contaminar el shape.
+          return data.map(({ rank: _rank, ...row }) => row as SilExpedienteRow);
         },
         { ms: SUPA_TIMEOUT_MS, label: 'sil:search_expedientes' },
       ),
@@ -217,6 +371,7 @@ export async function getExpedienteById(numero: number): Promise<SilExpedienteFu
 export async function searchSilCorpus(args: {
   query: string;
   k?: number;
+  expediente_numero?: string;
 }): Promise<SilChunkHit[]> {
   const k = Math.min(Math.max(args.k ?? 6, 1), 20);
   // Over-fetch for the reranker — give the cross-encoder N*5 candidates
@@ -230,6 +385,7 @@ export async function searchSilCorpus(args: {
       withTimeout(
         async (signal) => {
           // Path A: hybrid (0009 applied).
+          const filterPrefix = args.expediente_numero ? `Exp. ${args.expediente_numero.replace(/[^\\d.]/g, '')}` : null;
           const { data, error } = await supa()
             .rpc('match_chunks_hybrid', {
               query_embedding: queryEmbedding,
@@ -237,23 +393,26 @@ export async function searchSilCorpus(args: {
               match_count: overFetch,
               filter_session_id: null,
               filter_source_type: null,
-              filter_source_ref_prefix: null,
+              filter_source_ref_prefix: filterPrefix,
               rrf_k: 60,
             })
             .abortSignal(signal);
           if (error) {
             // 42883 = function does not exist. Caller may not have applied 0009.
             if (error.code === '42883' || error.message.includes('match_chunks_hybrid')) {
-              return await fallbackDenseOnly(queryEmbedding, overFetch, signal);
+              return await fallbackDenseOnly(queryEmbedding, overFetch, filterPrefix, signal);
             }
             throw new Error(`match_chunks_hybrid: ${error.message}`);
           }
           const hits = (data ?? []) as Array<SilChunkHit & { source_type?: string }>;
           return hits.filter((h) => typeof h.source_type === 'string' && h.source_type.startsWith('sil_'));
         },
-        { ms: 8_000, label: 'sil:search_corpus' },
+        // 2026-05-26 Wave 4 #7 follow-up: 8s → 20s. Igual que searchTranscripts,
+        // HNSW pgvector p95 ~10s en queries amplias. Doctrina cliente:
+        // resultado correcto > rapidez; bajamos después de validar.
+        { ms: 120_000, label: 'sil:search_corpus' },
       ),
-    { attempts: 2, baseDelayMs: 300, label: 'sil:search_corpus' },
+    { attempts: 1, baseDelayMs: 300, label: 'sil:search_corpus' },
   );
 
   // Cross-encoder rerank — falls through to identity (top-K untouched)
@@ -266,6 +425,7 @@ export async function searchSilCorpus(args: {
 async function fallbackDenseOnly(
   queryEmbedding: number[],
   k: number,
+  filterPrefix: string | null,
   signal: AbortSignal,
 ): Promise<SilChunkHit[]> {
   console.warn('[searchSilCorpus] 0009 not applied — falling back to dense-only via match_chunks_v2');
@@ -275,7 +435,7 @@ async function fallbackDenseOnly(
       match_count: k * 3,
       filter_session_id: null,
       filter_source_type: null,
-      filter_source_ref_prefix: null,
+      filter_source_ref_prefix: filterPrefix,
     })
     .abortSignal(signal);
   if (error) {
@@ -320,8 +480,12 @@ export async function searchReglamento(args: {
   query: string;
   k?: number;
 }): Promise<ReglamentoHit[]> {
-  const k = Math.min(Math.max(args.k ?? 5, 1), 15);
-  const overFetch = Math.min(20, Math.max(k * 4, 10));
+  // 2026-05-26: subido de 5→12 para mejor recall en queries procedurales.
+  // Lawyer tests L1/L4/L5 demostraron que k=5 traía 5 artículos con
+  // keyword overlap pero ninguno relevante. Con k=12 el LLM tiene más
+  // candidatos para filtrar en el Pass.
+  const k = Math.min(Math.max(args.k ?? 12, 1), 20);
+  const overFetch = Math.min(30, Math.max(k * 4, 15));
   const queryEmbedding = await embedQuery(args.query);
 
   const candidates = await withRetry(
@@ -402,7 +566,8 @@ export async function searchReglamento(args: {
             };
           });
         },
-        { ms: 8_000, label: 'reglamento:search' },
+        // 2026-05-26 Wave 4 #7 follow-up: 8s → 20s. Mismo razonamiento que sil:search_corpus.
+        { ms: 20_000, label: 'reglamento:search' },
       ),
     { attempts: 2, baseDelayMs: 250, label: 'reglamento:search' },
   );
@@ -433,7 +598,33 @@ export function renderExpedientesForLlm(rows: SilExpedienteRow[]): string {
       const fecha = r.fecha_presentacion ?? 's/f';
       const titulo = r.titulo ?? '(sin título)';
       const proponente = r.proponente ?? 's/proponente';
-      return `[${i + 1}] Exp. ${r.numero} (${fecha}) — ${titulo}\n    Proponente: ${proponente} · Comisión: ${r.comision ?? '—'} · Estado: ${r.estado ?? '—'}\n    ${r.url_detalle}`;
+      // ESTATUS FORMAL — leído de extras jsonb. La doctrina del YAML
+      // de Lexa (lexa.yaml) dice que esto es lo PRIMERO que el LLM debe
+      // ver: el campo `estado` solo dice qué comisión tiene el papel
+      // físico HOY, NO si es ley. La verdad sobre "¿es ley?" está
+      // en extras.numero_ley.
+      const e = (r.extras ?? {}) as SilExtras;
+      let estatusFormal = '';
+      if (e.numero_ley) {
+        const gaceta = e.numero_gaceta ? ` · Gaceta N° ${e.numero_gaceta}` : '';
+        const pub = e.fecha_publicacion ? ` · publicada ${e.fecha_publicacion}` : '';
+        estatusFormal = `\n    ✅ ES LEY · N° ${e.numero_ley}${gaceta}${pub}`;
+      } else if (e.numero_archivado) {
+        estatusFormal = `\n    📦 ARCHIVADO · N° ${e.numero_archivado}`;
+      } else if (e.numero_acuerdo) {
+        estatusFormal = `\n    📋 ACUERDO LEGISLATIVO N° ${e.numero_acuerdo}`;
+      } else if (e.fecha_dispensa) {
+        estatusFormal = `\n    ⚡ DISPENSA DE TRÁMITE · ${e.fecha_dispensa}`;
+      } else {
+        estatusFormal = `\n    🟡 EN TRÁMITE`;
+      }
+      const alcance = e.numero_alcance ? `\n    🔁 Tiene Alcance N° ${e.numero_alcance}` : '';
+      // Wave 4 Tier 2 C: omitir el campo "estado" cuando es nombre de comisión
+      // — la sección "Comisión" ya lo muestra. Solo mostrar cuando es canonical
+      // (plenario / archivo).
+      const estadoRender = renderEstadoForLlm(r.estado);
+      const estadoStr = estadoRender ? ` · ${estadoRender}` : '';
+      return `[${i + 1}] Exp. ${r.numero} (${fecha}) — ${titulo}${estatusFormal}${alcance}\n    Proponente: ${proponente} · Comisión: ${r.comision ?? '—'}${estadoStr}\n    ${r.url_detalle}`;
     })
     .join('\n\n');
 }
@@ -485,8 +676,16 @@ export function renderExpedienteFullForLlm(exp: SilExpedienteFull): string {
 
   // Si NADA de lo anterior aplica, declaramos el estatus en negativo
   // para que el LLM no asuma "es ley" por defecto.
+  // Wave 4 Tier 2 C: si `exp.estado` es nombre de comisión, NO lo repetimos
+  // acá (la sección "Comisión física actual" ya lo dice). Solo mostramos
+  // valores canonical (plenario/archivo) o el literal si es algo distinto.
   if (status.length === 0) {
-    status.push(`🟡 EN TRÁMITE · todavía NO es ley ni fue archivado. Estado físico actual: ${exp.estado ?? 'sin estado'}.`);
+    const estadoRender = renderEstadoForLlm(exp.estado);
+    if (estadoRender) {
+      status.push(`🟡 EN TRÁMITE · todavía NO es ley ni fue archivado. ${estadoRender}.`);
+    } else {
+      status.push(`🟡 EN TRÁMITE · todavía NO es ley ni fue archivado (en comisión técnica — ver abajo).`);
+    }
   }
 
   // ── Sección 2: identificación ───────────────────────────────────────
@@ -575,12 +774,20 @@ export function renderExpedienteFullForLlm(exp: SilExpedienteFull): string {
 
     for (let i = 0; i < sorted.length; i++) {
       const d = sorted[i];
+      // 2026-05-26: render explícito para que Lexa surface dictámenes
+      // correctamente. L7 (24.018) demostró que con "dictamen_mayoria"
+      // crudo, Lexa dijo "no encontré dictamen final" porque no asoció
+      // los términos. Usamos etiquetas descriptivas + equivalencias.
       const prefix = d.tipo === 'texto_sustitutivo'
-        ? '★ VIGENTE'
+        ? '★ TEXTO VIGENTE (sustitutivo, este es el articulado actual)'
         : d.tipo === 'dictamen_mayoria'
-        ? '◆ DICTAMEN'
+        ? '◆ DICTAMEN FINAL (de mayoría, este es el dictamen que llegó a votación)'
+        : d.tipo === 'dictamen_minoria'
+        ? '◇ DICTAMEN MINORÍA'
+        : d.tipo === 'redaccion_final'
+        ? '✎ REDACCIÓN FINAL'
         : '  ';
-      lines.push(`  ${prefix} [${i + 1}] ${d.tipo}: ${d.titulo ?? '(s/título)'} ${d.fecha ?? ''} — ${d.source_url}`);
+      lines.push(`  ${prefix}\n     [${i + 1}] ${d.titulo ?? '(s/título)'} ${d.fecha ?? ''} — ${d.source_url}`);
     }
 
     docsSection = '\n' + lines.join('\n');
@@ -802,4 +1009,184 @@ export function renderRalComentadoForLlm(hits: RalComentadoHit[]): string {
 
     return `${header}\n${capLine}${textoLine}${interpsSection}${pdfRef}`;
   }).join('\n\n═══════════════════════════════════\n\n');
+}
+
+// ─── Constitución Política + LOAL ─────────────────────────────────────
+//
+// Wave 4 #2 (2026-05-26).
+// Lawyer audit reveló gaps: Lexa no podía responder sobre tratados
+// internacionales, elección magistrados Sala IV, plazo resello tras veto,
+// inmunidad parlamentaria, juramentación. Ese conocimiento NO vive ni en
+// el Reglamento Asamblea ni en el RAL Comentado — vive en la Constitución
+// y en la Ley Orgánica del Poder Legislativo (LOAL).
+//
+// El job `apps/api/src/jobs/ingestConstitucionLoal.ts` carga ambos cuerpos
+// en `legislative_chunks` con source_type='constitucion' o 'loal'.
+// Esta función es el read-path: query → embedding → match_chunks_hybrid
+// con filtro `source_type IN ('constitucion','loal')`.
+
+export interface ConstitucionLoalHit {
+  chunk_id: string;
+  source_type: 'constitucion' | 'loal';
+  /** Número del artículo. String para preservar "121 bis" si aparece. */
+  articulo_numero: string | null;
+  /** Variante entera del número (útil para ordenar). */
+  articulo_numero_int: number | null;
+  /** Título o capítulo más cercano (ej. "TÍTULO IV - DERECHOS Y GARANTÍAS"). */
+  titulo_seccion: string | null;
+  /** Nombre completo del cuerpo normativo. */
+  doc: string;
+  /** Texto completo del artículo (incluyendo header). */
+  content: string;
+  /** Score (rrf o dense similarity, según path). */
+  similarity: number;
+  /** URL oficial del PDF/HTML cuando está indexada. */
+  url: string | null;
+}
+
+/**
+ * Búsqueda híbrida sobre la Constitución Política CR (197 arts) y la
+ * Ley Orgánica del Poder Legislativo (~100 arts).
+ *
+ * Misma estrategia que `searchReglamento`:
+ *   - Path A (preferido): match_chunks_hybrid (migración 0009) con
+ *     filter_source_type=null + filtro post-hoc por source_type ∈
+ *     {constitucion, loal}.
+ *   - Path B (fallback): match_chunks_v2 dense-only cuando 0009 no está.
+ *
+ * El RPC no soporta `filter_source_type IN (...)` (solo single value)
+ * así que pedimos sin filtro y filtramos los hits en memoria. Es seguro
+ * porque overFetch = max(k*5, 15) y la fracción de chunks de estos
+ * cuerpos sobre los 825k totales es <0.04% — pero en el ranking semántico
+ * dominan cuando la query es procedural-constitucional.
+ *
+ * Reranking opcional vía cross-encoder (rerankItems). Si VOYAGE_API_KEY
+ * no está set, retorna identidad — mismo contrato que searchReglamento.
+ */
+export async function searchConstitucionLoal(args: {
+  query: string;
+  k?: number;
+}): Promise<ConstitucionLoalHit[]> {
+  const k = Math.min(Math.max(args.k ?? 8, 1), 15);
+  // Optional: 2026-05-26 — overfetch elevado a max(k*8, 24) porque la
+  // Constitución tiene artículos chiquitos (avg ~500 chars) y la búsqueda
+  // semántica empieza con 30-40 candidatos heterogéneos del corpus
+  // completo (transcripts, SIL, etc.) antes del filtro por source_type.
+  // FYI: si esto resulta caro en latencia, bajar a k*5 y registrar miss-rate.
+  const overFetch = Math.min(60, Math.max(k * 8, 24));
+  const queryEmbedding = await embedQuery(args.query);
+
+  const candidates = await withRetry(
+    () =>
+      withTimeout(
+        async (signal) => {
+          let raw: unknown[] | null = null;
+          let usedFallback = false;
+
+          // Path A: hybrid.
+          const hybrid = await supa()
+            .rpc('match_chunks_hybrid', {
+              query_embedding: queryEmbedding,
+              query_text: args.query,
+              match_count: overFetch,
+              filter_session_id: null,
+              filter_source_type: null,
+              filter_source_ref_prefix: null,
+              rrf_k: 60,
+            })
+            .abortSignal(signal);
+
+          if (hybrid.error) {
+            if (hybrid.error.code === '42883' || hybrid.error.message.includes('match_chunks_hybrid')) {
+              usedFallback = true;
+            } else {
+              throw new Error(`match_chunks_hybrid: ${hybrid.error.message}`);
+            }
+          } else {
+            raw = hybrid.data as unknown[];
+          }
+
+          // Path B: v2 dense fallback.
+          if (usedFallback) {
+            const v2 = await supa()
+              .rpc('match_chunks_v2', {
+                query_embedding: queryEmbedding,
+                match_count: overFetch,
+                filter_session_id: null,
+                filter_source_type: null,
+                filter_source_ref_prefix: null,
+              })
+              .abortSignal(signal);
+            if (v2.error) {
+              if (v2.error.code === '42883' || v2.error.message.includes('match_chunks_v2')) {
+                console.warn('[searchConstitucionLoal] hybrid + v2 missing — apply 0007/0009. Returning empty.');
+                return [] as ConstitucionLoalHit[];
+              }
+              throw new Error(`match_chunks_v2: ${v2.error.message}`);
+            }
+            raw = v2.data as unknown[];
+          }
+
+          type RawHit = {
+            chunk_id: string;
+            source_type?: string;
+            source_ref?: string;
+            content: string;
+            similarity?: number;
+            dense_similarity?: number;
+            rrf_score?: number;
+            metadata?: Record<string, unknown> | null;
+          };
+          const hits = (raw ?? []) as RawHit[];
+          const filtered = hits.filter(
+            (h) => h.source_type === 'constitucion' || h.source_type === 'loal',
+          );
+          return filtered.map<ConstitucionLoalHit>((h) => {
+            const md = (h.metadata ?? {}) as Record<string, unknown>;
+            return {
+              chunk_id: h.chunk_id,
+              source_type: h.source_type as 'constitucion' | 'loal',
+              articulo_numero:
+                typeof md.articulo_numero === 'string' ? md.articulo_numero : null,
+              articulo_numero_int:
+                typeof md.articulo_numero_int === 'number' ? md.articulo_numero_int : null,
+              titulo_seccion:
+                typeof md.titulo_seccion === 'string' ? md.titulo_seccion : null,
+              doc:
+                typeof md.doc === 'string'
+                  ? md.doc
+                  : h.source_ref ?? (h.source_type === 'constitucion' ? 'Constitución Política' : 'LOAL'),
+              content: h.content,
+              similarity: h.rrf_score ?? h.dense_similarity ?? h.similarity ?? 0,
+              url: typeof md.url === 'string' ? md.url : null,
+            };
+          });
+        },
+        // 2026-05-26 Wave 4 #7 follow-up: 8s → 20s. Mismo razonamiento que sil:search_corpus.
+        { ms: 20_000, label: 'constitucion_loal:search' },
+      ),
+    { attempts: 2, baseDelayMs: 250, label: 'constitucion_loal:search' },
+  );
+
+  if (candidates.length <= 1) return candidates.slice(0, k);
+  // Rerank — same contract as searchReglamento (identity when no key).
+  // The rerankItems helper accepts any object with `content`; safe.
+  return rerankItems(args.query, candidates, k);
+}
+
+/**
+ * Render para el LLM. Lexa cita inline con "[Art. N (Const)]" o
+ * "[Art. N (LOAL)]" para que el lector distinga el cuerpo de origen.
+ */
+export function renderConstitucionLoalForLlm(hits: ConstitucionLoalHit[]): string {
+  if (hits.length === 0) return '(sin coincidencias en la Constitución ni en la LOAL)';
+  return hits
+    .map((h, i) => {
+      const tag = h.source_type === 'constitucion' ? 'Const' : 'LOAL';
+      const artRef = h.articulo_numero ? `Art. ${h.articulo_numero}` : 'Artículo';
+      const seccion = h.titulo_seccion ? ` · ${h.titulo_seccion}` : '';
+      const sim = (h.similarity * 100).toFixed(0);
+      return `[${i + 1}] ${artRef} (${tag})${seccion} — similaridad ${sim}%\n${h.content}`;
+    })
+    .join('\n\n---\n\n');
 }

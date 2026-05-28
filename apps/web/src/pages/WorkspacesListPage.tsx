@@ -18,6 +18,7 @@ import {
 } from '@/services/workspaceApi';
 import { PptxResultModal } from '@/components/workspace/PptxResultModal';
 import { PptxOptionsModal } from '@/components/workspace/PptxOptionsModal';
+import { useAccess, canUseEditorialTools } from '@/components/access/AccessContext';
 
 // ─── Relative time helper ────────────────────────────────────────────
 function relativeTime(iso: string): string {
@@ -40,6 +41,12 @@ function WorkspaceCard({
   onArchive: () => void;
   onDelete: () => void;
 }) {
+  const access = useAccess();
+  // 2026-05-26 Ronald F1: cliente final NO ve los botones de export con
+  // marca CL2 (presentación / Word). El export a Markdown sí está permitido
+  // porque es texto plano sin identidad visual CL2.
+  const canExportBranded = canUseEditorialTools(access.role);
+
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(ws.title);
@@ -197,22 +204,26 @@ function WorkspaceCard({
 
               {/* ── Export submenu ─────────────────────────────────── */}
               <div className="border-t border-black/6 dark:border-white/8 my-1" />
-              <button
-                onClick={() => handleExport('pptx')}
-                disabled={pptxModal?.state === 'loading'}
-                className="w-full text-left px-3 py-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/8 transition-colors flex items-center gap-2 disabled:opacity-50"
-              >
-                <Presentation className="w-3.5 h-3.5 text-cl2-burgundy" />
-                Generar presentación
-              </button>
-              <button
-                onClick={() => handleExport('docx')}
-                disabled={exporting !== null}
-                className="w-full text-left px-3 py-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/8 transition-colors flex items-center gap-2 disabled:opacity-50"
-              >
-                <FileDown className="w-3.5 h-3.5 text-cl2-burgundy" />
-                {exporting === 'docx' ? 'Exportando…' : 'Exportar a Word'}
-              </button>
+              {canExportBranded && (
+                <button
+                  onClick={() => handleExport('pptx')}
+                  disabled={pptxModal?.state === 'loading'}
+                  className="w-full text-left px-3 py-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/8 transition-colors flex items-center gap-2 disabled:opacity-50"
+                >
+                  <Presentation className="w-3.5 h-3.5 text-cl2-burgundy" />
+                  Generar presentación
+                </button>
+              )}
+              {canExportBranded && (
+                <button
+                  onClick={() => handleExport('docx')}
+                  disabled={exporting !== null}
+                  className="w-full text-left px-3 py-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/8 transition-colors flex items-center gap-2 disabled:opacity-50"
+                >
+                  <FileDown className="w-3.5 h-3.5 text-cl2-burgundy" />
+                  {exporting === 'docx' ? 'Exportando…' : 'Exportar a Word'}
+                </button>
+              )}
               <button
                 onClick={() => handleExport('md')}
                 disabled={exporting !== null}

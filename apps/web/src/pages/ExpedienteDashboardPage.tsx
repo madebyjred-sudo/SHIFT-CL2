@@ -56,7 +56,8 @@ import { NovedadesPanel } from '@/components/expediente/NovedadesPanel';
 import { OrdenDiaPanel } from '@/components/expediente/OrdenDiaPanel';
 import { ListaDespachoPanel } from '@/components/expediente/ListaDespachoPanel';
 import { ListaDespachoBadge } from '@/components/expediente/ListaDespachoBadge';
-import { Calendar, MessageCircle, Zap, Briefcase } from 'lucide-react';
+import { Calendar, MessageCircle, Zap, Briefcase, Bot } from 'lucide-react';
+import { AnimatedAiInput } from '@/components/animated-ai-input';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -74,7 +75,8 @@ type SectionId =
   | 'orden_dia'   // pedido 16c
   | 'despacho'    // Sprint 3 Track R — Donovan 38:17
   | 'ley'
-  | 'documentos';
+  | 'documentos'
+  | 'lexa';
 
 interface SectionConfig {
   id: SectionId;
@@ -254,6 +256,11 @@ export function ExpedienteDashboardPage({ numero }: Props) {
       label: 'Documentos',
       icon: <FileText size={13} />,
       count: data?.documentos.length,
+    },
+    {
+      id: 'lexa' as SectionId,
+      label: 'Preguntale a Lexa',
+      icon: <Bot size={13} />,
     },
   ];
   const sections = allSections.filter((s) => !s.hidden);
@@ -472,6 +479,20 @@ export function ExpedienteDashboardPage({ numero }: Props) {
               )}
               {activeSection === 'despacho' && (
                 <ListaDespachoPanel historial={despachoHistorial} />
+              )}
+              {activeSection === 'lexa' && (
+                <div className="h-[600px] flex flex-col">
+                  <AnimatedAiInput
+                    scope={{
+                      kind: 'expediente',
+                      expediente_numero: numero,
+                      label: general?.titulo
+                        ? String(general.titulo).slice(0, 60)
+                        : `Exp. ${numero}`,
+                    }}
+                    placeholder={`Preguntá sobre el expediente ${numero}…`}
+                  />
+                </div>
               )}
             </motion.div>
           )}

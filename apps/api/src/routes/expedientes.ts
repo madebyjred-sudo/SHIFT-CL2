@@ -116,6 +116,8 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
 
     const [
       tramiteRes, proponentesRes, consultasRes, leyRes, documentosRes,
+      // 2026-05-27: sil_documentos (bulk download pipeline)
+      bulkDocsRes,
       // Sprint v3 — tablas dedicadas (0037 + 0038)
       fechasRes, audienciasRes, actasRes, salaRes, ordenDiaRes,
       // Sprint 3 Track R — Lista de despacho
@@ -150,6 +152,15 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
         .select('*')
         .eq('expediente_id', numero)
         .order('tipo', { ascending: true }),
+
+      // 2026-05-27: also fetch from sil_documentos (bulk download pipeline).
+      // The detail page previously only showed sil_expediente_documentos
+      // (enrichment scraper), missing the 35k+ docs downloaded in bulk.
+      // We merge both tables below, deduplicating by tipo.
+      safeQuery(supClientRaw
+        .from('sil_documentos')
+        .select('id, expediente_id, tipo, titulo, source_url, gcs_path, status, text_chars, doc_class')
+        .eq('expediente_id', general.id)),
 
       // ── Sprint v3 dedicated tables (graceful degradation si 0037+0038 no aplicadas) ──
       safeQuery(supClientRaw
@@ -208,6 +219,10 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
       'consulta_177_no_reflejada_en_tramite',
       'acta_sin_evento_tramite',
       'mocion_segundo_dia_sin_primer_dia',
+      // 2026-05-22: Agregado para Pedido 11 / 11bis (aviso cuando aparece
+      // una moción nueva en el expediente watched). El cron mocionAlertScan
+      // y el backfill SQL emiten este tipo con priority y descripcion.
+      'mocion_fondo_presentada',
     ] as const;
 
     let novedadesDetectadas: unknown[] = [];
@@ -269,23 +284,55 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
     const fechasExtraidas = fechasRes.length > 0
       ? (() => {
           const byCampo = Object.fromEntries(fechasRes.map((f: any) => [f.campo, f]));
-          const dictamen = byCampo['fecha_dictamen_estimada'];
+          // Pedido 07 — fecha estimada de dictamen, en orden de preferencia:
+          //   1. fecha_dictamen_estimada (extraída del documento via regex/LLM)
+          //   2. vence_subcomision (Vencimiento Ordinario del SIL, deadline
+          //      procesal de 60 días — es el dato más cercano al concepto
+          //      "fecha de dictamen" en términos legales)
+          //
+          // IMPORTANTE: fecha_cuatrienal NO califica como "fecha estimada de
+          // dictamen". Es el deadline ABSOLUTO del cuatrienio (4 años) — un
+          // expediente recién presentado tiene cuatrienal en 2030 pero su
+          // dictamen procesal vence en 60 días. Mostrar 2030 como "fecha de
+          // dictamen" confunde al usuario. Si solo hay cuatrienal, el panel
+          // no muestra card vigente — solo cuatrienal en otras_fechas.
+          const vigenteRow =
+            byCampo['fecha_dictamen_estimada']
+            ?? byCampo['vence_subcomision']
+            ?? null;
+          // Filtrar otras_fechas: solo incluir keys cuyo valor existe.
+          // El frontend espera shape `{ valor, texto }` por campo. Antes
+          // pasábamos string suelto y el destructuring `{ valor, texto }`
+          // daba undefined → `new Date(undefined)` → "Invalid Date" en
+          // pantalla.
+          const otrasFechas: Record<string, { valor: string; texto: string }> = {};
+          if (byCampo['fecha_cuatrienal']?.valor_fecha) {
+            otrasFechas.fecha_cuatrienal = {
+              valor: byCampo['fecha_cuatrienal'].valor_fecha,
+              texto: byCampo['fecha_cuatrienal'].valor_texto_original ?? '',
+            };
+          }
+          if (byCampo['vence_subcomision']?.valor_fecha && vigenteRow?.campo !== 'vence_subcomision') {
+            // Si vence_subcomision YA está mostrándose como vigente, no lo
+            // duplicamos en otras_fechas.
+            otrasFechas.vence_subcomision = {
+              valor: byCampo['vence_subcomision'].valor_fecha,
+              texto: byCampo['vence_subcomision'].valor_texto_original ?? '',
+            };
+          }
           return {
-            vigente: dictamen ? {
-              campo: dictamen.campo,
-              valor_fecha: dictamen.valor_fecha,
-              valor_texto_original: dictamen.valor_texto_original,
-              visual_marker: dictamen.visual_marker,
-              fuente_documento_url: dictamen.fuente_documento_url,
-              fuente_pagina: dictamen.fuente_pagina,
-              extraction_method: dictamen.extraction_method,
-              extraction_confidence: dictamen.extraction_confidence,
+            vigente: vigenteRow ? {
+              campo: vigenteRow.campo,
+              valor_fecha: vigenteRow.valor_fecha,
+              valor_texto_original: vigenteRow.valor_texto_original,
+              visual_marker: vigenteRow.visual_marker,
+              fuente_documento_url: vigenteRow.fuente_documento_url,
+              fuente_pagina: vigenteRow.fuente_pagina,
+              extraction_method: vigenteRow.extraction_method,
+              extraction_confidence: vigenteRow.extraction_confidence,
             } : undefined,
             historial: [], // historial detallado: 0037 lo soporta pero requiere query separada
-            otras_fechas: {
-              fecha_cuatrienal: byCampo['fecha_cuatrienal']?.valor_fecha,
-              vence_subcomision: byCampo['vence_subcomision']?.valor_fecha,
-            },
+            otras_fechas: otrasFechas,
           };
         })()
       : (meta.fechas_extraidas ?? null);
@@ -321,6 +368,37 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
     const novedadesFinales = novedadesDetectadas.length > 0
       ? novedadesDetectadas
       : (meta.novedades_detectadas ?? []);
+    // ── 2026-05-27 Merge documents from both tables ───────────────────
+    // sil_expediente_documentos = enrichment scraper (has tipo, titulo, url)
+    // sil_documentos = bulk download pipeline (has tipo, titulo, gcs_path, source_url)
+    // Priority: enrichment docs first, then add bulk docs that aren't duplicates.
+    const enrichDocs = documentosRes.data ?? [];
+    const bulkDocs = (bulkDocsRes ?? []) as Array<Record<string, unknown>>;
+
+    // Build a set of existing (tipo+titulo) pairs to detect duplicates
+    const enrichKeys = new Set(
+      enrichDocs.map((d: any) => `${d.tipo}::${(d.titulo ?? '').toLowerCase().slice(0, 40)}`),
+    );
+
+    // Convert bulk docs to the same shape as sil_expediente_documentos
+    const extraDocs = bulkDocs
+      .filter((bd) => {
+        const key = `${bd.tipo}::${((bd.titulo as string) ?? '').toLowerCase().slice(0, 40)}`;
+        return !enrichKeys.has(key);
+      })
+      .map((bd) => ({
+        id: bd.id,
+        expediente_id: numero,
+        tipo: bd.tipo ?? 'texto_base',
+        titulo: bd.titulo ?? null,
+        fecha: null,
+        url: (bd.source_url as string) ?? null,
+        storage_path: (bd.gcs_path as string) ?? null,
+        embed_status: bd.status === 'embedded' ? 'done' : (bd.status ?? 'pending'),
+        raw: { source: 'sil_documentos_bulk' },
+      }));
+
+    const mergedDocs = [...enrichDocs, ...extraDocs];
 
     res.json({
       ok: true,
@@ -330,7 +408,7 @@ expedientesRouter.get('/:numero/full', async (req, res) => {
         proponentes: proponentesRes.data ?? [],
         consultas: consultasRes.data ?? [],
         ley: leyRes.data ?? null,
-        documentos: documentosRes.data ?? [],
+        documentos: mergedDocs,
         // Sprint v3 — keys top-level, fuente: tablas dedicadas con fallback metadata
         fechas_extraidas: fechasExtraidas,
         audiencias,

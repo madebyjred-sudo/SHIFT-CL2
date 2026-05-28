@@ -629,7 +629,7 @@ function ExpedienteCard({ item }: { item: SilExpedienteListItem }) {
             <>
               <span className="text-[#0e1745]/30 dark:text-white/30">·</span>
               <span>
-                {new Date(item.fecha_presentacion).toLocaleDateString('es-CR', {
+                {new Date(`${item.fecha_presentacion.slice(0, 10)}T12:00:00`).toLocaleDateString('es-CR', {
                   day: 'numeric',
                   month: 'short',
                   year: 'numeric',

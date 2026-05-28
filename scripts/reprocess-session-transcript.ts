@@ -1,8 +1,7 @@
 /**
  * reprocess-session-transcript.ts — Borra segments + chunks de una sesión y la
  * vuelve a procesar desde cero. Útil cuando una sesión quedó con transcript
- * truncado (e.g., el bug de single-call sin chunking que afectó al Plenario
- * 11 mayo #07 antes del fix de 2026-05-12).
+ * truncado o con calidad degradada (e.g., muchos [inaudible] de Gemini).
  *
  * Uso:
  *   SESSION_ID=3e65413f-... NODE_TLS_REJECT_UNAUTHORIZED=0 \
@@ -12,8 +11,9 @@
  *   1. Borra transcript_segments donde session_id = X
  *   2. Borra legislative_chunks asociadas (matching session_id en metadata)
  *   3. Update sessions.status = 'pending' para que processSession lo tome
- *   4. Llama processSession(X) — eso re-fetcha el transcript desde Gemini
- *      con chunking activo (gracias al fix de 2026-05-12) y reinserta.
+ *   4. Llama processSession(X) — re-fetcha usando TRANSCRIPT_FETCH_STRATEGY
+ *      (por defecto: yt-dlp → Gemini → lib). Aplica quality gates; si todo
+ *      falla marca la sesión como transcript_broken.
  */
 import { createClient } from '@supabase/supabase-js';
 import { processSession } from '../apps/api/src/jobs/transcriptProcess.js';

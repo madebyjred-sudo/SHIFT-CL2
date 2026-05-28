@@ -147,6 +147,41 @@ vi.mock('../services/logger.js', () => ({
   },
 }));
 
+// ── cerebroInvoke mock ────────────────────────────────────────────────────────
+// El job migró a Cerebro Gateway (commit 53c38f6, Wave 2 piece 3); el test
+// original todavía tenía mock de OpenRouter directo y por eso quedó roto en
+// pre-existing. Acá interceptamos cerebroInvoke devolviendo el contenido
+// de _cerebroQueue (un FIFO de respuestas, una por call).
+
+const _cerebroQueue: Array<{ text?: string; error?: Error }> = [];
+const _defaultEmptyCorrections = '{"corrections":[],"summary":{"total_segments":0,"segments_modified":0,"high_confidence_corrections":0,"low_confidence_corrections":0,"unfillable_gaps":0}}';
+
+vi.mock('../services/cerebroLlmClient.js', () => ({
+  cerebroInvoke: vi.fn(async () => {
+    const next = _cerebroQueue.shift() ?? { text: _defaultEmptyCorrections };
+    if (next.error) throw next.error;
+    return {
+      text: next.text ?? '',
+      output: next.text ?? '',
+      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+      latency_ms: 1,
+      call_id: 'test-call',
+      model: 'anthropic/claude-sonnet-4-6',
+    };
+  }),
+}));
+
+// ── google-auth-library mock (para Vertex fallback en resumen step) ──────────
+// El resumen step nunca toca Vertex en estos tests (cerebro mock devuelve OK).
+// Mockeamos por las dudas en caso de que algún test fuerce el fallback.
+vi.mock('google-auth-library', () => ({
+  GoogleAuth: vi.fn().mockImplementation(() => ({
+    getClient: vi.fn().mockResolvedValue({
+      getAccessToken: vi.fn().mockResolvedValue({ token: 'mock-vertex-token' }),
+    }),
+  })),
+}));
+
 // ── Subject under test ────────────────────────────────────────────────────────
 // Must come AFTER vi.mock() calls.
 import { processSession, _resetSupaClient } from './transcriptProcess.js';
@@ -193,8 +228,8 @@ function makeDbSegments(sessionId = 'session-uuid-001') {
   }));
 }
 
-/** Build a valid LLM response with 2 corrections */
-function makeLlmResponse(corrections: unknown[] = [
+/** Build the JSON string body that the LLM should return for the corrections step. */
+function makeLlmCorrectionsJson(corrections: unknown[] = [
   {
     segment_idx: 0,
     span_start: 4,
@@ -216,38 +251,40 @@ function makeLlmResponse(corrections: unknown[] = [
     reasoning: 'Capitalización de inicio',
   },
 ]) {
-  return {
-    ok: true,
-    json: async () => ({
-      choices: [
-        {
-          message: {
-            content: JSON.stringify({
-              corrections,
-              summary: {
-                total_segments: 3,
-                segments_modified: 2,
-                high_confidence_corrections: 1,
-                low_confidence_corrections: 1,
-                unfillable_gaps: 0,
-              },
-            }),
-          },
-        },
-      ],
-    }),
-    text: async () => '',
-  };
+  return JSON.stringify({
+    corrections,
+    summary: {
+      total_segments: 3,
+      segments_modified: 2,
+      high_confidence_corrections: 1,
+      low_confidence_corrections: 1,
+      unfillable_gaps: 0,
+    },
+  });
+}
+
+/** Build a valid resumen JSON string (for the resumen step that runs after corrections). */
+function makeLlmResumenJson() {
+  return JSON.stringify({
+    ejecutivo: 'La sesión trató varios temas legislativos importantes.',
+    puntos_clave: '- Punto uno completo.\n- Punto dos completo.',
+    acuerdos: 'No se registraron acuerdos formales.',
+  });
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** Stub global fetch with a handler that returns the given mock response for LLM calls */
-function stubLlmFetch(mockRes: object) {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async () => mockRes),
-  );
+/**
+ * Configure the cerebroInvoke mock to return a sequence of responses, one per
+ * call. processSession makes up to 2 LLM calls per run: (1) corrections review,
+ * (2) resumen generation. Pass either one or two JSON strings.
+ *
+ * Resets the queue first so each test starts clean even if a previous test
+ * left items unconsumed.
+ */
+function stubCerebroResponses(...textsInOrder: string[]) {
+  _cerebroQueue.length = 0;
+  for (const t of textsInOrder) _cerebroQueue.push({ text: t });
 }
 
 // ── Test suite ────────────────────────────────────────────────────────────────
@@ -282,6 +319,9 @@ describe('processSession', () => {
     process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://test.supabase.co';
     process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role-key';
     process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
+    // runLlmReview checks for CEREBRO_API_KEY (Wave 2 piece 3 migration);
+    // without it the corrections step throws and skips entirely.
+    process.env.CEREBRO_API_KEY = 'test-cerebro-key';
   });
 
   afterEach(() => {
@@ -289,12 +329,14 @@ describe('processSession', () => {
     delete process.env.NEXT_PUBLIC_SUPABASE_URL;
     delete process.env.SUPABASE_SERVICE_ROLE_KEY;
     delete process.env.OPENROUTER_API_KEY;
+    delete process.env.CEREBRO_API_KEY;
   });
 
   // ── Test 1: Happy path ────────────────────────────────────────────────────
   it('happy path: 3 segments → 2 corrections → status=indexed, llm_reviewed_at set', async () => {
     mockFetchTranscript.mockResolvedValueOnce(makeSegments());
-    stubLlmFetch(makeLlmResponse());
+    // First call: corrections review (2 corrections). Second call: resumen.
+    stubCerebroResponses(makeLlmCorrectionsJson(), makeLlmResumenJson());
 
     const result = await processSession('session-uuid-001');
 
@@ -396,22 +438,12 @@ describe('processSession', () => {
   it('handles invalid LLM JSON gracefully: segments inserted, corrections=0, status=indexed', async () => {
     mockFetchTranscript.mockResolvedValueOnce(makeSegments());
 
-    // LLM returns non-JSON garbage
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => ({
-        ok: true,
-        json: async () => ({
-          choices: [
-            {
-              message: {
-                content: 'Sorry, I cannot process this request at this time.',
-              },
-            },
-          ],
-        }),
-        text: async () => '',
-      })),
+    // LLM returns non-JSON garbage for the corrections step. The resumen step
+    // will also receive the same garbage on its second call — we don't care,
+    // both should degrade gracefully without breaking indexing.
+    stubCerebroResponses(
+      'Sorry, I cannot process this request at this time.',
+      'Sorry, I cannot process this request at this time.',
     );
 
     const result = await processSession('session-uuid-001');
@@ -455,7 +487,7 @@ describe('processSession', () => {
       },
     ];
 
-    stubLlmFetch(makeLlmResponse(corrections));
+    stubCerebroResponses(makeLlmCorrectionsJson(corrections), makeLlmResumenJson());
 
     const result = await processSession('session-uuid-001');
 

@@ -217,50 +217,17 @@ silRouter.get('/expedientes', async (req, res) => {
   try {
     const s = supa();
 
-    // Step 1 — get the universe of indexed expediente_ids when needed.
-    // Default mode (`include_metadata=false`) restricts the listing to
-    // these ids; if true, we don't restrict but tag each row with its
-    // indexed status.
-    const { data: docRows } = await s
-      .from('sil_documentos')
-      .select('expediente_id, tipo')
-      .limit(20_000);
+    // The document join strategy changes based on includeMetadata:
+    // If false (default), we only want expedientes with indexed documents. We use an !inner join to filter.
+    // If true, we want all expedientes, so we use a normal left join.
+    const docJoin = includeMetadata ? 'sil_documentos(id, tipo)' : 'sil_documentos!inner(id, tipo)';
 
-    const docCountByExp = new Map<number, number>();
-    const tiposByExp = new Map<number, Set<string>>();
-    for (const r of docRows ?? []) {
-      const id = r.expediente_id as number;
-      docCountByExp.set(id, (docCountByExp.get(id) ?? 0) + 1);
-      const set = tiposByExp.get(id) ?? new Set<string>();
-      if (typeof r.tipo === 'string') set.add(r.tipo);
-      tiposByExp.set(id, set);
-    }
-    const indexedIds = Array.from(docCountByExp.keys());
-
-    // Step 2 — query sil_expedientes with the active filters. Apply
-    // pagination on the DB side so we don't pull 21k into memory.
     let q1 = s
       .from('sil_expedientes')
       .select(
-        'id, numero, titulo, comision, estado, tipo, fecha_presentacion, proponente, url_detalle',
+        `id, numero, titulo, comision, estado, tipo, fecha_presentacion, proponente, url_detalle, ${docJoin}`,
         { count: 'exact' },
       );
-
-    if (!includeMetadata) {
-      // Default — restrict to indexed-only set.
-      if (indexedIds.length === 0) {
-        // Nothing indexed yet — return empty. The UI surfaces a clear
-        // CTA pointing the user to the metadata-only mode.
-        res.json({
-          ok: true,
-          total: 0,
-          items: [],
-          include_metadata: false,
-        });
-        return;
-      }
-      q1 = q1.in('id', indexedIds);
-    }
 
     if (comision) q1 = q1.eq('comision', comision);
     if (estado) q1 = q1.eq('estado', estado);
@@ -282,20 +249,45 @@ silRouter.get('/expedientes', async (req, res) => {
       // with ilike. Numero is a string column with the dotted format
       // ("23.456"), so substring works for partial typing.
       const escaped = q.replace(/[%_]/g, (m) => `\\${m}`);
-      q1 = q1.or(`numero.ilike.%${escaped}%,titulo.ilike.%${escaped}%`);
+      // Normalize expediente format: if user types "24009", also search for "24.009".
+      // If user types "24.009", also search for "24009". This handles both formats.
+      const normalizedAlt = /^\d{5}$/.test(q)
+        ? `${q.slice(0, 2)}.${q.slice(2)}`
+        : /^\d{1,2}\.\d{3}$/.test(q)
+          ? q.replace('.', '')
+          : null;
+      const orClauses = [`numero.ilike.%${escaped}%`, `titulo.ilike.%${escaped}%`];
+      if (normalizedAlt) {
+        const escapedAlt = normalizedAlt.replace(/[%_]/g, (m) => `\\${m}`);
+        orClauses.push(`numero.ilike.%${escapedAlt}%`);
+      }
+      q1 = q1.or(orClauses.join(','));
     }
 
-    q1 = q1
+    const { data: rows, error, count: totalRows } = await q1
+      .order('fecha_presentacion', { ascending: false, nullsFirst: false })
       .order('id', { ascending: false })
       .range(offset, offset + limit - 1);
 
-    const { data: rows, count, error } = await q1;
-    if (error) throw new Error(error.message);
+    if (error) {
+      // PostgREST will throw 416 on out-of-bounds offset, return empty safely.
+      if (error.code === 'PGRST103') {
+        res.json({ ok: true, total: totalRows ?? 0, items: [], include_metadata: includeMetadata });
+        return;
+      }
+      throw new Error(`Supabase query failed: ${error.message} - ${error.details || ''}`);
+    }
 
-    const items = (rows ?? []).map((r) => {
+    const items = (rows ?? []).map((r: any) => {
+      const docs = r.sil_documentos || [];
       const id = r.id as number;
-      const docsCount = docCountByExp.get(id) ?? 0;
-      const tipos = Array.from(tiposByExp.get(id) ?? new Set<string>());
+      const docsCount = docs.length;
+      
+      const tipos = new Set<string>();
+      for (const doc of docs) {
+        if (doc.tipo) tipos.add(doc.tipo);
+      }
+      
       return {
         id,
         numero: r.numero as string,
@@ -316,7 +308,7 @@ silRouter.get('/expedientes', async (req, res) => {
 
     res.json({
       ok: true,
-      total: count ?? 0,
+      total: totalRows ?? 0,
       items,
       include_metadata: includeMetadata,
     });
@@ -325,3 +317,6 @@ silRouter.get('/expedientes', async (req, res) => {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
 });
+
+import { silDownloadHandler } from './sil_download.js';
+silRouter.get('/documentos/:docId/download', silDownloadHandler);

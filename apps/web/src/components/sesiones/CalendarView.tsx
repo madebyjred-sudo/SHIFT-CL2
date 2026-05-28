@@ -43,10 +43,14 @@ export function CalendarView({ sessions, initialMonth, onDayClick }: Props) {
   const today = startOfDay(new Date());
 
   // Map iso-day → sessions on that day
+  // Anclamos a mediodía local para evitar que UTC midnight (timezone CR
+  // -6h) corra la sesión al día anterior en el calendario.
   const byDay = useMemo(() => {
     const m = new Map<string, SessionListItem[]>();
     for (const s of sessions) {
-      const t = Date.parse(s.fecha);
+      if (!s.fecha) continue;
+      const ymd = String(s.fecha).slice(0, 10);
+      const t = Date.parse(`${ymd}T12:00:00`);
       if (!Number.isFinite(t)) continue;
       const k = isoDay(startOfDay(new Date(t)));
       if (!m.has(k)) m.set(k, []);
@@ -148,7 +152,7 @@ export function CalendarView({ sessions, initialMonth, onDayClick }: Props) {
                       key={it.id}
                       className={cn(
                         'w-1.5 h-1.5 rounded-full',
-                        it.estado === 1 ? 'bg-emerald-500' : 'bg-amber-500',
+                        it.estado === 2 ? 'bg-emerald-500' : 'bg-amber-500',
                       )}
                       title={it.titulo}
                     />

@@ -1,6 +1,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { embedQuery } from './embeddings.js';
 import { withRetry, withTimeout } from './resilience.js';
+import { extractExpedienteMentions } from './voteExtractor.js';
 
 /**
  * Per-chunk metadata jsonb. Shape varies by source_type:
@@ -23,6 +24,12 @@ export interface ChunkMetadata {
   end?: number;
   word_count?: number;
   title?: string;
+  // transcript — Wave 4 #4 (2026-05-26): expediente que se estaba debatiendo
+  // en el momento de la votación, asignado heurísticamente vía voteExtractor.
+  // null/undefined si el chunk no es de votación o no había expediente
+  // mencionado en chunks previos. Permite que Lexa cite "votación del expediente
+  // X (sesión Y · HH:MM)" aún cuando el N° no aparezca literal en el chunk.
+  votando_expediente?: string;
   // sil_*
   sil_doc_id?: string;
   sil_doc_tipo?: string;
@@ -101,11 +108,78 @@ function supa(): SupabaseClient {
  * prod migration drift without breaking the demo flow.
  */
 export async function searchTranscripts(args: SearchArgs): Promise<ChunkHit[]> {
-  const topK = args.top_k ?? 5;
+  // 2026-05-26: subido de 5→12. Lawyer test L9 ("qué votación en plenaria
+  // 21 may") demostró que con k=5 los chunks con "56 votos a favor" se
+  // pierden en queries genéricas. Plenarias tienen ~1000 chunks; k=12
+  // da mejor cobertura sin saturar el context.
+  const topK = args.top_k ?? 12;
+
+  // 2026-05-26 Wave 4 #7 follow-up: exact-lookup fallback para queries que
+  // mencionan expediente N° específico. El HNSW index pgvector falla en
+  // queries amplias (>20s sin filter de fecha) — pero los chunks sintéticos
+  // de votación tienen `metadata.votando_expediente` set y un partial index
+  // sobre ese campo permite lookup directo en <100ms.
+  //
+  // Cuando la query menciona "expediente 24.998" (o similar), pre-fetch
+  // los chunks asociados y los retornamos primero, antes del semantic search.
+  // Si la semántica retorna en tiempo, mergeamos. Si timeoutea, al menos
+  // tenemos los exact hits.
+  //
+  // Garantía: el usuario recibe respuesta correcta para el caso más común
+  // (preguntar por un expediente específico), incluso si el HNSW falla.
+  const mentionedExpedientes = extractExpedienteMentions(args.query);
+  const exactHits: ChunkHit[] = [];
+  if (mentionedExpedientes.length > 0) {
+    for (const exp of mentionedExpedientes) {
+      const { data, error } = await supa()
+        .from('legislative_chunks')
+        .select('id, session_id, source_ref, source_type, chunk_index, content, metadata')
+        .eq('source_type', 'transcript')
+        .eq('metadata->>votando_expediente', exp)
+        .limit(3);
+      if (error) {
+        // Log but don't throw — degraded mode acceptable.
+        continue;
+      }
+      for (const row of (data ?? []) as Array<{
+        id: string;
+        session_id: string;
+        source_ref: string;
+        source_type: string;
+        chunk_index: number;
+        content: string;
+        metadata: ChunkMetadata | null;
+      }>) {
+        exactHits.push({
+          chunk_id: row.id,
+          session_id: row.session_id,
+          source_ref: row.source_ref,
+          chunk_index: row.chunk_index,
+          content: row.content,
+          similarity: 1.0, // Exact match — máxima prioridad.
+          fecha: (row.metadata?.fecha as string) ?? '',
+          comision: (row.metadata?.comision as string) ?? '',
+          tipo: (row.metadata?.tipo as string) ?? '',
+          video_url: null,
+          transcript_url: null,
+          metadata: row.metadata,
+          source_type: row.source_type,
+        });
+      }
+    }
+  }
 
   const queryEmbedding = await embedQuery(args.query);
 
-  return withRetry(
+  // 2026-05-26 audit asesor bug #6 simétrico: Lexa puede pasar comision/fecha
+  // como string vacío "" en lugar de omitirlos. El RPC con filter="" matchea
+  // ningún row (text) o crashea (date). Normalizamos defensivamente igual que
+  // searchExpedientes. Ver decisions/2026-05-26-audit-asesor-7-bugs-en-cascada.md
+  const cleanComision = (args.comision ?? '').trim() || null;
+  const cleanFechaFrom = (args.fecha_from ?? '').trim() || null;
+  const cleanFechaTo = (args.fecha_to ?? '').trim() || null;
+
+  const semanticHits = await withRetry(
     () =>
       withTimeout(
         async (signal) => {
@@ -116,9 +190,9 @@ export async function searchTranscripts(args: SearchArgs): Promise<ChunkHit[]> {
               query_embedding: queryEmbedding,
               match_count: topK,
               filter_session_id: null,
-              filter_comision: args.comision ?? null,
-              filter_fecha_from: args.fecha_from ?? null,
-              filter_fecha_to: args.fecha_to ?? null,
+              filter_comision: cleanComision,
+              filter_fecha_from: cleanFechaFrom,
+              filter_fecha_to: cleanFechaTo,
               filter_source_type: null,
               filter_source_ref_prefix: null,
             })
@@ -140,16 +214,35 @@ export async function searchTranscripts(args: SearchArgs): Promise<ChunkHit[]> {
               query_embedding: queryEmbedding,
               match_count: topK,
               filter_session_id: null,
-              filter_comision: args.comision ?? null,
-              filter_fecha_from: args.fecha_from ?? null,
-              filter_fecha_to: args.fecha_to ?? null,
+              filter_comision: cleanComision,
+              filter_fecha_from: cleanFechaFrom,
+              filter_fecha_to: cleanFechaTo,
             })
             .abortSignal(signal);
           if (v1.error) throw new Error(`match_chunks fallback: ${v1.error.message}`);
           return (v1.data ?? []) as ChunkHit[];
         },
-        { ms: 8_000, label: 'supabase:match_chunks_v3' },
+        // 2026-05-26 Wave 4 #7: subido de 8s → 20s. El HNSW index pgvector
+        // sobre 800k+ chunks toma ~10s en queries amplias (sin session_id
+        // filter). 8s causaba aborts en queries legítimas y Lexa devolvía
+        // "no encontré". 20s deja margen para el 95-percentil. Sentry alerta
+        // si excede consistentemente — entonces investigar REINDEX o
+        // particionar el index por source_type.
+        { ms: 20_000, label: 'supabase:match_chunks_v3' },
       ),
     { attempts: 2, baseDelayMs: 300, label: 'supabase:match_chunks_v3' },
-  );
+  ).catch((err) => {
+    // Si el semantic search falla (timeout, etc), seguimos con los exact hits.
+    // No queremos que el user vea "no encontré" cuando tenemos chunks exact-match.
+    if (exactHits.length > 0) return [] as ChunkHit[];
+    throw err; // Re-throw si no hay nada de fallback.
+  });
+
+  // Merge: exact hits primero (similarity=1.0), luego semantic, dedup por chunk_id.
+  const seenIds = new Set(exactHits.map((h) => h.chunk_id));
+  const merged = [
+    ...exactHits,
+    ...semanticHits.filter((h) => !seenIds.has(h.chunk_id)),
+  ];
+  return merged.slice(0, topK);
 }

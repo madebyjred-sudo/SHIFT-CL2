@@ -1,0 +1,23 @@
+# .gcloudignore — controla qué archivos sube gcloud builds submit
+# CRITICAL: NO heredamos .gitignore aquí (necesitamos infra/deploy/certs/*.pem
+# que está blockeado por *.pem en .gitignore). Listamos solo lo que SÍ excluimos.
+.git
+.github
+.gitignore
+.dockerignore
+node_modules
+**/node_modules
+dist
+**/dist
+build
+**/build
+*.log
+.logs
+.env
+.env.local
+.env.*.local
+.DS_Store
+.vscode
+.idea
+.turbo
+infra/secrets/

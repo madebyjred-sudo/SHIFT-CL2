@@ -172,6 +172,11 @@ export function DocumentosExpediente({ documentos }: Props) {
             {docs.map((doc) => {
               const tipoConf = getTipo(doc.tipo);
               const statusInfo = embedStatusLabel(doc.embed_status);
+              // Pedido 16k — marcar el row del sustitutivo vigente. Es el
+              // mismo doc que el banner superior referencia, pero el badge
+              // en línea evita que el consultor tenga que mirar las fechas
+              // de varios sustitutivos para deducir cuál manda.
+              const isVigente = sustitutivoVigente && doc.id === sustitutivoVigente.id;
               return (
                 <li key={doc.id} className="px-4 py-3 flex items-start gap-3">
                   <FileText
@@ -188,6 +193,14 @@ export function DocumentosExpediente({ documentos }: Props) {
                       >
                         {tipoConf.label}
                       </span>
+                      {isVigente && (
+                        <span
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-300"
+                          title="Versión vigente del proyecto — Lexa y Atlas responden con este texto, no con el original"
+                        >
+                          ★ Vigente
+                        </span>
+                      )}
                       {doc.fecha && (
                         <span className="text-[11px] text-[#0e1745]/45 dark:text-white/45">
                           {fmtDate(doc.fecha)}
@@ -205,17 +218,30 @@ export function DocumentosExpediente({ documentos }: Props) {
                       </p>
                     )}
                   </div>
-                  {/* Open link */}
-                  <a
-                    href={doc.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="shrink-0 mt-0.5 inline-flex items-center gap-1 text-[11px] text-cl2-accent hover:underline"
-                    title="Abrir PDF"
-                  >
-                    <ExternalLink size={12} />
-                    <span className="hidden sm:inline">Abrir</span>
-                  </a>
+                  {/* Actions */}
+                  <div className="flex items-center gap-3 shrink-0 mt-0.5">
+                    {doc.storage_path ? (
+                      <a
+                        href={`/api/sil/documentos/${doc.id}/download`}
+                        className="inline-flex items-center gap-1 text-[11px] text-cl2-accent font-medium hover:underline bg-cl2-accent/10 px-2 py-1 rounded-md"
+                        title="Descargar documento (servido desde Shift CL2)"
+                      >
+                        <Download size={12} />
+                        <span className="hidden sm:inline">Descargar</span>
+                      </a>
+                    ) : (
+                      <a
+                        href={doc.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-[11px] text-cl2-accent hover:underline"
+                        title="Abrir PDF en asamblea.go.cr"
+                      >
+                        <ExternalLink size={12} />
+                        <span className="hidden sm:inline">Abrir</span>
+                      </a>
+                    )}
+                  </div>
                 </li>
               );
             })}

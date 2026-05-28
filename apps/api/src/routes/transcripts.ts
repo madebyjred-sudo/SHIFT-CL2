@@ -253,6 +253,140 @@ internalTriggersRouter.post('/process-pending', async (req, res) => {
   res.json({ ok: true, processed, pending_remaining: pendingRemaining });
 });
 
+/**
+ * POST /api/internal/transcripts/reprocess
+ *
+ * Re-procesa una o varias sesiones que YA están indexed pero tienen
+ * transcripts magros (caso visto post-13may: chunks de 600s con
+ * MAX_TOKENS dejaban minutos sin transcribir). Borra segments + chunks
+ * de transcript existentes, resetea status='pending' y vuelve a llamar
+ * processSession (que dispara fetchTranscriptViaGeminiChunked con los
+ * fixes nuevos: windowS=300, retry, split en chunks magros).
+ *
+ * Body (uno de los dos):
+ *   { session_ids: ["uuid", ...] }
+ *   { since_date: "YYYY-MM-DD" }  → todas las sesiones con fecha>=since_date
+ *
+ * Opt:
+ *   dry_run?: boolean   → no borra ni reprocesa, solo lista candidatos
+ *   limit?: number      → max sesiones a procesar (default 10)
+ *
+ * Auth: X-Internal-Trigger header.
+ */
+internalTriggersRouter.post('/transcripts/reprocess', async (req, res) => {
+  const secret = process.env.INTERNAL_TRIGGER_SECRET;
+  if (!secret) {
+    res.status(503).json({ ok: false, error: 'server_misconfigured' });
+    return;
+  }
+  if (req.headers['x-internal-trigger'] !== secret) {
+    res.status(401).json({ ok: false, error: 'unauthorized' });
+    return;
+  }
+
+  const body = (req.body ?? {}) as {
+    session_ids?: string[];
+    since_date?: string;
+    dry_run?: boolean;
+    limit?: number;
+  };
+  const dryRun = body.dry_run === true;
+  const limit = typeof body.limit === 'number' && body.limit > 0 ? Math.min(body.limit, 20) : 10;
+
+  // Resolver targets
+  let targets: Array<{ id: string; fecha: string | null; tipo: string | null }>;
+  try {
+    if (body.session_ids && Array.isArray(body.session_ids)) {
+      const { data, error } = await supa()
+        .from('sessions')
+        .select('id, fecha, tipo')
+        .in('id', body.session_ids)
+        .limit(limit);
+      if (error) throw new Error(error.message);
+      targets = (data ?? []) as Array<{ id: string; fecha: string | null; tipo: string | null }>;
+    } else if (body.since_date) {
+      const { data, error } = await supa()
+        .from('sessions')
+        .select('id, fecha, tipo')
+        .gte('fecha', body.since_date)
+        .eq('status', 'indexed')
+        .order('fecha', { ascending: false })
+        .limit(limit);
+      if (error) throw new Error(error.message);
+      targets = (data ?? []) as Array<{ id: string; fecha: string | null; tipo: string | null }>;
+    } else {
+      res.status(400).json({ ok: false, error: 'session_ids o since_date requerido' });
+      return;
+    }
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+    return;
+  }
+
+  if (dryRun) {
+    res.json({ ok: true, dry_run: true, candidates: targets.length, sessions: targets });
+    return;
+  }
+
+  // ── Borrar segments + chunks transcript + reset status SINCRONO ──────────
+  // El cleanup es rápido (delete + update). Lo hacemos antes de responder
+  // para confirmar al caller que los targets quedaron en 'pending'.
+  for (const t of targets) {
+    try {
+      await supa().from('transcript_segments').delete().eq('session_id', t.id);
+      await supa()
+        .from('legislative_chunks')
+        .delete()
+        .eq('source_type', 'transcript')
+        .eq('session_id', t.id);
+      await supa().from('sessions').update({ status: 'pending' }).eq('id', t.id);
+    } catch (err) {
+      logger.error('transcript_reprocess_cleanup_failed', {
+        session_id: t.id,
+        error: (err as Error).message,
+      });
+    }
+  }
+
+  // ── Respuesta inmediata + processing en background ────────────────────────
+  // processSession sobre una plenaria de 2-4h puede tardar 15-40 min con
+  // chunks de 300s + retries. Cloud Run cierra el request HTTP a 600s pero
+  // gen2 + cpu-no-throttling mantiene el container vivo mientras hay CPU
+  // ocupada — el process Node sigue trabajando hasta terminar.
+  //
+  // Patrón: devolver 202 Accepted con los IDs marcados como 'pending'. El
+  // cron `process-pending` (cada 10 min) los recoge si quedaron a medias.
+  // El cliente puede chequear status vía SQL o GET /api/admin/transcripts.
+  res.status(202).json({
+    ok: true,
+    accepted_count: targets.length,
+    sessions: targets.map((t) => ({ id: t.id, fecha: t.fecha, tipo: t.tipo })),
+    note: 'Procesamiento iniciado en background. Verificar status en sessions table o esperar process-pending cron (cada 10 min).',
+  });
+
+  // Procesar en background sin await
+  (async () => {
+    for (const t of targets) {
+      try {
+        const result = await processSession(t.id);
+        logger.info('transcript_reprocess_done', {
+          session_id: t.id,
+          fecha: t.fecha,
+          segments_inserted: result.segments_inserted,
+          status: result.status,
+        });
+      } catch (err) {
+        logger.error('transcript_reprocess_failed', {
+          session_id: t.id,
+          error: (err as Error).message,
+        });
+      }
+    }
+  })().catch((err) => {
+    logger.error('transcript_reprocess_background_unhandled', { error: (err as Error).message });
+  });
+});
+
 // ── /api/admin/transcripts router ─────────────────────────────────────────────
 
 export const transcriptsAdminRouter = Router();

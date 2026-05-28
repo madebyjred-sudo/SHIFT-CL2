@@ -19,6 +19,7 @@
  */
 import { useState, type ReactNode } from 'react';
 import {
+  ArrowLeft,
   LayoutDashboard,
   FileAudio,
   Bot,
@@ -31,6 +32,9 @@ import {
   ScrollText,
   Settings2,
   Youtube,
+  DollarSign,
+  Briefcase,
+  MessageCircle,
   type LucideIcon,
 } from 'lucide-react';
 import { TopDock } from '@/components/top-dock';
@@ -53,6 +57,8 @@ interface NavItem {
 //   • Lo que queda son las 8 secciones con data real y CTAs funcionales.
 const NAV: ReadonlyArray<NavItem> = [
   { id: 'overview',        label: 'Vista general',       icon: LayoutDashboard, group: 'Operación' },
+  { id: 'clientes',        label: 'Clientes',            icon: Briefcase,       group: 'Operación' },
+  { id: 'whatsapp-alerts', label: 'Alertas WhatsApp',    icon: MessageCircle,   group: 'Operación' },
   { id: 'transcripts',     label: 'Cola de revisión',    icon: Youtube,         group: 'Operación' },
   { id: 'agentes',         label: 'Agentes',             icon: Bot,             group: 'Operación' },
   { id: 'feedback',        label: 'Feedback · Bugs',     icon: MessageSquareWarning, group: 'Operación' },
@@ -60,6 +66,7 @@ const NAV: ReadonlyArray<NavItem> = [
   { id: 'expedientes',     label: 'Expedientes SIL',     icon: Folder,          group: 'Contenido' },
   { id: 'podcasts',        label: 'Podcasts',            icon: Headphones,      group: 'Contenido' },
   { id: 'usuarios',        label: 'Usuarios',            icon: Users,           group: 'Acceso & sistema' },
+  { id: 'tokens',          label: 'Tokens / Costo',      icon: DollarSign,      group: 'Acceso & sistema' },
   { id: 'auditoria',       label: 'Auditoría',           icon: ScrollText,      group: 'Acceso & sistema' },
 ];
 
@@ -101,6 +108,16 @@ export function AdminShell({ active, badges, children }: AdminShellProps) {
         <section className="flex-1 min-h-0 min-w-0 grid grid-cols-1 md:grid-cols-[220px_1fr] border border-b-0 border-[#0e1745]/[0.06] dark:border-white/[0.04] rounded-t-2xl shadow-[0_4px_20px_rgba(14,23,69,0.04)] dark:shadow-[0_4px_20px_rgba(0,0,0,0.12)] bg-white dark:bg-white/[0.02] overflow-hidden">
           {/* Section nav rail */}
           <aside className="hidden md:flex flex-col gap-0.5 border-r border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-white/60 dark:bg-white/[0.015] backdrop-blur-sm px-3 py-4 overflow-y-auto">
+            {/* Botón volver — pedido cliente 2026-05-22 */}
+            <button
+              type="button"
+              onClick={() => (window.location.href = '/')}
+              className="mx-2 mb-2 inline-flex items-center gap-1.5 text-[11px] text-[#0e1745]/55 dark:text-white/55 hover:text-[#0e1745] dark:hover:text-white transition-colors"
+              aria-label="Volver al chat"
+            >
+              <ArrowLeft className="w-3 h-3" />
+              Volver al chat
+            </button>
             <div className="px-2 pb-3 mb-1 border-b border-[#0e1745]/[0.06] dark:border-white/[0.06]">
               <div className="text-[9.5px] font-semibold uppercase tracking-[0.18em] text-[#0e1745]/45 dark:text-white/45">
                 Admin · CL2

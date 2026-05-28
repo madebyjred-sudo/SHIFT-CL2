@@ -44,14 +44,44 @@ export interface AuthedUser {
 // app si un admin la aprueba en /admin/usuarios. La data vive en la tabla
 // user_access (ver migration 0025_user_access_gate.sql).
 
+export type UserRole = 'lector' | 'editor' | 'operador' | 'admin' | 'cliente';
+
 export interface UserAccess {
   user_id: string;
   email: string;
   full_name: string | null;
   avatar_url: string | null;
   status: 'pending' | 'active' | 'rejected' | 'suspended';
-  role: 'lector' | 'editor' | 'operador' | 'admin' | null;
+  // 2026-05-26 Ronald F1: agregado 'cliente'. Migration 0052 actualizó el
+  // CHECK constraint en DB. Cliente role tiene acceso operativo (chat,
+  // browse, alertas) pero NO puede invocar tools editoriales con marca CL2
+  // (generate_presentation, generate_docx, generate_asset, edit_asset_slide)
+  // ni acceder al panel /admin.
+  role: UserRole | null;
+  // 2026-05-26 Ronald F2: FK opcional a cl2_clients. Cuando el user tiene
+  // este link, el chat inyecta cl2_clients[cliente_id].context_prompt
+  // como system prefix para que Lexa/Atlas entiendan las prioridades de
+  // esa institución.
+  cliente_id: string | null;
   approved_at: string | null;
+}
+
+/**
+ * Tools editoriales con marca CL2 — restringidas para role='cliente'.
+ * Wave 4 / Ronald F1.
+ */
+export const CL2_EDITORIAL_TOOLS = new Set([
+  'generate_presentation',
+  'generate_docx',
+  'generate_asset',
+  'edit_asset_slide',
+]);
+
+/** True si el rol puede invocar tools editoriales con marca CL2. */
+export function canUseEditorialTools(role: UserRole | null): boolean {
+  // null/pending → conservar comportamiento previo (acceso completo); admin/operador/editor/lector OK.
+  // 'cliente' es el ÚNICO rol que se restringe.
+  return role !== 'cliente';
 }
 
 let _service: SupabaseClient | null = null;
@@ -73,7 +103,7 @@ function service(): SupabaseClient {
 export async function loadUserAccess(userId: string): Promise<UserAccess | null> {
   const { data, error } = await service()
     .from('user_access')
-    .select('user_id, email, full_name, avatar_url, status, role, approved_at')
+    .select('user_id, email, full_name, avatar_url, status, role, cliente_id, approved_at')
     .eq('user_id', userId)
     .maybeSingle();
   if (error) {
@@ -130,6 +160,7 @@ export async function requireActiveUser(
       avatar_url: null,
       status: 'active',
       role: 'lector',
+      cliente_id: null,
       approved_at: null,
     };
   }
@@ -143,6 +174,7 @@ export async function requireActiveUser(
       avatar_url: null,
       status: 'pending',
       role: null,
+      cliente_id: null,
       approved_at: null,
     };
   }

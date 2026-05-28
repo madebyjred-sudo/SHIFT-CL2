@@ -32,6 +32,11 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { syncCentinelaWatchlist } from '../jobs/centinelaSilSync.js';
 import { scrapeAgenda } from '../jobs/agendaScrape.js';
 import { detectSimilarExpedientes } from '../jobs/centinelaSimilarDetect.js';
+import { runSilDiscovery } from '../jobs/silDiscovery.js';
+import { enrichExpedientesBulk } from '../jobs/silEnrichExpediente.js';
+import { runSilDownloadDocs } from '../jobs/silDownloadDocs.js';
+import { runSilEmbedDocs } from '../jobs/silEmbedDocs.js';
+import { createClient as createSupaClient } from '@supabase/supabase-js';
 import { getUserFromRequest, getUserIdFromRequest, type AuthedUser } from '../services/auth.js';
 import { logger } from '../services/logger.js';
 import { insertAndDispatch } from '../services/centinelaNotifier.js';
@@ -112,6 +117,339 @@ centinelaInternalRouter.post('/sil-sync', async (req, res) => {
   } catch (err) {
     const message = (err as Error)?.message ?? String(err);
     req.log?.error('centinela_internal_sil_sync_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/sil-enrich
+ *
+ * Llamado por Cloud Scheduler cada hora. Para cada expediente sin proponentes
+ * registrados (entre los más recientes), llama al SIL WebForms y persiste el
+ * enriched data (proponentes con orden, comisiones, fechas oficiales, gaceta,
+ * número de ley, etc.). Procesa hasta N expedientes por run para no exceder
+ * el timeout de 600s de Cloud Run.
+ *
+ * Cloud Scheduler reference:
+ *   gcloud scheduler jobs create http centinela-sil-enrich \
+ *     --schedule='0 * * * *' --time-zone='America/Costa_Rica' \
+ *     --uri="https://<service>/api/internal/centinela/sil-enrich" \
+ *     --http-method=POST \
+ *     --headers="X-Internal-Trigger=$INTERNAL_TRIGGER_SECRET"
+ *
+ * Body opcional: { limit?: number, min_id?: number }
+ *   - limit: máximo de expedientes a procesar (default 80, cabe en 600s)
+ *   - min_id: solo procesar expedientes con id >= min_id (default 25000 = recientes)
+ */
+centinelaInternalRouter.post('/sil-enrich', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  const body = (req.body ?? {}) as {
+    limit?: number;
+    min_id?: number;
+    re_enrich_for_consultas?: boolean;
+    /**
+     * Lista explícita de números a procesar. Cuando se pasa, bypasea
+     * toda la lógica de filtros + paginación y procesa esos números.
+     * Caller (Python orchestrator) hace su propia query SQL para
+     * encontrar pendientes y los manda explícitos. Más confiable que
+     * delegar la paginación al endpoint.
+     */
+    numeros?: string[];
+  };
+  const limit = Math.min(Math.max(body.limit ?? 80, 1), 200);
+  const minId = body.min_id ?? 25000;
+  const reEnrichForConsultas = body.re_enrich_for_consultas === true;
+  const explicitNumeros = Array.isArray(body.numeros) ? body.numeros.filter((n): n is string => typeof n === 'string' && n.length > 0) : null;
+
+  try {
+    const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supaKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!supaUrl || !supaKey) throw new Error('supabase env missing');
+    const s = createSupaClient(supaUrl, supaKey, { auth: { persistSession: false, autoRefreshToken: false } });
+
+    let targets: string[];
+
+    if (explicitNumeros && explicitNumeros.length > 0) {
+      // Modo "numeros explícitos" — el caller ya hizo su query y sabe qué
+      // procesar. Bypaseamos paginación.
+      targets = explicitNumeros.slice(0, limit);
+    } else if (reEnrichForConsultas) {
+      // Backfill de Pedidos 04 + 16k sobre expedientes ya procesados.
+      // Pedimos los expedientes que SÍ tienen proponentes pero NO tienen
+      // consultas. (Algunos tendrán 0 consultas reales — los marcamos como
+      // "intentados" via cualquier otra señal, pero por simplicidad acá
+      // el reintento sobre los que ya intentamos no rompe nada porque el
+      // enricher es idempotente.)
+      const { data: withProp } = await s.from('sil_expediente_proponentes').select('expediente_id');
+      const propSet = new Set((withProp ?? []).map((r) => r.expediente_id as string));
+      const { data: withCons } = await s.from('sil_expediente_consultas').select('expediente_id');
+      const consSet = new Set((withCons ?? []).map((r) => r.expediente_id as string));
+
+      const { data: candidates } = await s
+        .from('sil_expedientes')
+        .select('numero, id')
+        .gte('id', minId)
+        .order('id', { ascending: false })
+        .limit(limit * 5);
+
+      targets = (candidates ?? [])
+        .filter((r) => propSet.has(r.numero as string) && !consSet.has(r.numero as string))
+        .slice(0, limit)
+        .map((r) => r.numero as string);
+    } else {
+      // Modo default: enrich inicial — expedientes SIN TRAMITACIÓN.
+      //
+      // Por qué cambiamos de "sin proponentes" a "sin tramite" (2026-05-20):
+      // Un backfill manual previo (script Python) llenó proponentes para
+      // 9,659 expedientes históricos pero NO procesó las otras 7 tablas
+      // (tramite, audiencias, documentos, consultas, fechas, actas,
+      // orden_dia). El filtro viejo "sin proponentes" hacía que el
+      // enricher SKIPEARA esos 9,659 — solo procesaba los nuevos. Result:
+      // 99%+ de expedientes históricos sin tramitación visible para el
+      // cliente.
+      //
+      // El nuevo filtro "sin tramite" garantiza que cualquier expediente
+      // sin la tabla central de tramitación entra al pipeline. El enricher
+      // es idempotente (DELETE+INSERT en todas las tablas), así que
+      // re-procesar uno con proponentes no rompe nada — solo agrega las
+      // 7 tablas restantes.
+      // PAGINAR withTramite — PostgREST default limit es 1000 rows. Con
+      // 3,400+ expedientes con tramite, el query naive solo trae los
+      // primeros 1000. Resultado: 2,400+ expedientes que SÍ tienen tramite
+      // se consideran "sin tramite" y el endpoint los re-procesa
+      // infinitamente, bloqueando expedientes realmente pendientes.
+      // Bug descubierto 2026-05-21: workers gastaron 12h re-procesando
+      // expedientes ya completos mientras 25.493 (real pendiente) nunca
+      // se tocó. Fix: paginar en chunks de 1000 hasta agotar.
+      const enrichedSet = new Set<string>();
+      const PAGE_SIZE = 1000;
+      let pageFrom = 0;
+      while (true) {
+        const { data: page } = await s
+          .from('sil_expediente_tramite')
+          .select('expediente_id')
+          .range(pageFrom, pageFrom + PAGE_SIZE - 1);
+        if (!page || page.length === 0) break;
+        for (const r of page) enrichedSet.add(r.expediente_id as string);
+        if (page.length < PAGE_SIZE) break;
+        pageFrom += PAGE_SIZE;
+      }
+
+      // Paginar candidates hasta encontrar `limit` que NO estén en el
+      // enrichedSet. Bug previo (v13): candidates con limit fijo (5000)
+      // top-N por id DESC. Si los top 5000 ya tienen tramite, targets=[]
+      // y endpoint reporta "all up to date" — los 20k históricos sin
+      // tramite nunca se procesan. Fix v14: bucle hasta tener suficientes
+      // targets o agotar la tabla.
+      targets = [];
+      let candFrom = 0;
+      const CAND_PAGE = 2000;
+      const MAX_PAGES = 15; // Hard ceiling 30k rows
+      for (let pageIdx = 0; pageIdx < MAX_PAGES; pageIdx++) {
+        const { data: page } = await s
+          .from('sil_expedientes')
+          .select('numero, id')
+          .gte('id', minId)
+          .order('id', { ascending: false })
+          .range(candFrom, candFrom + CAND_PAGE - 1);
+        if (!page || page.length === 0) break;
+        for (const r of page) {
+          if (!enrichedSet.has(r.numero as string)) {
+            targets.push(r.numero as string);
+            if (targets.length >= limit) break;
+          }
+        }
+        if (targets.length >= limit) break;
+        if (page.length < CAND_PAGE) break;
+        candFrom += CAND_PAGE;
+      }
+    }
+
+    if (targets.length === 0) {
+      res.json({
+        ok: true,
+        result: {
+          enriched: 0,
+          message: reEnrichForConsultas
+            ? 'no targets — todos los expedientes ya tienen consultas registradas'
+            : 'no targets — all up to date',
+        },
+      });
+      return;
+    }
+
+    const result = await enrichExpedientesBulk(s, targets, { politenessMs: 700 });
+    logger.info('centinela_internal_sil_enrich_complete', {
+      ...result,
+      mode: reEnrichForConsultas ? 're_enrich_for_consultas' : 'initial',
+      processed: targets.length,
+    });
+    res.json({ ok: true, result, processed: targets.length, mode: reEnrichForConsultas ? 're_enrich_for_consultas' : 'initial' });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_sil_enrich_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/detect-bold-fechas
+ *
+ * Pedido 16g del cliente CL2: detectar si una "fecha estimada de
+ * dictamen" extraída del texto plano aparece EN NEGRITA en el DOCX
+ * original. La negrita es señal de que el analista del SIL marcó esa
+ * fecha como definitiva.
+ *
+ * Body opcional: { limit?: number, force_recheck?: boolean }
+ */
+centinelaInternalRouter.post('/detect-bold-fechas', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  const body = (req.body ?? {}) as { limit?: number; force_recheck?: boolean };
+
+  try {
+    const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supaKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!supaUrl || !supaKey) throw new Error('supabase env missing');
+    const s = createSupaClient(supaUrl, supaKey, { auth: { persistSession: false, autoRefreshToken: false } });
+
+    const { detectBoldFechasBulk } = await import('../jobs/detectBoldFechas.js');
+    const result = await detectBoldFechasBulk(s, {
+      limit: body.limit,
+      forceRecheck: body.force_recheck === true,
+    });
+
+    logger.info('centinela_internal_detect_bold_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_detect_bold_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/scan-mociones
+ *
+ * Pedido 11 / 11bis del cliente CL2: alerta cuando se presenta una
+ * moción en un expediente del watchlist. Corre cada 30min (Cloud
+ * Scheduler) o on-demand.
+ *
+ * Body opcional: { since?: string, limit?: number }
+ *   - since: ISO timestamp — solo mociones scraped después. Default = hace 24h.
+ *   - limit: cap de mociones (default 500).
+ */
+centinelaInternalRouter.post('/scan-mociones', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  const body = (req.body ?? {}) as { since?: string; limit?: number };
+
+  try {
+    const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supaKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!supaUrl || !supaKey) throw new Error('supabase env missing');
+    const s = createSupaClient(supaUrl, supaKey, { auth: { persistSession: false, autoRefreshToken: false } });
+
+    const { scanMocionesParaAlertas } = await import('../jobs/mocionAlertScan.js');
+    const result = await scanMocionesParaAlertas(s, {
+      since: body.since,
+      limit: body.limit,
+    });
+
+    logger.info('centinela_internal_scan_mociones_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_scan_mociones_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/extract-fechas-dictamen
+ *
+ * Pedido 07 / 16g / 16h del cliente CL2.
+ *
+ * Corre el extractor de "fecha estimada de dictamen" sobre los documentos
+ * del SIL (sil_documentos.text_extracted) y persiste a
+ * sil_expediente_fechas_extraidas con campo='fecha_dictamen_estimada'.
+ * Si la fecha cambió respecto a la vigente, marca la previa como
+ * superseded_by → la nueva (chain histórico — Pedido 16h).
+ *
+ * Body opcional: { limit?: number, since?: string, force_reextract?: boolean,
+ *                  expediente_filter?: string[] }
+ *   - limit: máximo de docs a procesar (default 500, cap 2000)
+ *   - since: ISO date — solo docs creados después
+ *   - force_reextract: ignora caché y re-procesa docs ya intentados
+ *   - expediente_filter: lista de numeros (ej. ['23.511', '24.982'])
+ *     para procesar SOLO esos
+ */
+centinelaInternalRouter.post('/extract-fechas-dictamen', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  const body = (req.body ?? {}) as {
+    limit?: number;
+    since?: string;
+    force_reextract?: boolean;
+    expediente_filter?: string[];
+  };
+  const limit = Math.min(Math.max(body.limit ?? 500, 1), 2000);
+
+  try {
+    const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supaKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!supaUrl || !supaKey) throw new Error('supabase env missing');
+    const s = createSupaClient(supaUrl, supaKey, { auth: { persistSession: false, autoRefreshToken: false } });
+
+    const { extractFechasDictamenBulk } = await import('../jobs/extractFechasDictamen.js');
+
+    const result = await extractFechasDictamenBulk(s, {
+      limit,
+      since: body.since,
+      forceReextract: body.force_reextract === true,
+      expedienteFilter: body.expediente_filter,
+    });
+
+    logger.info('centinela_internal_extract_fechas_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_extract_fechas_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/sil-discovery
+ *
+ * Llamado por Cloud Scheduler diariamente. Descubre expedientes nuevos
+ * presentados en la Asamblea desde el último ingest (busca números
+ * consecutivos arriba del max actual en DB).
+ *
+ * Cloud Scheduler reference:
+ *   gcloud scheduler jobs create http centinela-sil-discovery \
+ *     --schedule='0 7 * * *' --time-zone='America/Costa_Rica' \
+ *     --uri="https://<service>/api/internal/centinela/sil-discovery" \
+ *     --http-method=POST \
+ *     --headers="X-Internal-Trigger=$INTERNAL_TRIGGER_SECRET"
+ */
+centinelaInternalRouter.post('/sil-discovery', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  try {
+    const result = await runSilDiscovery();
+    logger.info('centinela_internal_sil_discovery_complete', {
+      discovered: result.discovered_count,
+      empty: result.empty_count,
+      failed: result.failed_count,
+      starting_numero: result.starting_numero,
+      ending_numero: result.ending_numero,
+    });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_sil_discovery_failed', { error: message });
     res.status(500).json({ ok: false, error: message });
   }
 });
@@ -211,6 +549,328 @@ centinelaInternalRouter.post('/novelty-scan', async (req, res) => {
   } catch (err) {
     const message = (err as Error)?.message ?? String(err);
     req.log?.error('centinela_internal_novelty_scan_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/keyword-match
+ *
+ * Cada 30 min. Recorre watches `entity_type='tema'`, matchea cada keyword
+ * (ILIKE) contra sessions.metadata.resumen, sil_expedientes.titulo,
+ * sil_mociones.asunto y agenda_legislativa. Emite events
+ * `event_type='keyword_match'` (idempotente vía dedup_key).
+ *
+ * Cloud Scheduler reference:
+ *   gcloud scheduler jobs create http cl2-keyword-match \
+ *     --schedule='*\/30 * * * *' \
+ *     --uri="https://<service>/api/internal/centinela/keyword-match" \
+ *     --http-method=POST \
+ *     --headers="X-Internal-Trigger=$INTERNAL_TRIGGER_SECRET"
+ */
+centinelaInternalRouter.post('/keyword-match', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  try {
+    const { runKeywordMatcher } = await import('../jobs/keywordMatcher.js');
+    const result = await runKeywordMatcher();
+    logger.info('centinela_internal_keyword_match_complete', {
+      watches: result.watches_processed,
+      keywords: result.keywords_unique,
+      inserted: result.matches_inserted,
+      duplicates: result.matches_skipped_dup,
+      errors_count: result.errors.length,
+      duration_ms: result.duration_ms,
+    });
+    res.json({ ok: true, started_at: new Date().toISOString(), result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_keyword_match_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/daily-health-report
+ *
+ * Llamado por Cloud Scheduler una vez al día a las 6am CR. Captura un
+ * snapshot del estado del backend (counts, freshness por tabla, alertas
+ * por freshness threshold) y lo persiste en `cl2_daily_health`.
+ *
+ * Por qué existe: agregar 1 query timeseries en lugar de revisar logs
+ * job por job para ver si algo se rompió silenciosamente. Ver
+ * `dailyHealthReport.ts` para el contrato completo.
+ *
+ * Body: ninguno. Devuelve { ok, result: { status, alerts, snapshot_id, ... } }.
+ */
+centinelaInternalRouter.post('/daily-health-report', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  try {
+    const { runDailyHealthReport } = await import('../jobs/dailyHealthReport.js');
+    const result = await runDailyHealthReport();
+    logger.info('centinela_internal_daily_health_complete', {
+      status: result.status,
+      alerts_count: result.alerts.length,
+      duration_ms: result.duration_ms,
+      snapshot_id: result.snapshot_id,
+    });
+    res.json({ ok: true, started_at: new Date().toISOString(), result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_daily_health_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/llm-enrich-docs
+ *
+ * Llamado por Cloud Scheduler cada 30 min. Procesa un batch de docs SIL sin
+ * resumen/POR TANTO/decisión vía LLM (Haiku 4.5 vía OpenRouter). Page size
+ * bajo (50) para no triggerar PostgreSQL statement timeout. Cost por batch:
+ * ~$0.30. Si bg backfill cubre los 22K primero, el cron solo procesa los
+ * nuevos docs que entran al sistema (~ centavos/día).
+ *
+ * Body opcional: { limit?: number, dry_run?: bool, tipo?: string[] }
+ */
+centinelaInternalRouter.post('/llm-enrich-docs', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+  const body = (req.body ?? {}) as { limit?: number; dry_run?: boolean; tipo?: string[] };
+  const limit = Math.min(Math.max(body.limit ?? 100, 1), 500);
+  try {
+    const { runLlmEnrichDocs } = await import('../jobs/llmEnrichDocs.js');
+    const result = await runLlmEnrichDocs({
+      limit,
+      dry_run: body.dry_run ?? false,
+      tipo_filter: body.tipo,
+      concurrency: 5,
+    });
+    logger.info('centinela_internal_llm_enrich_complete', { ...result, requested_limit: limit });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_llm_enrich_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/categorize-expedientes
+ *
+ * Diario 4am. Clasifica expedientes nuevos/desactualizados en N de las 51
+ * categorías canónicas CL2 vía LLM. Sprint 3 Track P.
+ */
+centinelaInternalRouter.post('/categorize-expedientes', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+  try {
+    const { runCategorizeExpedientes } = await import('../jobs/categorizeExpedientes.js');
+    const result = await runCategorizeExpedientes({});
+    logger.info('centinela_internal_categorize_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_categorize_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/resumen-mixto
+ *
+ * Diario 5am. Genera resumen editorial 3-párrafos por expediente (contexto,
+ * posturas, próximos pasos) vía LLM. Sprint 3 Track P.
+ */
+centinelaInternalRouter.post('/resumen-mixto', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+  try {
+    const { runGenerateResumenes } = await import('../jobs/generateResumenMixto.js');
+    const result = await runGenerateResumenes({});
+    logger.info('centinela_internal_resumen_mixto_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_resumen_mixto_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/informe-semanal
+ *
+ * Lunes 6am. Genera informe semanal por cada user con watchlist activa.
+ * Sprint 3 Track P.
+ */
+centinelaInternalRouter.post('/informe-semanal', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+  try {
+    const { runGenerateInformesSemanales } = await import('../jobs/generateInformeSemanal.js');
+    const result = await runGenerateInformesSemanales({});
+    logger.info('centinela_internal_informe_semanal_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_informe_semanal_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/ingest-transcript-chunks
+ *
+ * Cada 30 min. Detecta sesiones plenarias con `transcript_segments` pero SIN
+ * chunks en `legislative_chunks` (delta-only), las agrupa en bloques de
+ * ~3000 chars, genera embeddings vía Vertex e inserta a la tabla — para que
+ * Lexa pueda citar lo que se dijo en sesiones nuevas.
+ *
+ * Body opcional: { limit_sessions?: number } (default 8, max 50)
+ */
+centinelaInternalRouter.post('/ingest-transcript-chunks', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+  const body = (req.body ?? {}) as { limit_sessions?: number };
+  try {
+    const { runIngestTranscriptChunks } = await import('../jobs/ingestTranscriptChunks.js');
+    const result = await runIngestTranscriptChunks({ limit_sessions: body.limit_sessions });
+    logger.info('centinela_internal_ingest_transcripts_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_ingest_transcripts_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// NOTA: download-sil-docs y ingest-ral-chunks no tienen scheduler (a hoy).
+// Para download-sil-docs: el script `download-sil-bulk.ts` necesita ejecutarse
+// como Cloud Run Job (no HTTP service) por OOM y permissions GCS. Manual por
+// ahora: `npm run download:sil:bulk`. Pendiente: migrarlo a Cloud Run Job +
+// Scheduler para automatización completa.
+// Para ingest-ral-chunks: Reglamento estable, manual con `npm run ingest:ral`.
+
+/**
+ * POST /api/internal/centinela/ingest-decretos
+ *
+ * Pedido 16i — Decretos ejecutivos. Procesa los items en
+ * sil_sharepoint_raw que aún no están en decretos_ejecutivos.
+ *
+ * Cloud Scheduler reference:
+ *   gcloud scheduler jobs create http cl2-ingest-decretos \
+ *     --schedule='0 5 * * *' --time-zone='America/Costa_Rica' \
+ *     --uri="https://<service>/api/internal/centinela/ingest-decretos" \
+ *     --http-method=POST --headers="X-Internal-Trigger=$INTERNAL_TRIGGER_SECRET"
+ */
+centinelaInternalRouter.post('/ingest-decretos', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  try {
+    const supaUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supaKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!supaUrl || !supaKey) throw new Error('supabase env missing');
+    const s = createSupaClient(supaUrl, supaKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+
+    const { ingestNewDecretos } = await import('../services/decretoIngestor.js');
+    const result = await ingestNewDecretos(s);
+
+    logger.info('centinela_internal_ingest_decretos_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_ingest_decretos_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/process-ordenes-dia
+ *
+ * Pedido 06 — Órdenes del día de comisiones. Procesa los PDFs en
+ * sil_sharepoint_raw (list_id='Órdenes del día') extrayendo expedientes
+ * mencionados y poblando agenda_legislativa.
+ *
+ * Body opcional: { limit?: number (default 200, cap 1000) }
+ *
+ * Cloud Scheduler reference:
+ *   gcloud scheduler jobs create http cl2-process-ordenes-dia \
+ *     --schedule='30 5 * * *' --time-zone='America/Costa_Rica' \
+ *     --uri="https://<service>/api/internal/centinela/process-ordenes-dia" \
+ *     --http-method=POST --headers="X-Internal-Trigger=$INTERNAL_TRIGGER_SECRET"
+ */
+centinelaInternalRouter.post('/process-ordenes-dia', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  const body = (req.body ?? {}) as { limit?: number };
+  const limit = Math.min(Math.max(body.limit ?? 200, 1), 1000);
+
+  try {
+    const { processOrdenesDia } = await import('../jobs/processOrdenesDia.js');
+    const result = await processOrdenesDia({ limit });
+
+    logger.info('centinela_internal_process_ordenes_dia_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_process_ordenes_dia_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/sil-download
+ *
+ * Descarga documentos PDF del SIL para expedientes sin docs en GCS.
+ * Cloud Scheduler: diario 3:30am CR.
+ */
+centinelaInternalRouter.post('/sil-download', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  const body = (req.body ?? {}) as {
+    limit?: number;
+    maxDocBytes?: number;
+    enableOcr?: boolean;
+    concurrency?: number;
+    delayMs?: number;
+  };
+
+  try {
+    const result = await runSilDownloadDocs({
+      limit: body.limit,
+      maxDocBytes: body.maxDocBytes,
+      enableOcr: body.enableOcr,
+      concurrency: body.concurrency,
+      delayMs: body.delayMs,
+    });
+    logger.info('centinela_internal_sil_download_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_sil_download_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/sil-embed
+ *
+ * Genera chunks + embeddings para docs de sil_documentos sin embeddings.
+ * Cloud Scheduler: diario 4:00am CR.
+ */
+centinelaInternalRouter.post('/sil-embed', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  const body = (req.body ?? {}) as { limit?: number; chunkChars?: number };
+
+  try {
+    const result = await runSilEmbedDocs({
+      limit: body.limit,
+      chunkChars: body.chunkChars,
+    });
+    logger.info('centinela_internal_sil_embed_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_sil_embed_failed', { error: message });
     res.status(500).json({ ok: false, error: message });
   }
 });
@@ -375,6 +1035,141 @@ centinelaAdminRouter.post('/detect-similar', async (req, res) => {
 // see another user's data.
 
 export const centinelaUserRouter = Router();
+
+// ── LISTAS — endpoints CRUD ──────────────────────────────────────────────
+//
+// Un user puede tener N listas (centinela_listas). Cada watch
+// (centinela_watchlist.lista_id) puede pertenecer a una lista. Listas
+// típicas: por cliente ("Empresa X"), por sector ("Energía", "Salud"),
+// o "Personal".
+//
+// Endpoints:
+//   GET    /api/centinela/listas             → todas las listas del user
+//   POST   /api/centinela/listas             → crear lista
+//   PATCH  /api/centinela/listas/:id         → renombrar/archivar/recolor
+//   DELETE /api/centinela/listas/:id         → eliminar lista (watches quedan sin lista_id)
+
+centinelaUserRouter.get('/listas', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+
+  const { data, error } = await supa()
+    .from('centinela_listas')
+    .select('id, nombre, descripcion, color, archivada, orden, created_at, updated_at')
+    .eq('user_id', userId)
+    .order('archivada', { ascending: true })
+    .order('orden', { ascending: true })
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+
+  // Agregar conteo de watches por lista (incluyendo las sin lista_id como "Sin lista")
+  const counts: Record<string, number> = {};
+  const { data: rows } = await supa()
+    .from('centinela_watchlist')
+    .select('lista_id')
+    .eq('user_id', userId);
+  for (const r of rows ?? []) {
+    const key = (r as { lista_id?: string | null }).lista_id ?? '__none__';
+    counts[key] = (counts[key] ?? 0) + 1;
+  }
+
+  res.json({
+    ok: true,
+    listas: (data ?? []).map((l) => ({ ...l, watches_count: counts[l.id] ?? 0 })),
+    watches_sin_lista: counts['__none__'] ?? 0,
+  });
+});
+
+centinelaUserRouter.post('/listas', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+
+  const body = (req.body ?? {}) as { nombre?: string; descripcion?: string; color?: string };
+  const nombre = String(body.nombre ?? '').trim();
+  if (!nombre) return res.status(400).json({ ok: false, error: 'nombre requerido' });
+  if (nombre.length > 80) return res.status(400).json({ ok: false, error: 'nombre máx 80 chars' });
+
+  const color = ['default', 'burgundy', 'ink', 'sage', 'amber', 'cream'].includes(body.color ?? '')
+    ? (body.color as string)
+    : 'default';
+
+  const { data, error } = await supa()
+    .from('centinela_listas')
+    .insert({
+      user_id: userId,
+      nombre,
+      descripcion: String(body.descripcion ?? '').slice(0, 280),
+      color,
+    })
+    .select('id, nombre, descripcion, color, archivada, orden, created_at, updated_at')
+    .single();
+
+  if (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ ok: false, error: 'Ya tenés una lista con ese nombre' });
+    }
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+
+  res.json({ ok: true, lista: data });
+});
+
+centinelaUserRouter.patch('/listas/:id', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const id = String(req.params.id ?? '');
+  const body = (req.body ?? {}) as { nombre?: string; descripcion?: string; color?: string; archivada?: boolean; orden?: number };
+
+  const patch: Record<string, unknown> = {};
+  if (typeof body.nombre === 'string') patch.nombre = body.nombre.trim().slice(0, 80);
+  if (typeof body.descripcion === 'string') patch.descripcion = body.descripcion.slice(0, 280);
+  if (typeof body.color === 'string' && ['default', 'burgundy', 'ink', 'sage', 'amber', 'cream'].includes(body.color)) {
+    patch.color = body.color;
+  }
+  if (typeof body.archivada === 'boolean') patch.archivada = body.archivada;
+  if (typeof body.orden === 'number' && Number.isInteger(body.orden)) patch.orden = body.orden;
+
+  if (Object.keys(patch).length === 0) {
+    return res.status(400).json({ ok: false, error: 'nada para actualizar' });
+  }
+
+  const { data, error } = await supa()
+    .from('centinela_listas')
+    .update(patch)
+    .eq('id', id)
+    .eq('user_id', userId)
+    .select('id, nombre, descripcion, color, archivada, orden, created_at, updated_at')
+    .maybeSingle();
+
+  if (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ ok: false, error: 'Ya tenés una lista con ese nombre' });
+    }
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+  if (!data) return res.status(404).json({ ok: false, error: 'lista no encontrada' });
+
+  res.json({ ok: true, lista: data });
+});
+
+centinelaUserRouter.delete('/listas/:id', async (req, res) => {
+  const userId = await requireUser(req, res);
+  if (!userId) return;
+  const id = String(req.params.id ?? '');
+
+  const { error } = await supa()
+    .from('centinela_listas')
+    .delete()
+    .eq('id', id)
+    .eq('user_id', userId);
+
+  if (error) return res.status(500).json({ ok: false, error: error.message });
+  // Los watches asociados quedan con lista_id=null por el ON DELETE SET NULL
+  res.json({ ok: true });
+});
 
 // ── GET /api/centinela/summary ─────────────────────────────────────────────
 //

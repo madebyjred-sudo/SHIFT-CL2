@@ -134,6 +134,13 @@ export async function requireQuota(
  * dispatch — even on upstream failure so abuse-via-rapid-retries
  * still counts. Errors here are silent: a missing log row is a much
  * smaller problem than blocking the user's response.
+ *
+ * 2026-05-23: Delegamos a tokenAccounting.logLLMCall para poblar las
+ * columnas nuevas (model, provider, cost_usd_estimated, cache_*) y que
+ * la vista /admin/tokens vea estas llamadas. Callers viejos pasan model
+ * vía meta — lo extraemos. Si no hay model, queda como string vacío y
+ * costUsd=0 (mejor que pre-migration, donde la row entera quedaba sin
+ * tokens accounting).
  */
 export async function logAiCall(
   userId: string,
@@ -141,16 +148,34 @@ export async function logAiCall(
   meta: Record<string, unknown> = {},
 ): Promise<void> {
   try {
-    await supa().from('ai_call_log').insert({
-      user_id: userId,
+    const { logLLMCall } = await import('./tokenAccounting.js');
+    const model = typeof meta.model === 'string' ? meta.model : '';
+    const provider = inferProvider(route, model);
+    await logLLMCall({
+      userId,
       route,
-      tokens_in: Number(meta.tokens_in ?? 0) || 0,
-      tokens_out: Number(meta.tokens_out ?? 0) || 0,
+      provider,
+      model: model || 'unknown',
+      tokensIn: Number(meta.tokens_in ?? 0) || 0,
+      tokensOut: Number(meta.tokens_out ?? 0) || 0,
       meta,
     });
   } catch (err) {
     logger.warn('ai_quota_log_failed', { userId, route, error: (err as Error).message });
   }
+}
+
+/** Heurística para deducir el provider cuando el caller no lo pasa explícito. */
+function inferProvider(route: string, model: string): string {
+  if (route.startsWith('voice.')) {
+    if (model.includes('whisper')) return 'openai-direct';
+    if (model.includes('eleven') || route.includes('tts')) return 'elevenlabs';
+    return 'openai-direct';
+  }
+  if (model.startsWith('anthropic/') || model.includes('claude')) return 'cerebro';
+  if (model.startsWith('openai/') || model.startsWith('gpt')) return 'cerebro';
+  if (model.includes('gemini')) return 'vertex';
+  return 'cerebro';
 }
 
 function labelFor(route: string): string {

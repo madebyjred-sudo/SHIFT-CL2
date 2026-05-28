@@ -43,7 +43,10 @@ interface Props {
 
 function fmtDate(iso: string): string {
   try {
-    return new Date(iso).toLocaleDateString('es-CR', {
+    // Anclar a mediodía local para evitar TZ shift cuando la DB guarda
+    // YYYY-MM-DDT00:00:00Z (UTC midnight) y CR (-6h) lo corre un día atrás.
+    const ymd = String(iso).slice(0, 10);
+    return new Date(`${ymd}T12:00:00`).toLocaleDateString('es-CR', {
       day: 'numeric', month: 'long', year: 'numeric',
     });
   } catch { return iso.slice(0, 10); }
@@ -159,11 +162,11 @@ export function SesionViewPage({ sesionId }: Props) {
                 <span className="inline-flex items-center gap-1"><Clock size={11} />{fmtDuration(detail.duration_s)}</span>
                 <span className={cn(
                   'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px]',
-                  detail.estado === 1
+                  detail.estado === 2
                     ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400'
                     : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-400',
                 )}>
-                  {detail.estado === 1 ? 'Finalizada' : 'En proceso'}
+                  {detail.estado === 2 ? 'Indexada' : 'En proceso'}
                 </span>
               </div>
             )}

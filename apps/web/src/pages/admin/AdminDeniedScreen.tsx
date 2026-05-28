@@ -8,7 +8,9 @@ import { LogOut, ShieldOff } from 'lucide-react';
 import { navigate } from '@/lib/router';
 
 interface Props {
-  role: 'lector' | 'editor' | 'operador' | 'admin' | null;
+  // 2026-05-26 Ronald F1: incluido 'cliente' — usuario final de instituciones
+  // que CL2 asesora. También bloqueado del admin panel.
+  role: 'lector' | 'editor' | 'operador' | 'admin' | 'cliente' | null;
 }
 
 export function AdminDeniedScreen({ role }: Props) {

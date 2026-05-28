@@ -357,6 +357,22 @@ function parseDate(input: string | null): string | null {
 
 // ─── Enriched detail (Select$0 postback) ─────────────────────────────
 
+/**
+ * Estructura rica de un proponente firmante.
+ *
+ * Apellidos siempre presente (la única columna garantizada del SIL).
+ * Las otras 3 dependen de cómo el SIL renderice el bloque:
+ * - Para iniciativas de diputado: apellidos + nombre + (admin null) + fraccion
+ * - Para iniciativas del Poder Ejecutivo: apellidos="PODER EJECUTIVO"
+ *   + (nombre null) + administracion="CHAVES ROBLES" + (fraccion null)
+ */
+export interface ProponenteFirmante {
+  apellidos: string;
+  nombre: string | null;
+  administracion: string | null;
+  fraccion: string | null;
+}
+
 export interface ExpedienteEnriched {
   numero: string;
   numeroNum: number;
@@ -373,8 +389,85 @@ export interface ExpedienteEnriched {
   fechaDispensa: string | null;
   numeroLey: string | null;
   numeroAcuerdo: string | null;
-  proponentes: string[];                // multiple firmantes if any
+  /**
+   * Apellidos solamente — compat legacy. Para iniciativa del Poder
+   * Ejecutivo será ["PODER EJECUTIVO"]. Para diputados, ["RODRÍGUEZ SOLORZANO",
+   * "DELGADO RAMÍREZ", ...]. NUEVO callers: usar `proponentesFull`.
+   */
+  proponentes: string[];
+  /**
+   * Estructura rica con apellidos + nombre + administracion + fraccion
+   * cuando el SIL los expone. Captura desde 2026-05-18 (commit que arregla
+   * el bug donde la tabla `sil_expediente_proponentes` quedaba con sólo
+   * apellidos y administracion/fraccion siempre null).
+   */
+  proponentesFull: ProponenteFirmante[];
   comisiones: Array<{ organo: string; fecha: string | null }>;
+  /**
+   * Consultas formales a entidades técnicas (pestaña Consultas del SIL).
+   * Pedido 04 del cliente: el grvConsultas viene ya en el mismo HTML del
+   * Select$0 — sin postback nuevo. Cada fila es una consulta a una entidad
+   * (CNAA, ANAI, UNED, BCCR, Procuraduría, una Municipalidad…) en una
+   * sesión de un órgano dado. NO trae el PDF de la respuesta — eso requiere
+   * un Select$N adicional sobre el grid (out of scope para el enricher
+   * bulk; lo deja como `documento_url=null` que el frontend marcará como
+   * "respuesta pendiente").
+   *
+   * Limitación: el grid pagina a 10 filas. Expedientes con más consultas
+   * (23.511 tiene 100+) capturan solo las primeras 10. El frontend muestra
+   * disclaimer + link al SIL oficial para ver el resto.
+   */
+  consultas: ConsultaEntidad[];
+  /**
+   * Versiones del texto sustitutivo (Pedido 16k). Cada fila del
+   * `grvTextoSustitutivo` es una versión: id_documento + fecha. El grid
+   * está en el mismo HTML del Select$0 — no requiere postback aparte.
+   * La descarga del DOCX/PDF de cada versión es Select$N sobre el grid
+   * (out of scope para el enricher bulk — el frontend muestra la lista
+   * con link al SIL oficial). Ordenado por fecha ASC; la última fila es
+   * la versión vigente.
+   */
+  textosSustitutivos: TextoSustitutivoVersion[];
+}
+
+/**
+ * Consulta formal a una entidad técnica. El SIL la registra cuando una
+ * comisión / el Plenario manda un oficio pidiéndole criterio a una entidad
+ * sobre el expediente (BCCR, Procuraduría, ministerio, municipalidad, gremio).
+ *
+ * idConsulta es el "Id_Consulta" del SIL — útil para dedup cross-corrida
+ * incluso si el SIL re-pagina. organo es el órgano que mandó la consulta
+ * (PLENARIO, AMBIENTE (ÁREA IV), …). fechaSolicitud es la fecha del oficio.
+ * sesion es el número de sesión del órgano donde se acordó la consulta
+ * (puede venir vacío cuando el SIL no lo expone). entidad es el destinatario.
+ *
+ * fechaRespuesta / tipoRespuesta / urlRespuesta NO vienen en el grid — solo
+ * aparecen si hacemos Select$N que abre el PDF de respuesta. Esa segunda
+ * etapa NO está en este parser; se queda en null y un job aparte (P04
+ * follow-up) hace el postback para los expedientes activos.
+ */
+export interface ConsultaEntidad {
+  idConsulta: string;
+  organo: string;
+  fechaSolicitud: string;        // ISO YYYY-MM-DD
+  sesion: string | null;
+  entidad: string;
+}
+
+/**
+ * Una versión del texto sustitutivo del proyecto (Pedido 16k del cliente).
+ * El SIL incluye el grid `grvTextoSustitutivo` en el mismo HTML del detail
+ * panel. Cada fila es una versión sucesiva — para expedientes muy debatidos
+ * suele haber 1-3 versiones.
+ *
+ * idDocumento es el id_servicio del SIL (estable cross-corrida). fecha es
+ * la fecha de presentación de esa versión. NO descargamos el DOCX/PDF
+ * aquí; el grid expone un botón Select$N que dispara la descarga — fuera
+ * de scope del enricher bulk.
+ */
+export interface TextoSustitutivoVersion {
+  idDocumento: string;
+  fecha: string;                 // ISO YYYY-MM-DD
 }
 
 /**
@@ -500,25 +593,83 @@ export function parseEnrichedDetail(html: string, expedienteNum: number): Expedi
     return null;
   };
 
-  // Proponentes: the "Secuencia de Firma → Apellidos" row is followed by
-  // ordered numbered rows like "1 → RODRIGUEZ STELLER". Capture them.
+  // Proponentes — captura completa.
+  //
+  // El SIL renderiza el bloque de firmantes con headers que varían según
+  // el tipo de iniciativa:
+  //
+  // Caso A — iniciativa parlamentaria (mayoritario):
+  //   | Secuencia de Firma | Apellidos | Nombre | Fracción |
+  //   | 1 | DELGADO RAMÍREZ | JUAN     | LIBERTAD |
+  //
+  // Caso B — iniciativa del Poder Ejecutivo (~19% del catálogo):
+  //   | Secuencia de Firma | Apellidos        | Administración | Fracción |
+  //   | 1 | PODER EJECUTIVO | CHAVES ROBLES   |          |
+  //
+  // Caso C — algunas comisiones especiales tienen 3 columnas:
+  //   | Secuencia de Firma | Apellidos | Comisión |
+  //
+  // Estrategia: detectamos el header con el ancla "Secuencia de Firma"
+  // (siempre presente). Una vez dentro del bloque, **leemos los 4 headers
+  // como mapa** para saber qué columna es qué (Apellidos / Nombre /
+  // Administración / Fracción). Después, cada data row mapeamos por
+  // posición. Así soportamos las 3 variantes sin regex frágiles por
+  // cada caso.
+  //
+  // Antes (commit anterior): solo cell[1] como "apellidos" + columnas
+  // 2-4 ignoradas. Resultado: 4.207 expedientes con proponente='PODER'
+  // (truncado del primer token) y administracion/fraccion siempre null
+  // en sil_expediente_proponentes.
+  const proponentesFull: ProponenteFirmante[] = [];
   const proponentes: string[] = [];
   let inFirmantes = false;
+  let firmantesColumnMap: { apellidos: number; nombre: number; administracion: number; fraccion: number } | null = null;
+
   $('table tr').each((_, tr) => {
     const cells = $(tr).find('td, th');
     if (cells.length < 2) return;
-    const a = ($(cells[0]).text() ?? '').trim();
-    const b = ($(cells[1]).text() ?? '').trim();
-    if (/^Secuencia de Firma$/i.test(a) && /Apellidos/i.test(b)) {
+    const cellTexts = cells.toArray().map((el) => ($(el).text() ?? '').trim());
+    const a = cellTexts[0];
+    const b = cellTexts[1];
+
+    // Detección del header: cell[0] = "Secuencia de Firma" + cell[1] empieza
+    // con "Apellidos" o similar (admite "Apellidos del Proponente" etc.).
+    if (/^Secuencia de Firma$/i.test(a) && /apellido/i.test(b)) {
       inFirmantes = true;
+      // Mapear las columnas: por defecto cell[1]=apellidos, y buscamos
+      // las otras 3 por nombre del header.
+      const map = { apellidos: 1, nombre: -1, administracion: -1, fraccion: -1 };
+      for (let i = 2; i < cellTexts.length; i++) {
+        const h = cellTexts[i].toLowerCase();
+        if (h.includes('nombre')) map.nombre = i;
+        else if (h.includes('administra')) map.administracion = i;
+        else if (h.includes('fracci') || h.includes('partido')) map.fraccion = i;
+      }
+      firmantesColumnMap = map;
       return;
     }
-    if (inFirmantes) {
-      if (/^\d+$/.test(a) && b && b.length > 1 && b.length < 80) {
-        proponentes.push(b);
+
+    if (inFirmantes && firmantesColumnMap) {
+      // Las data rows del bloque tienen el primer cell como número entero
+      // (orden de firma). El primer cell distinto de número marca el fin.
+      if (/^\d+$/.test(a) && b && b.length >= 2 && b.length < 120) {
+        const apellidos = b;
+        const nombre = firmantesColumnMap.nombre >= 0 && firmantesColumnMap.nombre < cellTexts.length
+          ? (cellTexts[firmantesColumnMap.nombre] || '').trim() || null
+          : null;
+        const administracion = firmantesColumnMap.administracion >= 0 && firmantesColumnMap.administracion < cellTexts.length
+          ? (cellTexts[firmantesColumnMap.administracion] || '').trim() || null
+          : null;
+        const fraccion = firmantesColumnMap.fraccion >= 0 && firmantesColumnMap.fraccion < cellTexts.length
+          ? (cellTexts[firmantesColumnMap.fraccion] || '').trim() || null
+          : null;
+
+        proponentesFull.push({ apellidos, nombre, administracion, fraccion });
+        proponentes.push(apellidos); // legacy compat
       } else if (a !== '' && !/^\d+$/.test(a)) {
-        // we left the firmantes block
+        // Nos salimos del bloque de firmantes (otro header o sección).
         inFirmantes = false;
+        firmantesColumnMap = null;
       }
     }
   });
@@ -547,6 +698,11 @@ export function parseEnrichedDetail(html: string, expedienteNum: number): Expedi
     }
   });
 
+  // Pedido 04 (Consultas) + 16k (Texto Sustitutivo): ambos grids están en
+  // el mismo HTML del Select$0 — no necesitamos postbacks adicionales.
+  const consultas = parseConsultasFromDetail(html);
+  const textosSustitutivos = parseTextosSustitutivosFromDetail(html);
+
   return {
     numero: formatExpedienteNumber(expedienteNum),
     numeroNum: expedienteNum,
@@ -564,8 +720,85 @@ export function parseEnrichedDetail(html: string, expedienteNum: number): Expedi
     numeroLey: get('Número de Ley'),
     numeroAcuerdo: get('Número de Acuerdo'),
     proponentes,
+    proponentesFull,
     comisiones,
+    consultas,
+    textosSustitutivos,
   };
+}
+
+// ─── Consultas (grvConsultas — Pedido 04) ───────────────────────────────────
+// El SIL expone "Consultas a entidades" como grid `grvConsultas` con
+// columnas [Id_Consulta, (select-btn), Órgano, Fecha solicitud,
+// Sesión solicitud, Entidad]. Cada fila es una consulta formal mandada por
+// un órgano (PLENARIO o comisión) a una entidad técnica.
+//
+// El grid pagina a 10 filas — el enricher captura solo la primera página.
+// Para expedientes con 100+ consultas (23.511) eso significa solo top-10
+// más recientes. El frontend muestra disclaimer + link al SIL oficial.
+// Paginación completa requeriría 10× postbacks por expediente — rate-limit
+// prohibitivo a escala. (Alternativa futura: scrapear paginas on-demand
+// solo para los watchlisted del cliente.)
+
+export function parseConsultasFromDetail(html: string): ConsultaEntidad[] {
+  const $ = cheerio.load(html);
+  const out: ConsultaEntidad[] = [];
+  const rows = $('[id$="grvConsultas"] tr').filter((_, el) => $(el).find('td').length > 1);
+  rows.each((_, tr) => {
+    const tds = $(tr).find('td');
+    const cellTexts = tds
+      .map((_i, td) => ($(td).text() ?? '').replace(/\s+/g, ' ').trim())
+      .get();
+    // Layout esperado (6 celdas): [Id_Consulta][select-btn][Órgano]
+    //                              [Fecha solicitud][Sesión][Entidad]
+    if (cellTexts.length < 6) return;
+    const idConsulta = cellTexts[0];
+    // Header del grid se serializa como `<th>` que cheerio NO matchea como
+    // `td` — pero por defensa filtramos por id numérico.
+    if (!/^\d+$/.test(idConsulta)) return;
+    // cellTexts[1] es la celda con el botón "Seleccionar" (frecuentemente
+    // vacía o con un &nbsp; cuando el SIL no expone respuesta).
+    const organo = cellTexts[2];
+    const fechaRaw = cellTexts[3];
+    const sesion = cellTexts[4] && cellTexts[4] !== ' ' ? cellTexts[4] : null;
+    const entidad = cellTexts[5];
+    const fechaSolicitud = parseSilDate(fechaRaw);
+    if (!organo || !fechaSolicitud || !entidad) return;
+    if (organo.length > 80 || entidad.length > 250) return;
+    out.push({
+      idConsulta,
+      organo,
+      fechaSolicitud,
+      sesion,
+      entidad,
+    });
+  });
+  return out;
+}
+
+// ─── Texto Sustitutivo (grvTextoSustitutivo — Pedido 16k) ───────────────────
+// Cada fila del grid es una versión del texto sustitutivo: [id, Fecha,
+// (download-btn)]. El SIL ordena por fecha cronológicamente (la última fila
+// es la versión más reciente). Nosotros preservamos el orden del grid en
+// el array — el caller decide cuál marcar como vigente.
+
+export function parseTextosSustitutivosFromDetail(html: string): TextoSustitutivoVersion[] {
+  const $ = cheerio.load(html);
+  const out: TextoSustitutivoVersion[] = [];
+  const rows = $('[id$="grvTextoSustitutivo"] tr').filter((_, el) => $(el).find('td').length > 1);
+  rows.each((_, tr) => {
+    const tds = $(tr).find('td');
+    const cellTexts = tds
+      .map((_i, td) => ($(td).text() ?? '').replace(/\s+/g, ' ').trim())
+      .get();
+    if (cellTexts.length < 2) return;
+    const idDocumento = cellTexts[0];
+    if (!/^\d+$/.test(idDocumento)) return;
+    const fecha = parseSilDate(cellTexts[1]);
+    if (!fecha) return;
+    out.push({ idDocumento, fecha });
+  });
+  return out;
 }
 
 // ─── Document downloads (DOCX, NOT PDF) ──────────────────────────────
@@ -903,6 +1136,85 @@ export function countGridRows(html: string, gridName: 'grvDictamenes' | 'grvTecn
   return rows.length;
 }
 
+/**
+ * Parsea los grids embebidos del detail panel para listar TODOS los
+ * documentos disponibles: dictámenes, informes técnicos, mociones, actas,
+ * etc. Devuelve metadata + URL del detail (no descarga los PDFs).
+ *
+ * El SIL expone los docs en varios grids: grvDictamenes, grvTecnicos,
+ * y dentro del panel principal hay filas con label "Texto base" + link
+ * de descarga. Cada doc se identifica por (gridName, index).
+ *
+ * El URL devuelto apunta a la página del detail con un fragmento del
+ * tipo de doc — el frontend puede mostrarlo como "Documento disponible
+ * en el SIL oficial" sin tener el PDF descargado todavía.
+ */
+export function parseDocumentsFromDetail(
+  html: string,
+  expedienteNum: number,
+): Array<{ tipo: ExpedienteDoc['tipo']; titulo: string | null; fecha: string | null; grid: string; index: number }> {
+  const $ = cheerio.load(html);
+  const docs: Array<{ tipo: ExpedienteDoc['tipo']; titulo: string | null; fecha: string | null; grid: string; index: number }> = [];
+
+  const grids: Array<{ id: string; defaultLabel: string }> = [
+    { id: 'grvDictamenes', defaultLabel: 'Dictamen' },
+    { id: 'grvTecnicos', defaultLabel: 'Informe Técnico' },
+    { id: 'grvMociones', defaultLabel: 'Moción' },
+    { id: 'grvActas', defaultLabel: 'Acta' },
+  ];
+
+  // Heurística de detección de fecha en una celda. Acepta "10-oct.-2023",
+  // "10/10/2023", "2023-10-10", etc. Si una celda parsea como fecha NO es
+  // candidata a título.
+  const looksLikeDate = (s: string): boolean => {
+    if (!s) return false;
+    if (parseSilDate(s)) return true;
+    if (/^\d{1,2}[-\/\s][A-Za-záéíóúñ]+\.?[-\/\s]\d{4}$/.test(s)) return true;
+    return false;
+  };
+
+  for (const g of grids) {
+    const rows = $(`[id$="${g.id}"] tr`).filter((_, el) => $(el).find('td').length > 1);
+    rows.each((idx, tr) => {
+      const tds = $(tr).find('td');
+      // Asumimos: [select-button][titulo/desc][fecha?][otras]
+      const cellTexts = tds.map((_i, td) => ($(td).text() ?? '').replace(/\s+/g, ' ').trim()).get();
+      // Candidatos a título: texto con ≥1 letra, longitud razonable, NO una fecha.
+      // El default label del grid es nuestro fallback.
+      const tituloCandidato = cellTexts.find(
+        (t) => t.length >= 3 && /[A-Za-záéíóúñ]/.test(t) && !looksLikeDate(t),
+      );
+      const titulo = tituloCandidato ?? g.defaultLabel;
+      const fechaText = cellTexts.find((t) => looksLikeDate(t)) ?? null;
+      const fecha = fechaText ? parseSilDate(fechaText) : null;
+      docs.push({
+        tipo: classifyDocByLabel(titulo),
+        titulo,
+        fecha,
+        grid: g.id,
+        index: idx,
+      });
+    });
+  }
+
+  // "Texto base" del proyecto: típicamente un solo link, no en un grid sino
+  // como botón de descarga en el detail panel. Lo detectamos por el ID del
+  // botón btnDescargaTextoBase / lnkTextoBase / similar.
+  const hasTextoBase = $('[id*="btnDescargaTextoBase"], [id*="btnTextoBase"], [id*="lnkTextoBase"]').length > 0
+    || /texto\s+base/i.test($('body').text());
+  if (hasTextoBase) {
+    docs.unshift({
+      tipo: 'texto_base',
+      titulo: 'Texto base del proyecto',
+      fecha: null,
+      grid: 'main',
+      index: 0,
+    });
+  }
+
+  return docs;
+}
+
 function classifyDocByLabel(label: string | null): ExpedienteDoc['tipo'] {
   if (!label) return 'otro';
   const l = label.toLowerCase();
@@ -915,4 +1227,126 @@ function classifyDocByLabel(label: string | null): ExpedienteDoc['tipo'] {
   if (l.includes('acta')) return 'acta';
   if (l.includes('enmienda')) return 'enmienda';
   return 'otro';
+}
+
+// ─── Tramite (grvTramite — timeline procesal) ───────────────────────────────
+// El SIL muestra la pestaña "Tramitación" como un grid `grvTramite` con
+// columnas [Órgano, Fecha de Inicio, Fecha de Término, Tipo de Trámite].
+// Cada fila es un evento del expediente (PRESENTACIÓN, ENVÍO A IMPRENTA,
+// RECEPCIÓN COMISIÓN, VOTACIÓN, etc). Esto alimenta `sil_expediente_tramite`.
+
+export interface TramiteEvent {
+  organo: string;            // 'PLENARIO', 'AMBIENTE (ÁREA IV)', 'ARCHIVO'
+  fechaInicio: string;       // ISO YYYY-MM-DD
+  fechaTermino: string | null;
+  descripcion: string;       // 'PRESENTACIÓN DEL PROYECTO DE LEY'
+}
+
+/**
+ * Parsea el grid `grvTramite` del detail HTML del SIL. Retorna los eventos
+ * en el orden que vienen del SIL (cronológico).
+ *
+ * Limitación: el SIL pagina el grid a 10 filas; expedientes con >10 eventos
+ * dejan visibles solo las primeras. Para capturar TODO se necesitaría un
+ * postback adicional al pager — fuera del alcance de este enricher inicial.
+ */
+export function parseTramiteFromDetail(html: string): TramiteEvent[] {
+  const $ = cheerio.load(html);
+  const events: TramiteEvent[] = [];
+  const rows = $('[id$="grvTramite"] tr').filter((_, el) => $(el).find('td').length > 1);
+  rows.each((_, tr) => {
+    const tds = $(tr).find('td');
+    // Header del grid se repite por cada página de paginador — saltearlo.
+    // Las celdas vienen en orden: [Órgano][Fecha Inicio][Fecha Término][Descripción]
+    const cellTexts = tds
+      .map((_i, td) => ($(td).text() ?? '').replace(/\s+/g, ' ').trim())
+      .get()
+      .filter((t) => t && t !== ' '); // tira nbsp's vacíos
+    if (cellTexts.length < 4) return;
+    const organo = cellTexts[0];
+    const fechaInicioRaw = cellTexts[1];
+    const fechaTerminoRaw = cellTexts[2];
+    const descripcion = cellTexts[3];
+    // El grid tiene una fila de paginador con números "1 2" — no es un evento.
+    if (/^\d+$/.test(organo) || organo.length > 80) return;
+    const fechaInicio = parseSilDate(fechaInicioRaw);
+    if (!fechaInicio) return;
+    events.push({
+      organo,
+      fechaInicio,
+      fechaTermino: parseSilDate(fechaTerminoRaw),
+      descripcion: descripcion.length > 500 ? descripcion.slice(0, 500) : descripcion,
+    });
+  });
+  return events;
+}
+
+// ─── Audiencias (grvConvocatoria) ──────────────────────────────────────────
+// El SIL expone "Audiencias, Convocatorias" como grid `grvConvocatoria` con
+// columnas [Id_Audiencia, (blank), Fecha Sesión, Órgano, Visitante, Puesto,
+// Entidad]. Cada fila es una audiencia agendada de la persona X (cargo Y, de
+// la entidad Z) ante el órgano. Alimenta `sil_expediente_audiencias` con
+// asistente real (no como `agenda_legislativa` que solo trae fecha+comisión).
+
+export interface AudienciaEvent {
+  fecha: string;             // ISO YYYY-MM-DD
+  comision: string;          // 'AMBIENTE (ÁREA IV)'
+  asistenteNombre: string;
+  asistenteCargo: string | null;
+  asistenteOrganizacion: string | null;
+  idAudiencia: string | null; // 8788 — útil para dedup si re-corremos
+}
+
+/**
+ * Parsea grid `grvConvocatoria`. Como el SIL pagina a 10 filas, solo
+ * capturamos la primera página — extender al resto requeriría postbacks
+ * adicionales que el enricher hace cost-prohibitive (1 req extra por página
+ * por expediente × ~21k expedientes activos = explotamos el rate limit).
+ */
+export function parseAudienciasFromDetail(html: string): AudienciaEvent[] {
+  const $ = cheerio.load(html);
+  const events: AudienciaEvent[] = [];
+  const rows = $('[id$="grvConvocatoria"] tr').filter((_, el) => $(el).find('td').length > 1);
+  rows.each((_, tr) => {
+    const tds = $(tr).find('td');
+    const cellTexts = tds
+      .map((_i, td) => ($(td).text() ?? '').replace(/\s+/g, ' ').trim())
+      .get();
+    // Cells: [Id_Audiencia][nbsp/blank][Fecha Sesión][Órgano][Visitante][Puesto][Entidad]
+    // El "blank" column es siempre un &nbsp; — buscamos por posición pero
+    // tolerando que algunas celdas vengan vacías.
+    if (cellTexts.length < 6) return;
+    const idAudiencia = cellTexts[0]?.trim() || null;
+    // El primer celda del header dice "Id_Audiencia" — saltear.
+    if (!idAudiencia || !/^\d+$/.test(idAudiencia)) return;
+    // Heurística: encontrar la primera celda que parsee como fecha.
+    let fechaCellIdx = -1;
+    let fecha: string | null = null;
+    for (let i = 0; i < cellTexts.length; i++) {
+      const f = parseSilDate(cellTexts[i]);
+      if (f) {
+        fechaCellIdx = i;
+        fecha = f;
+        break;
+      }
+    }
+    if (!fecha || fechaCellIdx < 0) return;
+    const after = cellTexts.slice(fechaCellIdx + 1).filter((t) => t && t !== ' ');
+    // after = [organo, visitante, puesto, entidad]
+    const organo = after[0] ?? '';
+    const visitante = after[1] ?? '';
+    const puesto = after[2] ?? null;
+    const entidad = after[3] ?? null;
+    if (!organo || !visitante) return;
+    if (organo.length > 80 || visitante.length > 120) return;
+    events.push({
+      fecha,
+      comision: organo,
+      asistenteNombre: visitante,
+      asistenteCargo: puesto && puesto.length < 120 ? puesto : null,
+      asistenteOrganizacion: entidad && entidad.length < 200 ? entidad : null,
+      idAudiencia,
+    });
+  });
+  return events;
 }

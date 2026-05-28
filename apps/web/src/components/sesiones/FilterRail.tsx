@@ -25,10 +25,11 @@ interface Props {
 export function FilterRail({
   sessions, estado, onEstado, duracion, onDuracion, onlyResumen, onOnlyResumen,
 }: Props) {
+  // Estados: 2=indexada (lista para cliente), 1=procesando, 0=en cola, 4=error
   const counts = {
     todas: sessions.length,
-    finalizadas: sessions.filter((s) => s.estado === 1).length,
-    enProceso: sessions.filter((s) => s.estado !== 1).length,
+    finalizadas: sessions.filter((s) => s.estado === 2).length,
+    enProceso: sessions.filter((s) => s.estado !== 2).length,
     corta: sessions.filter((s) => s.duration_s > 0 && s.duration_s < 90 * 60).length,
     media: sessions.filter((s) => s.duration_s >= 90 * 60 && s.duration_s <= 180 * 60).length,
     larga: sessions.filter((s) => s.duration_s > 180 * 60).length,
@@ -45,7 +46,7 @@ export function FilterRail({
           onChange={() => onEstado('todas')}
         />
         <RailItem
-          label="Finalizadas"
+          label="Indexadas"
           count={counts.finalizadas}
           checked={estado === 'finalizadas'}
           onChange={() => onEstado('finalizadas')}

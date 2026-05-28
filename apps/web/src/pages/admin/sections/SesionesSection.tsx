@@ -253,7 +253,14 @@ export function SesionesSection(): React.ReactElement {
             header: 'Fecha',
             cell: (r) => (
               <span className="text-[#0e1745]/55 dark:text-white/55">
-                {new Date(r.fecha).toLocaleDateString('es-CR', { day: '2-digit', month: 'short', year: 'numeric' })}
+                {/* Anclar a mediodía local para evitar TZ shift (UTC midnight → día anterior en CR). */}
+                {r.fecha
+                  ? new Date(`${String(r.fecha).slice(0, 10)}T12:00:00`).toLocaleDateString('es-CR', {
+                      day: '2-digit',
+                      month: 'short',
+                      year: 'numeric',
+                    })
+                  : '—'}
               </span>
             ),
             width: '140px',

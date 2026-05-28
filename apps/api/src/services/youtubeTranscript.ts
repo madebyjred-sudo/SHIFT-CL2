@@ -57,6 +57,19 @@ const MAX_ATTEMPTS = 3;
 // YouTube's undocumented rate limits while not blocking the job queue too long.
 const BASE_DELAY_MS = 2_000;
 
+// Quality thresholds (override via env vars)
+const MIN_WORDS_PER_MINUTE = Number(process.env.TRANSCRIPT_MIN_WORDS_PER_MINUTE ?? 30);
+const MAX_GARBAGE_RATIO = Number(process.env.TRANSCRIPT_MAX_GARBAGE_RATIO ?? 0.30);
+
+// Fetch strategy: comma-ordered list of sources to try.
+//   ytdlp  = yt-dlp subprocess (most reliable for Spanish auto-captions)
+//   gemini = Gemini 2.5 Flash/Pro (works from Cloud Run, but quality varies)
+//   lib    = youtube-transcript npm library (fast, no subprocess)
+// Default puts yt-dlp first because it produces cleaner transcripts for
+// legislative Spanish. In production (Cloud Run) yt-dlp may be blocked
+// by bot detection; if so it fails fast and we fall back to gemini.
+const DEFAULT_STRATEGY = 'ytdlp,gemini,lib';
+
 // Heuristic threshold to detect whether offset/duration values are in
 // milliseconds (srv3 format) or seconds (classic XML format). The lib
 // transparently supports both formats but mixes units in the returned shape.
@@ -90,7 +103,8 @@ export type YoutubeTranscriptErrorCode =
   | 'rate_limited'
   | 'network'
   | 'parse_error'
-  | 'cancelled';
+  | 'cancelled'
+  | 'quality_rejected';
 
 export class YoutubeTranscriptError extends Error {
   constructor(
@@ -102,6 +116,71 @@ export class YoutubeTranscriptError extends Error {
     super(message);
     this.name = 'YoutubeTranscriptError';
   }
+}
+
+export interface TranscriptQualityMetrics {
+  wordCount: number;
+  garbageCount: number;
+  garbageRatio: number;
+  wordsPerMinute: number;
+  segmentCount: number;
+  durationMinutes: number;
+}
+
+export interface TranscriptQualityResult {
+  valid: boolean;
+  reason?: string;
+  metrics: TranscriptQualityMetrics;
+}
+
+// ── Quality validation ────────────────────────────────────────────────────────
+
+const GARBAGE_RE = /\[(conversaciones superpuestas|inaudible|música|silencio)\]/i;
+
+/**
+ * Validate transcript quality after fetching from any source.
+ * Rejects transcripts that are mostly garbage markers or have
+ * implausibly low word density for the video duration.
+ */
+export function validateTranscriptQuality(
+  segments: TranscriptSegment[],
+  durationS?: number,
+): TranscriptQualityResult {
+  const totalText = segments.map((s) => s.text).join(' ');
+  const words = totalText.split(/\s+/).filter((w) => w.length > 0);
+  const wordCount = words.length;
+  const garbageCount = segments.filter((s) => GARBAGE_RE.test(s.text)).length;
+  const segmentCount = segments.length;
+  const durationMinutes = durationS && durationS > 0 ? durationS / 60 : 0;
+  const wordsPerMinute = durationMinutes > 0 ? wordCount / durationMinutes : 0;
+  const garbageRatio = segmentCount > 0 ? garbageCount / segmentCount : 0;
+
+  const metrics: TranscriptQualityMetrics = {
+    wordCount,
+    garbageCount,
+    garbageRatio,
+    wordsPerMinute,
+    segmentCount,
+    durationMinutes,
+  };
+
+  if (durationMinutes > 0 && wordsPerMinute < MIN_WORDS_PER_MINUTE) {
+    return {
+      valid: false,
+      reason: `words/min too low: ${wordsPerMinute.toFixed(1)} < ${MIN_WORDS_PER_MINUTE} (words=${wordCount}, duration=${durationMinutes.toFixed(0)}min)`,
+      metrics,
+    };
+  }
+
+  if (garbageRatio > MAX_GARBAGE_RATIO) {
+    return {
+      valid: false,
+      reason: `garbage ratio too high: ${(garbageRatio * 100).toFixed(1)}% > ${(MAX_GARBAGE_RATIO * 100).toFixed(0)}% (garbage=${garbageCount}/${segmentCount})`,
+      metrics,
+    };
+  }
+
+  return { valid: true, metrics };
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -260,12 +339,73 @@ function shouldRetryTranscript(err: unknown): boolean {
   return false;
 }
 
+// ── Strategy fetchers ─────────────────────────────────────────────────────────
+
+async function fetchViaYtDlp(
+  videoId: string,
+  lang: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<TranscriptSegment[]> {
+  const ytSegs = await fetchTranscriptViaYtDlp(videoId, {
+    language: lang,
+    timeoutMs: Math.max(timeoutMs, 90_000),
+    signal,
+  });
+  return ytSegs.map((s) => ({
+    start_seconds: s.start_seconds,
+    end_seconds: s.end_seconds,
+    text: s.text,
+    language: lang,
+  }));
+}
+
+async function fetchViaGemini(
+  videoId: string,
+  lang: string,
+  durationS: number,
+  signal?: AbortSignal,
+): Promise<TranscriptSegment[]> {
+  const effectiveDuration =
+    typeof durationS === 'number' && durationS > 0 ? durationS : 14_400;
+  const segs =
+    effectiveDuration > 600
+      ? await fetchTranscriptViaGeminiChunked(videoId, effectiveDuration, { signal })
+      : await fetchTranscriptViaGemini(videoId, { signal });
+  return segs.map((s) => ({
+    start_seconds: s.start_seconds,
+    end_seconds: s.end_seconds,
+    text: s.text,
+    language: lang,
+  }));
+}
+
+async function fetchViaLib(
+  videoId: string,
+  lang: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<TranscriptSegment[]> {
+  const raw = await withTimeout(
+    (_signal) => libFetchTranscript(videoId, { lang }),
+    { ms: timeoutMs, label: `youtube:transcript:${videoId}`, signal },
+  );
+  return normalizeSegments(raw);
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
  * Fetch the auto-captions transcript for a YouTube video.
  * Returns ordered segments with timecodes in seconds.
  * Throws YoutubeTranscriptError on known failure modes.
+ *
+ * Strategy (configurable via TRANSCRIPT_FETCH_STRATEGY env var):
+ *   1. Try each source in order (ytdlp → gemini → lib by default)
+ *   2. After each fetch, validate transcript quality
+ *   3. If quality passes, return immediately
+ *   4. If quality fails, log metrics and try next source
+ *   5. If all sources exhausted, throw no_transcript_available
  *
  * Wraps the underlying lib in:
  *   - timeout (default 30s, configurable per attempt)
@@ -276,6 +416,7 @@ function shouldRetryTranscript(err: unknown): boolean {
  * @param opts.preferredLanguage  ISO code for caption track (default: 'es')
  * @param opts.timeoutMs          Timeout per attempt in ms (default: 30000)
  * @param opts.signal             AbortController signal for cancellation
+ * @param opts.durationS          Video duration in seconds (for quality gates)
  */
 export async function fetchTranscript(
   videoId: string,
@@ -283,177 +424,103 @@ export async function fetchTranscript(
     preferredLanguage?: string;
     timeoutMs?: number;
     signal?: AbortSignal;
-    /** Duración en segundos (de YouTube Data API). Si está disponible,
-     *  Gemini chunkea por ventanas de 10min para evitar truncation. */
+    /** Duración en segundos (de YouTube Data API). Usada para quality gates. */
     durationS?: number;
   },
 ): Promise<TranscriptSegment[]> {
   const lang = opts?.preferredLanguage ?? DEFAULT_LANGUAGE;
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const durationS = opts?.durationS;
   const label = `youtube:transcript:${videoId}`;
 
-  // Path primario (mayo 2026): Gemini 2.5 Flash. Si el env GEMINI_TRANSCRIPT_ENABLED
-  // está activo, intentamos Gemini primero. Si falla por cualquier razón,
-  // caemos al path legacy (lib → yt-dlp) que sigue siendo útil para dev local.
-  if (process.env.GEMINI_TRANSCRIPT_ENABLED === 'true') {
+  // Parse strategy from env (default: ytdlp first, then gemini, then lib)
+  const strategyRaw = process.env.TRANSCRIPT_FETCH_STRATEGY ?? DEFAULT_STRATEGY;
+  const strategies = strategyRaw
+    .split(/[,;]/)
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => ['ytdlp', 'gemini', 'lib'].includes(s));
+
+  if (strategies.length === 0) {
+    throw new YoutubeTranscriptError(
+      `Invalid TRANSCRIPT_FETCH_STRATEGY: "${strategyRaw}"`,
+      'parse_error',
+      videoId,
+    );
+  }
+
+  const qualityFailures: Array<{ source: string; reason: string; metrics: TranscriptQualityMetrics }> = [];
+
+  for (const strategy of strategies) {
     try {
-      // Decisión chunked vs single-call:
-      //   - Si tenemos durationS > 600 → chunked (mejor calidad, evita
-      //     truncation en plenarias largas).
-      //   - Si durationS está ausente o es 0 → chunked con UPPER BOUND
-      //     (4 h = 14400s). Bug 2026-05-12: cuando YouTube Data API no
-      //     devolvía duración, caíamos a single-call y Gemini Flash
-      //     truncaba en ~59 min (MAX_TOKENS). Plenarios completos quedaban
-      //     cortados. Asumir 4 h y chunkear; los chunks que excedan el
-      //     fin real del video devuelven vacío y se descartan sin costo.
-      //   - Si durationS <= 600 (clip corto) → single-call (más rápido,
-      //     no hay riesgo de truncation).
-      const effectiveDuration =
-        typeof opts?.durationS === 'number' && opts.durationS > 0
-          ? opts.durationS
-          : 14_400; // fallback upper bound = 4 h
-      const segs =
-        effectiveDuration > 600
-          ? await fetchTranscriptViaGeminiChunked(videoId, effectiveDuration, {
-              signal: opts?.signal,
-            })
-          : await fetchTranscriptViaGemini(videoId, { signal: opts?.signal });
-      const normalized: TranscriptSegment[] = segs.map((s) => ({
-        start_seconds: s.start_seconds,
-        end_seconds: s.end_seconds,
-        text: s.text,
-        language: lang,
-      }));
-      if (normalized.length > 0) {
+      let segments: TranscriptSegment[] = [];
+
+      if (strategy === 'ytdlp') {
+        segments = await fetchViaYtDlp(videoId, lang, timeoutMs, opts?.signal);
+      } else if (strategy === 'gemini') {
+        // Gemini requires explicit opt-in via GEMINI_TRANSCRIPT_ENABLED
+        if (process.env.GEMINI_TRANSCRIPT_ENABLED !== 'true') {
+          logger.info('youtube_transcript_gemini_skipped_disabled', { videoId });
+          continue;
+        }
+        segments = await fetchViaGemini(videoId, lang, durationS ?? 0, opts?.signal);
+      } else if (strategy === 'lib') {
+        segments = await fetchViaLib(videoId, lang, timeoutMs, opts?.signal);
+      }
+
+      if (segments.length === 0) {
+        logger.warn('youtube_transcript_source_empty', { videoId, source: strategy });
+        continue;
+      }
+
+      // Quality gate
+      const quality = validateTranscriptQuality(segments, durationS);
+      if (quality.valid) {
         logger.info('youtube_transcript_fetched', {
           videoId,
           lang,
-          segmentCount: normalized.length,
-          source: 'gemini',
+          segmentCount: segments.length,
+          source: strategy,
+          wordsPerMinute: quality.metrics.wordsPerMinute.toFixed(1),
+          garbageRatio: (quality.metrics.garbageRatio * 100).toFixed(1),
         });
-        return normalized;
+        return segments;
       }
-      logger.warn('gemini_transcript_empty_falling_back', { videoId });
-    } catch (err) {
-      // Cualquier error de Gemini → log + fallback al path legacy.
-      logger.warn('gemini_transcript_failed_falling_back', {
+
+      // Quality failed — record and try next source
+      qualityFailures.push({ source: strategy, reason: quality.reason!, metrics: quality.metrics });
+      logger.warn('youtube_transcript_quality_rejected', {
         videoId,
-        code: err instanceof GeminiTranscriptError ? err.code : 'unknown',
+        source: strategy,
+        reason: quality.reason,
+        wordsPerMinute: quality.metrics.wordsPerMinute.toFixed(1),
+        garbageRatio: (quality.metrics.garbageRatio * 100).toFixed(1),
+        wordCount: quality.metrics.wordCount,
+      });
+    } catch (err) {
+      // Log source failure but continue to next strategy
+      const isGeminiErr = err instanceof GeminiTranscriptError;
+      const isYtDlpErr = err instanceof YtDlpError;
+      logger.warn('youtube_transcript_source_failed', {
+        videoId,
+        source: strategy,
+        code: isGeminiErr ? err.code : isYtDlpErr ? err.code : 'unknown',
         message: (err as Error)?.message?.slice(0, 200),
       });
     }
   }
 
-  // Single attempt: timeout-wrapped lib call + error mapping.
-  // If the npm lib reports `no_transcript_available` for a video that
-  // YouTube actually serves an ASR track for (common with the Asamblea
-  // plenarios since Google's 2025 timed-text endpoint changes), we fall
-  // through to yt-dlp before giving up. yt-dlp is slower (~5-15s per video
-  // because it spawns a subprocess + solves JS challenges) but reliable.
-  async function attempt(): Promise<TranscriptSegment[]> {
-    try {
-      const raw = await withTimeout(
-        // withTimeout passes its own AbortSignal to the fn. The underlying lib
-        // doesn't accept an AbortSignal natively, so we race via the timeout
-        // mechanism. The caller's signal is also wired in via withTimeout's opts.
-        (_signal) =>
-          libFetchTranscript(videoId, { lang }),
-        { ms: timeoutMs, label, signal: opts?.signal },
-      );
-      const segments = normalizeSegments(raw);
-      if (segments.length > 0) {
-        logger.info('youtube_transcript_fetched', {
-          videoId,
-          lang,
-          segmentCount: segments.length,
-          source: 'lib',
-        });
-        return segments;
-      }
-      // Lib returned 0 segments — treat as "not available" and try yt-dlp.
-      logger.info('youtube_transcript_lib_empty_trying_ytdlp', { videoId });
-      return await tryYtDlpFallback(videoId, lang, timeoutMs, opts?.signal);
-    } catch (err) {
-      const mapped = mapLibError(err, videoId);
-      // Only fall through to yt-dlp for the "no transcript available" code.
-      // Other failures (network, rate-limited, video-not-found) shouldn't try
-      // a second fetcher — the issue is upstream, not lib-specific.
-      if (mapped.code === 'no_transcript_available') {
-        try {
-          return await tryYtDlpFallback(videoId, lang, timeoutMs, opts?.signal);
-        } catch (ytErr) {
-          // yt-dlp also failed — surface the original lib error so the caller
-          // sees the more meaningful error (the lib's diagnostic, not yt-dlp's).
-          logger.warn('youtube_transcript_ytdlp_fallback_failed', {
-            videoId,
-            ytDlpError: (ytErr as Error)?.message?.slice(0, 200),
-          });
-          throw mapped;
-        }
-      }
-      // Map to our typed error so shouldRetryTranscript can inspect the code.
-      throw mapped;
-    }
-  }
+  // All strategies exhausted
+  const failureSummary = qualityFailures
+    .map((f) => `${f.source}: ${f.reason}`)
+    .join('; ');
 
-  /**
-   * Try yt-dlp as fallback. Returns segments on success, throws on failure.
-   * The thrown error is intentionally generic — caller decides how to handle.
-   */
-  async function tryYtDlpFallback(
-    vid: string,
-    language: string,
-    timeoutMsLocal: number,
-    signal?: AbortSignal,
-  ): Promise<TranscriptSegment[]> {
-    const ytSegs = await fetchTranscriptViaYtDlp(vid, {
-      language,
-      // Plenarios are long videos; yt-dlp scrape is fast but bumping the
-      // timeout to 90s gives generous slack for slow networks / busy CI.
-      timeoutMs: Math.max(timeoutMsLocal, 90_000),
-      signal,
-    });
-    const segments: TranscriptSegment[] = ytSegs.map((s) => ({
-      start_seconds: s.start_seconds,
-      end_seconds: s.end_seconds,
-      text: s.text,
-      language,
-    }));
-    logger.info('youtube_transcript_fetched', {
-      videoId: vid,
-      lang: language,
-      segmentCount: segments.length,
-      source: 'yt-dlp',
-    });
-    if (segments.length === 0) {
-      // yt-dlp ran but returned 0 segments — same end-state as lib emptiness.
-      throw new YoutubeTranscriptError(
-        `yt-dlp returned 0 segments for ${vid}`,
-        'no_transcript_available',
-        vid,
-      );
-    }
-    return segments;
-  }
-  // Suppress unused-import warning for YtDlpError when this module compiles
-  // standalone — the import is meaningful for typed re-export by callers.
-  void YtDlpError;
-
-  return withRetry(attempt, {
-    attempts: MAX_ATTEMPTS,
-    baseDelayMs: BASE_DELAY_MS,
-    label,
-    shouldRetry: (err, attempt) => {
-      const retryable = shouldRetryTranscript(err);
-      if (!retryable) {
-        logger.warn('youtube_transcript_not_retrying', {
-          videoId,
-          attempt,
-          code: err instanceof YoutubeTranscriptError ? err.code : 'unknown',
-          message: (err as Error)?.message,
-        });
-      }
-      return retryable;
-    },
-  });
+  // If at least one source returned segments but they all failed quality gates,
+  // we use 'quality_rejected' so the caller can mark the session as broken
+  // instead of retrying indefinitely.
+  const anySourceReturnedSegments = qualityFailures.length > 0;
+  throw new YoutubeTranscriptError(
+    `All transcript sources failed for ${videoId}. ${failureSummary}`,
+    anySourceReturnedSegments ? 'quality_rejected' : 'no_transcript_available',
+    videoId,
+  );
 }

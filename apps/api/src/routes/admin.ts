@@ -209,6 +209,28 @@ adminRouter.get('/alerts', async (_req, res) => {
   }
 });
 
+// ─── WhatsApp Alerts ────────────────────────────────────────────────
+adminRouter.get('/whatsapp-alerts', async (req, res) => {
+  try {
+    const { listAlerts } = await import('../services/whatsappAlerts.js');
+    const status = (req.query.status as string | undefined) as 'pending' | 'sent' | 'failed' | 'skipped' | undefined;
+    const alerts = await listAlerts({ status, limit: 100 });
+    res.json(live({ items: alerts }));
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+adminRouter.post('/whatsapp-alerts/process', async (req, res) => {
+  try {
+    const { processPendingAlerts } = await import('../services/whatsappAlerts.js');
+    const result = await processPendingAlerts(50);
+    res.json(live(result));
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
 // ─── Transcripciones — sistema nuevo (Supabase sessions) × review state ────
 //
 // CAMBIO 2026-05-10: este endpoint pasó de leer la API legacy
@@ -1594,5 +1616,48 @@ void audit({
   resource_kind: 'system',
   result: 'ok',
 }).catch(() => undefined);
+
+/**
+ * GET /api/admin/tokens/by-user?window_days=30&limit=100
+ *
+ * Token accounting certero por usuario (Supabase Auth). Devuelve un row
+ * por user con call_count + tokens_in/out + cost_usd_estimated + last_call_at,
+ * ordenado por costo descendente. Join contra profiles para email + nombre.
+ *
+ * Source: ai_call_log + v_ai_usage_by_user_30d (migración 0048).
+ * Coverage actual: Vertex Gemini (transcribe) + Cerebro invoke + workspace
+ * transforms + voice. El chat SSE loggea del lado Cerebro — la cifra en
+ * esta vista es subset hasta que el endpoint Cerebro expose esos counters.
+ */
+adminRouter.get('/tokens/by-user', async (req, res) => {
+  try {
+    const windowDays = Math.min(Math.max(Number(req.query.window_days ?? 30) || 30, 1), 365);
+    const limit = Math.min(Math.max(Number(req.query.limit ?? 100) || 100, 1), 500);
+    const { getUsageByUser } = await import('../services/tokenAccounting.js');
+    const rows = await getUsageByUser({ windowDays, limit });
+    // Shape flat — el frontend lee `data.items` directo. `live()` envuelve
+    // en {data: ...} y rompe el contract del endpoint.
+    res.json({ ok: true, generated_at: new Date().toISOString(), window_days: windowDays, items: rows });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/**
+ * GET /api/admin/tokens/by-user/:user_id?window_days=30
+ *
+ * Detalle de un usuario específico: agregado + desglose por modelo
+ * (call_count, tokens_total, cost_usd por model).
+ */
+adminRouter.get('/tokens/by-user/:user_id', async (req, res) => {
+  try {
+    const windowDays = Math.min(Math.max(Number(req.query.window_days ?? 30) || 30, 1), 365);
+    const { getUsageByUserDetail } = await import('../services/tokenAccounting.js');
+    const detail = await getUsageByUserDetail(req.params.user_id, windowDays);
+    res.json({ ok: true, user_id: req.params.user_id, window_days: windowDays, detail });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
 
 export { adminRouter };

@@ -228,9 +228,16 @@ export async function fetchTranscriptViaYtDlp(
  *   - Strip HTML tags (e.g. <c>, <i>)
  *   - Dedupe cues that repeat the same text (auto-caption rolling-window pattern)
  */
+interface RawCue {
+  start_seconds: number;
+  end_seconds: number;
+  text: string;
+  hasCTag: boolean;
+}
+
 export function parseVtt(vtt: string): YtDlpSegment[] {
   const lines = vtt.split(/\r?\n/);
-  const cues: YtDlpSegment[] = [];
+  const cues: RawCue[] = [];
 
   let i = 0;
   // Skip header (WEBVTT, Kind, Language, blank lines)
@@ -247,18 +254,37 @@ export function parseVtt(vtt: string): YtDlpSegment[] {
     // Read text lines until blank line
     i++;
     const textLines: string[] = [];
+    let hasCTag = false;
     while (i < lines.length && lines[i].trim() !== '') {
+      // Detect word-level timing cues (<c> tags) — these are cumulative
+      // duplicates in YouTube auto-captions. Clean snapshot cues lack them.
+      if (lines[i].includes('<c>')) hasCTag = true;
       textLines.push(lines[i]);
       i++;
     }
     const text = cleanVttText(textLines.join(' '));
     if (text.length > 0 && endSec > startSec) {
-      cues.push({ start_seconds: startSec, end_seconds: endSec, text });
+      cues.push({ start_seconds: startSec, end_seconds: endSec, text, hasCTag });
     }
     // Skip blank line(s) before next cue
     while (i < lines.length && lines[i].trim() === '') i++;
   }
 
+  // YouTube auto-captions (2026-05) emit two cue types:
+  //   1. Cues WITH <c> tags — cumulative text with word-level timing
+  //   2. Cues WITHOUT <c> tags — clean snapshot of the new phrase only (~0.01s)
+  // If we detect <c> tags, keep only the clean snapshots to avoid duplication.
+  const hasAnyCTag = cues.some((c) => c.hasCTag);
+  if (hasAnyCTag) {
+    const clean = cues.filter((c) => !c.hasCTag);
+    return clean.map((c) => ({
+      start_seconds: c.start_seconds,
+      end_seconds: c.end_seconds,
+      text: c.text,
+    }));
+  }
+
+  // For VTTs without <c> tags (manual subs, other formats), use legacy dedup.
   return dedupeRollingCues(cues);
 }
 

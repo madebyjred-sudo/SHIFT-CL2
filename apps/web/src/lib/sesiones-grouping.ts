@@ -48,8 +48,14 @@ function addDays(d: Date, n: number): Date {
 }
 
 function parseFecha(raw: string): Date | null {
-  // sessions.fecha is ISO timestamp ("2026-03-24T...") or date ("2026-03-24")
-  const t = Date.parse(raw);
+  // sessions.fecha is ISO timestamp ("2026-03-24T...") or date ("2026-03-24").
+  // Si el origen es UTC midnight (común en el ingest desde YouTube/SIL), el
+  // browser en CR (-6h) lo corre al día anterior — la sesión "20 mayo" se
+  // agrupa como "19 mayo". Anclamos a mediodía local para que el día
+  // calendario se preserve sin importar el TZ del cliente.
+  if (!raw) return null;
+  const ymd = String(raw).slice(0, 10);
+  const t = Date.parse(`${ymd}T12:00:00`);
   return Number.isFinite(t) ? new Date(t) : null;
 }
 
@@ -206,7 +212,7 @@ export function computeKpis(
   for (const s of sessions) {
     const d = parseFecha(s.fecha);
     if (d && d >= thisWeekStart) sesionesEstaSemana += 1;
-    if (d && d >= monthStart && s.estado === 1) finalizadasMes += 1;
+    if (d && d >= monthStart && s.estado === 2) finalizadasMes += 1;
     if (s.has_resumen) conResumen += 1;
   }
   return {
@@ -248,7 +254,7 @@ export function applyEstadoFilter(
   estado: EstadoFilter,
 ): SessionListItem[] {
   if (estado === 'todas') return sessions;
-  if (estado === 'finalizadas') return sessions.filter((s) => s.estado === 1);
+  if (estado === 'finalizadas') return sessions.filter((s) => s.estado === 2);
   return sessions.filter((s) => s.estado !== 1);
 }
 

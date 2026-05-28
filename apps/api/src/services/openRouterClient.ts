@@ -1,5 +1,7 @@
 import type { CerebroStreamChunk, AgentId } from '@shift-cl2/shared-types';
 import { getAgent, buildAgentSystemPrompt } from './agentLoader.js';
+import { matchReglamentoShortcut, buildReglamentoHintMessage } from './reglamentoShortcuts.js';
+import { matchTranscriptShortcut, buildTranscriptHintMessage } from './transcriptShortcuts.js';
 import { searchTranscripts, type ChunkHit } from './searchTranscripts.js';
 import { searchSessionTranscript, searchSessionTranscriptByUuid } from './searchSessionTranscript.js';
 import {
@@ -8,10 +10,12 @@ import {
   searchSilCorpus,
   searchReglamento,
   searchRalComentado,
+  searchConstitucionLoal,
   renderExpedientesForLlm,
   renderExpedienteFullForLlm,
   renderReglamentoForLlm,
   renderRalComentadoForLlm,
+  renderConstitucionLoalForLlm,
 } from './silClient.js';
 import {
   evaluateRalAplicacion,
@@ -58,6 +62,10 @@ interface StreamArgs {
   // El handler de la tool elige el path según cuál esté presente.
   scope_legacy_session_id?: number | null;
   scope_session_uuid?: string | null;
+  // When set, enables scoped search_sil_corpus over this expediente's docs.
+  // The chat router injects an expediente context system prompt and the
+  // model is instructed to pass expediente_numero to search_sil_corpus.
+  scope_expediente_numero?: string | null;
   // When set, enables `generate_presentation` for Atlas. The tool composes
   // every hoja in this workspace into a Gamma deck and emits a `pptx_ready`
   // chunk to the client. Without this scope, Atlas can't generate decks
@@ -73,6 +81,13 @@ interface StreamArgs {
   // through Cerebro's /v1/llm/invoke (the bypass-closure path; deferred).
   // null/undefined → skip injection silently.
   user_email?: string | null;
+  // Role del usuario tomado de user_access.role. Wave 4 / Ronald F1 (2026-05-26):
+  // si role='cliente' se filtran las tools editoriales con marca CL2
+  // (generate_presentation, generate_docx, generate_asset, edit_asset_slide).
+  // Cliente puede usar todo lo demás (chat, browse, alertas Centinela).
+  // null/undefined → se asume rol no-restringido (caller no resolvió el
+  // role o el user no tiene row en user_access aún).
+  user_role?: 'lector' | 'editor' | 'operador' | 'admin' | 'cliente' | null;
   // Prior turns of this conversation, in OAI {role,content} shape. Without
   // this, every turn is a "first turn" to the LLM (it can't see what it
   // said last time, so references like "el #1" or "expandí esa idea" miss).
@@ -149,6 +164,7 @@ type OAMessage =
   | { role: 'tool'; tool_call_id: string; content: string };
 
 interface OACompletionResponse {
+  model?: string;
   choices?: Array<{
     message?: {
       role: 'assistant';
@@ -161,7 +177,39 @@ interface OACompletionResponse {
     };
     finish_reason?: string;
   }>;
+  usage?: StreamUsage;
 }
+
+// Direct lookup of a plenary or commission session by its calendar date.
+// Critical for prompts like "qué se discutió en la sesión del 21 de mayo"
+// — search_transcripts depends on chunks (limited coverage for recent
+// plenaries) while this tool reads sessions.metadata.resumen which is
+// always populated post-LLM-review (Vertex Gemini 2.5 Pro). Returns the
+// full executive summary + key points + agreements + duration.
+const GET_SESSION_BY_DATE_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'get_session_by_date',
+    description:
+      'Recupera el resumen ejecutivo + puntos clave + acuerdos de una sesión legislativa (plenaria o de comisión) por su fecha. Usá esta tool SIEMPRE que el usuario pregunte por una sesión específica con su fecha — por ejemplo "qué se discutió en la plenaria del 21 de mayo", "qué pasó en la sesión del 14 de marzo", "dame el resumen del plenario del jueves pasado". Es más directa y confiable que search_transcripts para preguntas centradas en una fecha. Devuelve metadata estructurada (fecha, tipo, comisión, duración, video) + el resumen ejecutivo generado por el LLM tras la transcripción.',
+    parameters: {
+      type: 'object',
+      properties: {
+        fecha: {
+          type: 'string',
+          description: 'Fecha de la sesión en formato YYYY-MM-DD (ej. "2026-05-21"). Si el usuario escribe "21 de mayo" del año en curso, convertilo a YYYY-MM-DD.',
+        },
+        tipo: {
+          type: 'string',
+          enum: ['plenario', 'comision'],
+          description: 'Tipo de sesión: "plenario" o "comision". Default: plenario.',
+          default: 'plenario',
+        },
+      },
+      required: ['fecha'],
+    },
+  },
+};
 
 // Session-scoped transcript search. Only registered when the request carries
 // `scope_legacy_session_id` — i.e. the user is chatting from /sesiones/:id.
@@ -217,6 +265,16 @@ function hasReglamentoTool(agentTools: Array<Record<string, unknown>>): boolean 
 // search_reglamento (o además de él, para backwards compat durante la transición).
 function hasRalComentadoTool(agentTools: Array<Record<string, unknown>>): boolean {
   return agentTools.some((t) => t.name === 'search_ral_comentado');
+}
+
+// search_constitucion_loal — Wave 4 #2 (2026-05-26). Constitución Política
+// (197 arts) + Ley Orgánica del Poder Legislativo (~100 arts). Cuerpos
+// normativos que el Reglamento NO contiene (tratados internacionales,
+// elección magistrados Sala IV, plazo de resello tras veto, inmunidad
+// parlamentaria, juramentación). Declarar en el YAML del agente que lo
+// quiera — Lexa primero, en demos posteriores podría agregarse Atlas.
+function hasConstitucionLoalTool(agentTools: Array<Record<string, unknown>>): boolean {
+  return agentTools.some((t) => t.name === 'search_constitucion_loal');
 }
 
 // evaluate_ral_aplicacion — Track Q, Sprint 3 (2026-05-16). Filtro activo
@@ -531,6 +589,48 @@ const SEARCH_RAL_COMENTADO_TOOL = {
   },
 };
 
+// ─── search_constitucion_loal tool — Wave 4 #2 (2026-05-26) ──────────────────
+// Constitución Política CR (197 arts) + Ley Orgánica del Poder Legislativo
+// (~100 arts). Complementa search_reglamento + search_ral_comentado para
+// materias que el Reglamento NO regula:
+//   - Tratados internacionales (Art. 121 inciso 4 Constitución)
+//   - Elección/duración de magistrados Sala IV (Arts. 158-163 Constitución)
+//   - Resello tras veto presidencial (Art. 127 Constitución)
+//   - Inmunidad parlamentaria (Arts. 110-112 Constitución)
+//   - Juramentación de diputados (Const. + LOAL)
+//   - Atribuciones exclusivas de la Asamblea (Art. 121 Constitución)
+//
+// Si el modelo pregunta primero al Reglamento y no encuentra, debería caer
+// a este tool. Por eso el system prompt (lexa.yaml) lo lista al lado del
+// Reglamento, no como último recurso.
+const SEARCH_CONSTITUCION_LOAL_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'search_constitucion_loal',
+    description:
+      'Busca en la Constitución Política de Costa Rica (197 artículos vigentes) y en la Ley Orgánica del Poder Legislativo / LOAL (~100 artículos). ' +
+      'Úsalo cuando la pregunta toca materias que el Reglamento de la Asamblea NO regula: tratados internacionales, ratificación legislativa, elección de magistrados de la Sala IV / Corte Suprema, plazo de resello tras veto presidencial, inmunidad parlamentaria, juramentación, atribuciones de la Asamblea según la Constitución, organización interna del Poder Legislativo. ' +
+      'Devuelve artículos completos con su número y cuerpo de origen (Constitución o LOAL). Citá inline así: "[Art. 121 (Const)]" o "[Art. 11 (LOAL)]". ' +
+      'Cuándo NO usarlo: para procedimiento legislativo del día a día (plazos de dictamen, moción 137, dispensa de trámite) usá search_reglamento o search_ral_comentado — esos tienen el Reglamento + interpretaciones de la Presidencia. Este tool es para el MARCO CONSTITUCIONAL y la LEY MARCO del Poder Legislativo.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description:
+            'Pregunta o materia en español. Ej: "atribuciones de la Asamblea sobre tratados internacionales", "duración del cargo de magistrados de la Sala Constitucional", "plazo para resellar tras veto presidencial", "qué inmunidad tienen los diputados".',
+        },
+        k: {
+          type: 'integer',
+          description: 'Número de artículos a recuperar (default 8, max 15).',
+          default: 8,
+        },
+      },
+      required: ['query'],
+    },
+  },
+};
+
 // ─── evaluate_ral_aplicacion tool — Track Q, Sprint 3 (2026-05-16) ───────────
 // "Filtro activo" procedural: el RAL como REGLAS DESTILADAS, no como texto.
 // Lexa describe el caso del consultor ("¿este expediente puede ir a primer
@@ -615,8 +715,16 @@ const SEARCH_SIL_EXPEDIENTES_TOOL = {
           type: 'string',
           description: 'Filtrar por comisión específica (omitir si no aplica).',
         },
-        fecha_from: { type: 'string', description: 'Fecha desde (YYYY-MM-DD), opcional.' },
-        fecha_to: { type: 'string', description: 'Fecha hasta (YYYY-MM-DD), opcional.' },
+        fecha_from: {
+          type: 'string',
+          description:
+            'Fecha desde (YYYY-MM-DD), OPCIONAL. Filtra por fecha de PRESENTACIÓN del expediente en la Asamblea, NO por cuándo se discutió en plenarias ni cuándo se votó. Solo pasalo cuando el usuario explícitamente busca expedientes presentados en un período ("iniciativas presentadas en 2024", "expedientes de la legislatura 2022-2026"). NO lo pases para preguntas sobre cuándo se DEBATIÓ o se VOTÓ un expediente — para eso usá search_transcripts.',
+        },
+        fecha_to: {
+          type: 'string',
+          description:
+            'Fecha hasta (YYYY-MM-DD), OPCIONAL. Mismo criterio que fecha_from: filtra por fecha de presentación, NO de discusión. Omitilo en preguntas tipo "qué se discutió en X período".',
+        },
       },
       required: ['query'],
     },
@@ -647,18 +755,22 @@ const SEARCH_SIL_CORPUS_TOOL = {
   function: {
     name: 'search_sil_corpus',
     description:
-      'Búsqueda semántica sobre el corpus indexado del SIL (textos de proyectos, dictámenes, mociones). Usá esta tool cuando la pregunta requiere análisis de CONTENIDO, no solo títulos: "¿cómo se ha discutido X en el congreso?", "argumentos a favor/en contra de Y", "qué dice el dictamen de mayoría sobre Z". Más cara que search_sil_expedientes — preferila SOLO si el deep_insight está activado o si la pregunta es claramente analítica.',
+      'Búsqueda híbrida (semántica + palabra exacta) sobre el corpus indexado del SIL (textos de proyectos, dictámenes, mociones). Usá esta tool cuando la pregunta requiere análisis de CONTENIDO: "¿cómo se ha discutido X?", "qué dice el dictamen sobre Z". Si la pregunta es sobre un expediente en particular, pasá el número en expediente_numero para filtrar exactamente esos documentos y humanizar la búsqueda.',
     parameters: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
-          description: 'Pregunta o tema en lenguaje natural. La tool embebe la consulta y trae los chunks más cercanos.',
+          description: 'Pregunta o tema en lenguaje natural. La tool hace una búsqueda híbrida (vectores + exact match).',
         },
         k: {
           type: 'integer',
           description: 'Número de extractos a recuperar (default 6, max 15).',
           default: 6,
+        },
+        expediente_numero: {
+          type: 'string',
+          description: 'OPCIONAL. Si la pregunta es sobre un expediente específico, extrae el número aquí (ej: "25.600" o "22293"). Esto obliga a la base de datos a buscar solo dentro de ese expediente, garantizando exactitud sin depender de vectores.',
         },
       },
       required: ['query'],
@@ -698,18 +810,44 @@ async function orFetch(
   );
 }
 
+/** Usage final que emite el provider en el último chunk del SSE cuando
+ *  pedimos stream_options.include_usage. Anthropic / OpenAI / Cerebro
+ *  todos siguen este shape (con sus extras propios). */
+export interface StreamUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  // Cerebro / OpenRouter pueden incluir cost ya calculado.
+  cost?: number;
+  // Anthropic prompt caching (vía Cerebro adapter).
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
+}
+
 async function streamCompletion(
   body: object,
   orKey: string,
   onToken: (token: string) => void,
+  onUsage?: (usage: StreamUsage, model: string | undefined) => void,
 ): Promise<void> {
   // Only the connection-open phase is timed; once tokens start flowing we
   // trust the stream until done. Mid-stream stalls would need a separate
   // idle-timeout, deferred until we see them in production.
-  const res = await orFetch({ ...body, stream: true }, orKey, {
-    timeoutMs: OR_STREAM_OPEN_TIMEOUT_MS,
-    label: 'openrouter stream open',
-  });
+  //
+  // stream_options.include_usage:true hace que el provider emita un chunk
+  // final con `usage: {prompt_tokens, completion_tokens, total_tokens, cost}`
+  // — sin esto el SSE termina sin reporte de tokens y el contador se queda
+  // ciego (la causa del "20% certero" pre-hookeo).
+  const res = await orFetch(
+    { ...body, stream: true, stream_options: { include_usage: true } },
+    orKey,
+    {
+      timeoutMs: OR_STREAM_OPEN_TIMEOUT_MS,
+      label: 'openrouter stream open',
+    },
+  );
   if (!res.ok || !res.body) {
     throw new Error(`openrouter ${res.status}: ${await res.text()}`);
   }
@@ -717,6 +855,8 @@ async function streamCompletion(
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
+  let lastUsage: StreamUsage | undefined;
+  let modelFromStream: string | undefined;
 
   while (true) {
     const { value, done } = await reader.read();
@@ -733,8 +873,12 @@ async function streamCompletion(
       if (!data || data === '[DONE]') continue;
       try {
         const json = JSON.parse(data) as {
+          model?: string;
           choices?: Array<{ delta?: { content?: string } }>;
+          usage?: StreamUsage;
         };
+        if (json.model && !modelFromStream) modelFromStream = json.model;
+        if (json.usage) lastUsage = json.usage;
         const delta = json.choices?.[0]?.delta?.content;
         if (delta) onToken(delta);
       } catch {
@@ -742,6 +886,11 @@ async function streamCompletion(
       }
     }
   }
+
+  // Emitir usage al caller. Si el provider no incluyó usage (provider
+  // legacy o stream cortado) el callback no se invoca → caller decide
+  // si loggear con estimación o saltar.
+  if (lastUsage && onUsage) onUsage(lastUsage, modelFromStream);
 }
 
 /**
@@ -759,9 +908,15 @@ async function streamCompletion(
  *     Lexa "recuerda" sin que CL2 toque UI ni dispatcher de memoria.
  *   - cierre del bypass arquitectural (Cerebro vuelve a ser gateway real)
  *
- * Si agent declara tools, runs 2-pass loop:
- *   Pass 1 (non-stream): model decide tool_calls (mis tools)
- *   Pass 2 (stream): final answer con tool results
+ * Si agent declara tools, runs un agentic loop (hasta MAX_ROUNDS iteraciones):
+ *   - cada ronda llama al modelo non-streaming con tools + tool_choice='auto'
+ *   - si el modelo devuelve content sin tool_calls → emitimos el texto y
+ *     terminamos
+ *   - si devuelve tool_calls → dispatcha cada tool, agrega `role:'tool'`
+ *     messages, y vuelve a llamar al modelo en la próxima iteración
+ *   - el loop cierra el bug `content:null + finish_reason='tool_calls'` que
+ *     Anthropic Sonnet 4.x y Gemini 3.x exponen cuando piden más rondas de
+ *     tools (refactor 2026-05-25, reemplaza el viejo esquema Pass 1 / Pass 2).
  * Sin tools: 1-pass stream directo.
  */
 export async function openRouterStream(args: StreamArgs): Promise<void> {
@@ -822,6 +977,19 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   const cerebroExtras = {
     tenant: 'cl2',
     app_id: 'cl2',
+    // preferred_agent — wire del F6 selector de Cerebro (commit a95a40d
+    // en shift-cerebro main). Activable via env porque su inyección
+    // (prepend del workflow factory al system_blocks) parece estar
+    // rompiendo el Pass 2 tool loop cuando hay tool_calls activos:
+    // Lexa ejecuta tools en Pass 1, los tool messages se inyectan, pero
+    // el Pass 2 stream NO compone respuesta final — el frontend pinta
+    // tool content raw como si fuera respuesta. Estado: pausado hasta
+    // confirmar con sesión Cerebro padre. Para reactivar:
+    //   gcloud run services update cl2-v2-api --set-env-vars CL2_F6_PREFERRED_AGENT=on
+    // Ver apps/cl2/output/handoffs/2026-05-24-from-padre-plantillas-v3.md.
+    ...(process.env.CL2_F6_PREFERRED_AGENT === 'on'
+      ? { preferred_agent: args.agent_id }
+      : {}),
     trace_label: `cl2:chat:${args.agent_id}${args.deep_insight ? ':di' : ''}`,
     enable_auto_route: process.env.CL2_AUTO_ROUTE_ENABLED !== 'false',
     enable_cove: args.deep_insight === true,
@@ -853,14 +1021,43 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // migración) lo va a necesitar como `user_id` en el payload de
   // Cerebro. No se usa acá todavía.
 
+  // 2026-05-26 Wave 2: hand-curated shortcuts del Reglamento.
+  // Lawyer test L1/L4 demostró que search_reglamento semantic falla
+  // en queries procedimentales abstractas (e.g. "plazo dictamen comisión
+  // permanente" retorna Art 131 cuando la respuesta correcta es Art 80).
+  // El shortcut detecta query pattern y le pasa una hint INTERNA con
+  // el artículo correcto para que Lexa lo busque y cite. NO se expone
+  // al usuario (el system prompt instruye a no leakear el hint).
+  const reglamentoShortcut = matchReglamentoShortcut(args.query);
+  const reglamentoHintBlock = reglamentoShortcut
+    ? [{ role: 'system' as const, content: buildReglamentoHintMessage(reglamentoShortcut) }]
+    : [];
+
+  // 2026-05-26 Wave 2 (cont): transcript shortcuts para queries sobre
+  // votaciones, mociones, intervenciones de diputado, etc. Lawyer test
+  // L9 demostró que "votación en plenaria X" no surface "votos a favor"
+  // con semantic search. El hint guía a Lexa hacia keywords explícitos.
+  const transcriptShortcut = matchTranscriptShortcut(args.query);
+  const transcriptHintBlock = transcriptShortcut
+    ? [{ role: 'system' as const, content: buildTranscriptHintMessage(transcriptShortcut) }]
+    : [];
+
+  // Wave 4 / Expediente chat (2026-05-28): prepend the scope context to the
+  // main system prompt instead of appending it as a separate system message.
+  // GPT-5.5 (and Claude) give higher priority to the FIRST system instructions.
+  // When the expediente context comes after the lexa.yaml persona, the model
+  // often ignores it and asks "which expediente?". Prepending fixes this.
+  const effectiveSystemPrompt = args.scope_system_prompt
+    ? `${args.scope_system_prompt}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n${systemPrompt}`
+    : systemPrompt;
+
   const messages: OAMessage[] = [
-    { role: 'system', content: systemPrompt },
+    { role: 'system', content: effectiveSystemPrompt },
     ...(args.dynamic_rag_prompt
       ? [{ role: 'system' as const, content: args.dynamic_rag_prompt }]
       : []),
-    ...(args.scope_system_prompt
-      ? [{ role: 'system' as const, content: args.scope_system_prompt }]
-      : []),
+    ...reglamentoHintBlock,
+    ...transcriptHintBlock,
     ...trimmedHistory,
     { role: 'user', content: args.query },
   ];
@@ -873,15 +1070,23 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // Loose `unknown` element type — both tool schemas have different
   // `parameters.properties` shapes; `tools` is forwarded as JSON to the API.
   const tools: Array<Record<string, unknown>> = [];
-  if (hasSearchTranscriptsTool(agent.tools)) tools.push(SEARCH_TRANSCRIPTS_TOOL);
+  if (hasSearchTranscriptsTool(agent.tools)) {
+    tools.push(SEARCH_TRANSCRIPTS_TOOL);
+    // get_session_by_date va junto con search_transcripts — son
+    // complementarias. La primera para "qué dijo X" (search semántico
+    // sobre chunks), la segunda para "qué pasó el DD/MM" (lookup
+    // directo por fecha leyendo metadata.resumen).
+    tools.push(GET_SESSION_BY_DATE_TOOL);
+  }
   const scopeId = args.scope_legacy_session_id ?? null;
   const scopeUuid = args.scope_session_uuid ?? null;
+  const scopeExpedienteNumero = args.scope_expediente_numero ?? null;
   // search_session_transcript se registra SOLO cuando NO tenemos el
   // transcript completo en el system prompt. Si scope_system_prompt
   // contiene "=== TRANSCRIPCIÓN COMPLETA ===" (sessions UUID con
   // transcript inline tras el refactor 2026-05-12), no hace falta la
   // tool — el modelo lee el transcript directo. Registrarla en ese
-  // caso solo agrega input tokens innecesarios y tienta al modelo a
+  // caso solo agrega input tokens innecesarias y tienta al modelo a
   // hacer una llamada que termina en pass2 vacío.
   // El path legacy (scope_legacy_session_id) NO incluye transcript en
   // el prompt todavía, entonces sigue necesitando la tool.
@@ -897,6 +1102,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     has_search_session_transcript: scopeId !== null || scopeUuid !== null,
     scopeId,
     scopeUuid: scopeUuid?.slice(0, 8),
+    scopeExpedienteNumero,
     has_scope_system_prompt: typeof args.scope_system_prompt === 'string' && args.scope_system_prompt.length > 0,
   });
   // SIL tools: only registered when the agent YAML opts in. Letting every
@@ -904,7 +1110,16 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // model about when to use search_transcripts (plenarias) vs search_sil_*
   // (expedientes). Lexa keeps both, Atlas leans on SIL, Centinela none.
   if (hasSilTools(agent.tools)) {
-    tools.push(SEARCH_SIL_EXPEDIENTES_TOOL, GET_SIL_EXPEDIENTE_TOOL, SEARCH_SIL_CORPUS_TOOL);
+    // When scoped to a specific expediente, we already injected the full
+    // enrichment context as a system prompt. Don't register get_sil_expediente
+    // or search_sil_expedientes — they tempt the model to ask "which
+    // expediente?" instead of using the context we already gave it.
+    // Keep search_sil_corpus for deep document RAG (texto base, dictámenes).
+    if (scopeExpedienteNumero) {
+      tools.push(SEARCH_SIL_CORPUS_TOOL);
+    } else {
+      tools.push(SEARCH_SIL_EXPEDIENTES_TOOL, GET_SIL_EXPEDIENTE_TOOL, SEARCH_SIL_CORPUS_TOOL);
+    }
   }
   // Reglamento de la Asamblea — procedural knowledge layer. Lexa
   // declares it (Atlas could too, but the PROCEDURAL questions are
@@ -926,6 +1141,14 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   if (hasEvaluateRalAplicacionTool(agent.tools)) {
     tools.push(EVALUATE_RAL_APLICACION_TOOL);
   }
+  // search_constitucion_loal — Wave 4 #2 (2026-05-26).
+  // Constitución Política CR + LOAL. Cierra el gap del lawyer audit:
+  // tratados internacionales, elección Sala IV, resello, inmunidad,
+  // juramentación. Coexiste con search_reglamento + search_ral_comentado.
+  // Requiere migración 0050 aplicada + ingest job corrido al menos una vez.
+  if (hasConstitucionLoalTool(agent.tools)) {
+    tools.push(SEARCH_CONSTITUCION_LOAL_TOOL);
+  }
   // Graph-augmented retrieval (LightRAG). DEEP-INSIGHT-GATED.
   // The graph traversal + Opus 4.7 synthesis is our "premium reasoning" tier
   // — token-heavy, expensive, and only justified when the user explicitly
@@ -937,25 +1160,31 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   if (hasGraphTool(agent.tools) && args.deep_insight) {
     tools.push(QUERY_LEGISLATIVE_GRAPH_TOOL);
   }
+  // Wave 4 / Ronald F1 (2026-05-26): los 4 tools editoriales con marca CL2
+  // están gateados por role del usuario. `cliente` NO puede invocarlos —
+  // son productos "para venta" propiedad de CL2 Consultoría. Cualquier otro
+  // rol (lector/editor/operador/admin/null) conserva acceso completo.
+  const canUseEditorial = args.user_role !== 'cliente';
+
   // generate_presentation — only available when the chat is scoped to a
   // workspace AND the agent yaml declares the tool (Atlas does, Lexa/
   // Centinela don't). Without scope_workspace_id we don't know which
   // canvas to convert, so we hide the tool entirely rather than letting
   // the model attempt and fail.
-  if (hasGeneratePresentationTool(agent.tools) && args.scope_workspace_id) {
+  if (canUseEditorial && hasGeneratePresentationTool(agent.tools) && args.scope_workspace_id) {
     tools.push(GENERATE_PRESENTATION_TOOL);
   }
   // generate_docx — same workspace-scoping contract as generate_presentation.
   // Only Atlas declares this tool; only available when a workspace is in scope.
-  if (hasGenerateDocxTool(agent.tools) && args.scope_workspace_id) {
+  if (canUseEditorial && hasGenerateDocxTool(agent.tools) && args.scope_workspace_id) {
     tools.push(GENERATE_DOCX_TOOL);
   }
   // generate_asset / edit_asset_slide — branded HTML→PDF pipeline.
   // Same workspace-scope gate as the legacy tools above.
-  if (hasGenerateAssetTool(agent.tools) && args.scope_workspace_id) {
+  if (canUseEditorial && hasGenerateAssetTool(agent.tools) && args.scope_workspace_id) {
     tools.push(GENERATE_ASSET_TOOL);
   }
-  if (hasEditAssetSlideTool(agent.tools) && args.scope_workspace_id) {
+  if (canUseEditorial && hasEditAssetSlideTool(agent.tools) && args.scope_workspace_id) {
     tools.push(EDIT_ASSET_SLIDE_TOOL);
   }
   // create_workspace — Atlas tool para CREAR un workspace nuevo. NO está
@@ -966,76 +1195,193 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   }
 
   if (tools.length === 0) {
+    const streamStart = Date.now();
     await streamCompletion(
       { model, messages, max_tokens: 2048, ...cerebroExtras },
       orKey,
       (t) => args.onChunk({ type: 'token', payload: t }),
+      (usage, modelFromStream) => {
+        void logChatStreamUsage({
+          args,
+          model: modelFromStream ?? model,
+          usage,
+          latencyMs: Date.now() - streamStart,
+          pass: 'single',
+        });
+      },
     );
     return;
   }
 
-  // Pass 1: ask model with tools, non-streaming so we can detect tool_calls cleanly.
-  // Retried on transient failures — pass1 is idempotent (no SSE bytes flushed yet).
-  const pass1 = await withRetry(
-    async () => {
-      const res = await orFetch(
-        {
-          model,
-          messages,
-          tools,
-          tool_choice: 'auto',
-          max_tokens: 2048,
-          ...cerebroExtras,
-        },
-        orKey,
-        { timeoutMs: OR_PASS1_TIMEOUT_MS, label: 'openrouter pass1' },
-      );
-      if (!res.ok) {
-        const text = await res.text();
-        // 4xx (except 429) won't change on retry — fail fast.
-        if (res.status >= 400 && res.status < 500 && res.status !== 429) {
-          throw new ResilienceError(`openrouter pass1 ${res.status}: ${text}`, 'aborted');
+  // ── Agentic loop (refactor 2026-05-25) ────────────────────────────────────
+  // Reemplaza el viejo Pass 1 / Pass 2 fijo por un bucle de hasta MAX_ROUNDS
+  // turnos contra el modelo. Cada iteración:
+  //   1) Llama al LLM (non-streaming JSON) con `tools` + `tool_choice: 'auto'`.
+  //   2) Si NO hay tool_calls → emite el `content` como token y termina.
+  //   3) Si hay tool_calls → empuja el mensaje assistant + dispatcha cada tool
+  //      (mismo switch que antes), agrega los `role:'tool'` messages, y
+  //      vuelve a llamar al LLM en la próxima iteración.
+  //
+  // El bug que cerró este refactor: Anthropic Sonnet 4.x y Gemini 3.x devuelven
+  // `content:null + finish_reason='tool_calls'` cuando quieren MÁS rondas de
+  // tools. El esquema viejo de 2 pasos cortaba en la 2da llamada y emitía
+  // vacío → "content_length=0" intermitente desde 2026-05-12. Ahora el modelo
+  // puede hacer search → get_detalle → search_corpus → respuesta sin perder
+  // continuidad.
+  //
+  // MAX_ROUNDS=5 — la mayoría de consultas reales necesitan 1–3 rondas; 5 da
+  // margen de seguridad sin abrir la puerta a loops infinitos (cada ronda
+  // cuesta ~300-2000 tokens de prompt + completion).
+  // 2026-05-26: subido 5→8. Lawyer test L12 demostró que queries
+  // multi-step (buscar + detallar) a veces necesitan 3-4 rounds.
+  // 8 es safety margin razonable contra loops infinitos.
+  // 2026-05-26 (Wave 4 #7 follow-up): 8→12. Doctrina cliente actualizada:
+  // resultado correcto > rapidez. Logs muestran que queries específicas
+  // sobre votaciones agotan los 8 rounds buscando + reconciliando datos
+  // entre tools, y Lexa responde "no encontré" no porque no esté el dato,
+  // sino porque se quedó sin rounds. 12 da espacio suficiente; si una
+  // query genuinamente loopa, hay límite. Bajaremos cuando validemos el
+  // p95 de rounds reales con telemetría.
+  const MAX_ROUNDS = 12;
+  // Conservamos la variable `assistantText` para que el guardrail final pueda
+  // distinguir "el modelo emitió algo" vs "salimos del loop sin contenido".
+  let assistantText = '';
+  // Capturamos el último response del LLM (puede ser útil para tracing en el
+  // guardrail). Tipado igual que el viejo `pass1`.
+  let lastRoundResponse: OACompletionResponse | null = null;
+
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    // Cada ronda es idempotente (no flushea SSE de texto todavía) → safe to retry.
+    const roundResponse = await withRetry(
+      async () => {
+        const res = await orFetch(
+          {
+            model,
+            messages,
+            tools,
+            tool_choice: 'auto',
+            max_tokens: 2048,
+            ...cerebroExtras,
+          },
+          orKey,
+          { timeoutMs: OR_PASS1_TIMEOUT_MS, label: `openrouter agentic_round_${round}` },
+        );
+        if (!res.ok) {
+          const text = await res.text();
+          // 4xx (except 429) won't change on retry — fail fast.
+          if (res.status >= 400 && res.status < 500 && res.status !== 429) {
+            throw new ResilienceError(
+              `openrouter agentic_round_${round} ${res.status}: ${text}`,
+              'aborted',
+            );
+          }
+          throw new Error(`openrouter agentic_round_${round} ${res.status}: ${text}`);
         }
-        throw new Error(`openrouter pass1 ${res.status}: ${text}`);
+        return (await res.json()) as OACompletionResponse;
+      },
+      {
+        attempts: OR_PASS1_RETRY_ATTEMPTS,
+        baseDelayMs: OR_PASS1_RETRY_BASE_MS,
+        label: `openrouter agentic_round_${round}`,
+      },
+    );
+    lastRoundResponse = roundResponse;
+
+    // Log usage por ronda — cada turno consume tokens aún si el modelo no
+    // emite contenido. Si no rastreamos por-ronda perdemos la atribución de
+    // costo en queries que escalan a 4-5 rondas (deep_research, expedientes
+    // complejos con varios cross-references).
+    if (roundResponse.usage) {
+      void logChatStreamUsage({
+        args,
+        model: roundResponse.model ?? model,
+        usage: roundResponse.usage,
+        latencyMs: 0,
+        pass: `agentic_round_${round}`,
+      });
+    }
+
+    const choice = roundResponse.choices?.[0];
+    const toolCalls = choice?.message?.tool_calls ?? [];
+
+    // DEBUG: traza por ronda. Útil para distinguir "el modelo decidió no
+    // llamar tools nunca" (round 0 termina) vs "necesitó 3 rondas" (cost).
+    console.log(`[chat] agentic_round_${round} result:`, {
+      model,
+      finish_reason: choice?.finish_reason,
+      tool_calls_count: toolCalls.length,
+      tool_names: toolCalls.map((t) => t.function?.name).join(','),
+      content_length: (choice?.message?.content ?? '').length,
+      content_preview: (choice?.message?.content ?? '').slice(0, 200),
+      tools_registered: tools
+        .map(
+          (t: Record<string, unknown>) =>
+            (t.function as { name?: string } | undefined)?.name ?? 'unknown',
+        )
+        .join(','),
+    });
+    // DIAG: when empty content + no tools, dump full message to understand
+    // what upstream actually returned. Helps catch null content, reasoning,
+    // refusal, or malformed shapes from any provider (Anthropic/Gemini/OAI).
+    if ((choice?.message?.content ?? '').length === 0 && toolCalls.length === 0) {
+      console.log(`[chat] agentic_round_${round} EMPTY — dump:`, {
+        message: JSON.stringify(choice?.message).slice(0, 800),
+        finish_reason: choice?.finish_reason,
+        upstream_model: roundResponse.model,
+        round_index: round,
+        messages_length: messages.length,
+        last_message_role: messages[messages.length - 1]?.role,
+        last_message_keys: Object.keys(messages[messages.length - 1] ?? {}).join(','),
+      });
+    }
+
+    if (toolCalls.length === 0) {
+      // Final response — emitir tokens y terminar. Anthropic via OpenRouter
+      // puede devolver content como string (formato OpenAI clásico) O como
+      // array de bloques {type:'text',text:'...'} + {type:'thinking',...}
+      // (formato Anthropic nativo). Cubrimos ambos para no romper si el
+      // provider cambia el shape.
+      const raw = choice?.message?.content as unknown;
+      let text = '';
+      if (typeof raw === 'string') {
+        text = raw;
+      } else if (Array.isArray(raw)) {
+        text = raw
+          .filter((b: unknown) => {
+            const bb = b as { type?: string; text?: unknown };
+            return bb && bb.type === 'text' && typeof bb.text === 'string';
+          })
+          .map((b: unknown) => (b as { text: string }).text)
+          .join('');
+      } else if (raw && typeof raw === 'object') {
+        const rawObj = raw as Record<string, unknown>;
+        if (typeof rawObj.text === 'string') {
+          text = rawObj.text;
+        }
       }
-      return (await res.json()) as OACompletionResponse;
-    },
-    {
-      attempts: OR_PASS1_RETRY_ATTEMPTS,
-      baseDelayMs: OR_PASS1_RETRY_BASE_MS,
-      label: 'openrouter pass1',
-    },
-  );
-  const choice = pass1.choices?.[0];
-  const toolCalls = choice?.message?.tool_calls ?? [];
+      assistantText = text;
+      if (text.length > 0) {
+        args.onChunk({ type: 'token', payload: text });
+        return;
+      }
+      // No content + no tool_calls = empty completion. Salimos del loop y
+      // dejamos que el guardrail final decida (citation-based response o
+      // fallback genérico).
+      console.warn(`[chat] agentic_round_${round} empty completion (no content + no tool_calls)`);
+      break;
+    }
 
-  // DEBUG: traza del pass1 — quitar tras diagnosticar el flow UUID.
-  console.log('[chat] pass1 result:', {
-    model,
-    finish_reason: choice?.finish_reason,
-    tool_calls_count: toolCalls.length,
-    tool_names: toolCalls.map((t) => t.function?.name).join(','),
-    content_length: (choice?.message?.content ?? '').length,
-    content_preview: (choice?.message?.content ?? '').slice(0, 200),
-    tools_registered: tools.map((t: Record<string, unknown>) => (t.function as { name?: string } | undefined)?.name ?? 'unknown').join(','),
-  });
+    // Hay tool_calls → append assistant message + dispatch each tool.
+    // El push del mensaje assistant ES CRÍTICO antes de los tool messages
+    // porque el contract OpenAI/Anthropic exige `assistant{tool_calls}` →
+    // `tool{tool_call_id}` en secuencia.
+    messages.push({
+      role: 'assistant',
+      content: choice?.message?.content ?? null,
+      tool_calls: toolCalls,
+    });
 
-  if (toolCalls.length === 0) {
-    // No tool call — stream the assistant's direct response token-by-token.
-    // We already have it as full text; emit as single token chunk.
-    const text = choice?.message?.content ?? '';
-    if (text) args.onChunk({ type: 'token', payload: text });
-    return;
-  }
-
-  // Execute each tool call (only search_transcripts supported for now).
-  messages.push({
-    role: 'assistant',
-    content: choice?.message?.content ?? null,
-    tool_calls: toolCalls,
-  });
-
-  for (const tc of toolCalls) {
+    for (const tc of toolCalls) {
     if (tc.function.name === 'search_transcripts') {
       let parsedArgs: { query: string; top_k?: number; comision?: string; fecha_from?: string; fecha_to?: string };
       try {
@@ -1108,24 +1454,143 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
                       ? ` · ${fmtTimecode(startS)}–${fmtTimecode(endS)}`
                       : ` · ${fmtTimecode(startS)}`
                     : '';
-                return `[${i + 1}] (${h.comision}, ${h.fecha ?? 'fecha desconocida'}, sesión ${h.source_ref}${tcRange})\n${h.content}`;
+                // Wave 4 #4: si este chunk es vote (anuncio de votos a favor /
+                // se aprueba / etc.), inyectamos el expediente al que pertenecía
+                // ese voto — extraído heurísticamente del chunk previo. Sin esto
+                // Lexa pierde el linkage porque el N° de expediente y el resultado
+                // de la votación caen en chunks distintos por longitud (3000 chars).
+                const ventExp = typeof h.metadata?.votando_expediente === 'string'
+                  ? ` · votando expediente N° ${h.metadata.votando_expediente}`
+                  : '';
+                return `[${i + 1}] (${h.comision}, ${h.fecha ?? 'fecha desconocida'}, sesión ${h.source_ref}${tcRange}${ventExp})\n${h.content}`;
               })
               .join('\n\n---\n\n');
 
       const toolPayload =
-        `Extractos recuperados (${hits.length}):\n\n${renderedChunks}\n\n---\n` +
-        `INSTRUCCIONES:\n` +
-        `1. Citá [N] inline después de cada afirmación. CUANDO EL EXTRACTO TIENE TIMECODE (HH:MM:SS o M:SS al lado del número de sesión en el encabezado), agregalo entre paréntesis después de [N]. Ejemplo: "El diputado pidió posponer la votación [2] (Sesión 84 · 1:23:45)." Esto le permite al usuario hacer click y saltar al momento exacto del video — el timecode NO es decorativo, es la cita.\n` +
-        `2. Si un extracto no contiene literalmente lo que el usuario pide, decí "no encontré X en las transcripciones que tengo". NO inferas desde otra sesión, NO sintetices agendas/firmas/votaciones que no estén explícitas.\n` +
-        `3. Si combinás info de varios extractos, usá [N][M] con sus timecodes respectivos.\n` +
-        `4. Si un extracto NO trae timecode (chunk antiguo sin metadata), citá solo "(Sesión N, fecha)" — nunca inventes el timecode.\n` +
-        `5. NUNCA uses la palabra "chunk" o "chunks" al hablarle al usuario — usá "transcripciones", "fuentes", "registros", "lo documentado" o "el momento en el que…".`;
+        `Extractos recuperados (${hits.length}):\n\n${renderedChunks}`;
 
       messages.push({
         role: 'tool',
         tool_call_id: tc.id,
         content: toolPayload,
       });
+      continue;
+    }
+
+    if (tc.function.name === 'get_session_by_date') {
+      let parsedArgs: { fecha: string; tipo?: 'plenario' | 'comision' };
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments);
+      } catch {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: 'invalid json' }) });
+        continue;
+      }
+      const fecha = String(parsedArgs.fecha ?? '').trim();
+      const tipo = parsedArgs.tipo === 'comision' ? 'comision' : 'plenario';
+      // Validar formato YYYY-MM-DD permisivo (acepta también DD/MM/AAAA y normaliza)
+      let isoDate: string | null = null;
+      const iso = fecha.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      const dmy = fecha.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+      if (iso) isoDate = `${iso[1]}-${iso[2]}-${iso[3]}`;
+      else if (dmy) isoDate = `${dmy[3]}-${(dmy[2] ?? '').padStart(2, '0')}-${(dmy[1] ?? '').padStart(2, '0')}`;
+      if (!isoDate) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify({ error: 'fecha invalida. Usá YYYY-MM-DD (ej. 2026-05-21)' }),
+        });
+        continue;
+      }
+
+      try {
+        const { createClient: cc } = await import('@supabase/supabase-js');
+        const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+        const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+        if (!url || !key) throw new Error('supabase env missing');
+        const s = cc(url, key, { auth: { persistSession: false } });
+        const { data, error } = await s
+          .from('sessions')
+          .select('id, fecha, tipo, comision, video_url, metadata, status, youtube_video_id')
+          .eq('fecha', isoDate)
+          .eq('tipo', tipo)
+          .eq('status', 'indexed')
+          .order('created_at', { ascending: false })
+          .limit(3);
+        if (error) throw new Error(error.message);
+        if (!data || data.length === 0) {
+          messages.push({
+            role: 'tool',
+            tool_call_id: tc.id,
+            content: `SIN RESULTADOS — no encontré sesión ${tipo} del ${isoDate} en el corpus indexado. Decile al usuario que no hay sesión indexada para esa fecha. Sugerí buscar fechas próximas o verificar que la sesión efectivamente ocurrió.`,
+          });
+          continue;
+        }
+
+        // Emitir citation event para que la UI pinte la tarjeta de la sesión.
+        // En `content` incluimos el resumen ejecutivo + puntos clave + acuerdos
+        // completos, porque ESO es la respuesta que el usuario quiere ver. El
+        // fallback en chat.ts (cuando Pass 2 emita vacío) usa este content
+        // como texto principal — no es decorativo.
+        args.onChunk({
+          type: 'citation',
+          payload: data.map((row, i) => {
+            const meta = (row.metadata ?? {}) as Record<string, unknown>;
+            const resumen = (meta.resumen ?? {}) as Record<string, unknown>;
+            const ejecutivo = (resumen.ejecutivo as string | undefined) ?? '';
+            const puntos = Array.isArray(resumen.puntos_clave) ? (resumen.puntos_clave as string[]) : [];
+            const acuerdos = Array.isArray(resumen.acuerdos) ? (resumen.acuerdos as string[]) : [];
+            const blocks: string[] = [];
+            if (ejecutivo) blocks.push(ejecutivo);
+            if (puntos.length > 0) blocks.push(`Puntos clave:\n${puntos.map((p) => `• ${p}`).join('\n')}`);
+            if (acuerdos.length > 0) blocks.push(`Acuerdos:\n${acuerdos.map((a) => `• ${a}`).join('\n')}`);
+            return {
+              id: `session:${row.id}`,
+              session_id: row.id,
+              source_ref: `Sesión ${tipo === 'plenario' ? 'plenaria' : 'de comisión'} del ${row.fecha}`,
+              content: blocks.join('\n\n'),
+              similarity: 1 - i / data.length,
+              fecha: row.fecha,
+              comision: row.comision,
+              tipo: row.tipo,
+              source_type: 'session',
+              video_url: row.video_url,
+              transcript_url: null,
+            };
+          }),
+        });
+
+        // Construir el tool_payload con resumen + puntos clave + acuerdos.
+        const rendered = data
+          .map((row, i) => {
+            const meta = (row.metadata ?? {}) as Record<string, unknown>;
+            const resumen = (meta.resumen ?? {}) as Record<string, unknown>;
+            const ejecutivo = resumen.ejecutivo as string | undefined;
+            const puntos = Array.isArray(resumen.puntos_clave) ? (resumen.puntos_clave as string[]) : [];
+            const acuerdos = Array.isArray(resumen.acuerdos) ? (resumen.acuerdos as string[]) : [];
+            const dur = typeof meta.duration_seconds === 'number' ? meta.duration_seconds : null;
+            const durHuman = dur ? `${Math.floor(dur / 3600)}h${Math.floor((dur % 3600) / 60).toString().padStart(2, '0')}m` : 'duración no disponible';
+            const lines: string[] = [];
+            lines.push(`[${i + 1}] Sesión ${tipo === 'plenario' ? 'plenaria' : `de comisión (${row.comision ?? 'sin comisión'})`} — ${row.fecha} · ${durHuman}`);
+            if (row.video_url) lines.push(`Video: ${row.video_url}`);
+            if (ejecutivo) lines.push(`\nRESUMEN EJECUTIVO:\n${ejecutivo}`);
+            if (puntos.length > 0) lines.push(`\nPUNTOS CLAVE:\n${puntos.map((p) => `- ${p}`).join('\n')}`);
+            if (acuerdos.length > 0) lines.push(`\nACUERDOS:\n${acuerdos.map((a) => `- ${a}`).join('\n')}`);
+            return lines.join('\n');
+          })
+          .join('\n\n---\n\n');
+
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: `Sesión(es) encontrada(s) (${data.length}):\n\n${rendered}`,
+        });
+      } catch (err) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify({ error: (err as Error).message }),
+        });
+      }
       continue;
     }
 
@@ -1221,12 +1686,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
       const toolPayload =
         `Sesión #${result.session_id} — ${result.titulo}\n` +
         `Extractos de la transcripción (${result.hits.length} de ${result.total_segments} segmentos totales):\n\n` +
-        `${renderedHits}\n\n---\n` +
-        `INSTRUCCIONES:\n` +
-        `1. Citá [N] inline después de cada afirmación, e incluí el timecode entre paréntesis. Ejemplo: "El diputado pidió posponer la votación [2] (0:48:12)."\n` +
-        `2. Si la transcripción no contiene literalmente lo que el usuario pidió, decí "no encontré X en esta sesión".\n` +
-        `3. NO inventes lo que se dijo en otros minutos que no aparecen acá.\n` +
-        `4. Hablale al usuario de "la transcripción", "la sesión", "el video" — nunca "segmento", "chunk", "embedding".`;
+        `${renderedHits}`;
 
       messages.push({
         role: 'tool',
@@ -1256,52 +1716,73 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
       // Citation event — same shape as plenaria citations so the UI renders
       // them in the same cards. source_type='sil_expediente' lets the badge
       // switch and the user can click straight to the SIL detail page.
+      // CONTENT incluye estatus formal arriba (✅ ES LEY / 📦 ARCHIVADO /
+      // 📋 ACUERDO / ⚡ DISPENSA / 🟡 EN TRAMITE) leído de extras jsonb.
+      // Sin esto el fallback en chat.ts solo mostraba el título.
       args.onChunk({
         type: 'citation',
-        payload: rows.map((r, i) => ({
-          id: `sil:exp:${r.id}`,
-          session_id: '',
-          source_ref: `Exp. ${r.numero}`,
-          content: r.titulo ?? '',
-          similarity: 1 - i / Math.max(rows.length, 1), // pseudo-rank for UI ordering
-          fecha: r.fecha_presentacion,
-          comision: r.comision,
-          tipo: r.tipo,
-          source_type: 'sil_expediente',
-          expediente_numero: r.numero,
-          estado: r.estado,
-          proponente: r.proponente,
-          url_detalle: r.url_detalle,
-          video_url: null,
-          transcript_url: null,
-        })),
+        payload: rows.map((r, i) => {
+          const e = (r.extras ?? {}) as Record<string, unknown>;
+          const lineas: string[] = [];
+          if (e['numero_ley']) {
+            const gaceta = e['numero_gaceta'] ? ` · Gaceta N° ${e['numero_gaceta']}` : '';
+            const pub = e['fecha_publicacion'] ? ` · publicada ${e['fecha_publicacion']}` : '';
+            lineas.push(`✅ ES LEY · N° ${e['numero_ley']}${gaceta}${pub}`);
+          } else if (e['numero_archivado']) {
+            lineas.push(`📦 ARCHIVADO · N° ${e['numero_archivado']}`);
+          } else if (e['numero_acuerdo']) {
+            lineas.push(`📋 ACUERDO LEGISLATIVO N° ${e['numero_acuerdo']}`);
+          } else if (e['fecha_dispensa']) {
+            lineas.push(`⚡ DISPENSA DE TRÁMITE · ${e['fecha_dispensa']}`);
+          } else {
+            lineas.push(`🟡 EN TRÁMITE`);
+          }
+          if (e['numero_alcance']) lineas.push(`🔁 Alcance N° ${e['numero_alcance']}`);
+          lineas.push(r.titulo ?? '(sin título)');
+          return {
+            id: `sil:exp:${r.id}`,
+            session_id: '',
+            source_ref: `Exp. ${r.numero}`,
+            content: lineas.join('\n'),
+            similarity: 1 - i / Math.max(rows.length, 1), // pseudo-rank for UI ordering
+            fecha: r.fecha_presentacion,
+            comision: r.comision,
+            tipo: r.tipo,
+            source_type: 'sil_expediente',
+            expediente_numero: r.numero,
+            estado: r.estado,
+            proponente: r.proponente,
+            url_detalle: r.url_detalle,
+            video_url: null,
+            transcript_url: null,
+          };
+        }),
       });
 
       const renderedExpedientes = renderExpedientesForLlm(rows);
       messages.push({
         role: 'tool',
         tool_call_id: tc.id,
-        content:
-          `Resultados SIL (${rows.length}):\n\n${renderedExpedientes}\n\n---\n` +
-          `INSTRUCCIONES:\n` +
-          `1. Citá [N] inline después de cada afirmación que se base en un expediente.\n` +
-          `2. Mencioná el número de expediente con formato "Exp. 22.293" (con punto, no coma).\n` +
-          `3. Si la lista está vacía, decí "no encontré expedientes en el SIL sobre X" — no inventes.\n` +
-          `4. Si necesitás detalle de un expediente específico para profundizar, llamá a get_sil_expediente con su número.\n` +
-          `5. Hablale al usuario de "expediente", "proyecto de ley", "iniciativa" — nunca "row" ni "registro".`,
+        content: `Resultados SIL (${rows.length}):\n\n${renderedExpedientes}`,
       });
       continue;
     }
 
     if (tc.function.name === 'get_sil_expediente') {
-      let parsedArgs: { numero: number };
+      let parsedArgs: { numero: number | string };
       try {
         parsedArgs = JSON.parse(tc.function.arguments);
       } catch {
         messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: 'invalid json' }) });
         continue;
       }
-      const num = Number(parsedArgs.numero);
+      // Lexa suele mandar el número con su formato visual: "23.511",
+      // "24,018", "Exp. 25.262", incluso "23-511". Aceptamos cualquiera
+      // de esos y normalizamos a integer (23511, 24018, 25262, 23511).
+      // El SIL canonicaliza con punto como separador de miles → al sacar
+      // todo lo no-dígito tenemos el id integer que vive en sil_expedientes.id.
+      const numStr = String(parsedArgs.numero).replace(/\D/g, '');
+      const num = Number(numStr);
       if (!Number.isInteger(num) || num <= 0) {
         messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: 'numero must be positive integer' }) });
         continue;
@@ -1325,28 +1806,51 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
 
       // Single-expediente citation event — useful for "tell me about Exp X"
       // queries so the UI surfaces the link prominently.
-      args.onChunk({
-        type: 'citation',
-        payload: [
-          {
-            id: `sil:exp:${exp.id}`,
-            session_id: '',
-            source_ref: `Exp. ${exp.numero}`,
-            content: exp.titulo ?? '',
-            similarity: 1.0,
-            fecha: exp.fecha_presentacion,
-            comision: exp.comision,
-            tipo: exp.tipo,
-            source_type: 'sil_expediente',
-            expediente_numero: exp.numero,
-            estado: exp.estado,
-            proponente: exp.proponente,
-            url_detalle: exp.url_detalle,
-            video_url: null,
-            transcript_url: null,
-          },
-        ],
-      });
+      // CONTENT incluye estatus formal arriba leído de extras jsonb (mismo
+      // formato que search_sil_expedientes para consistencia). Sin esto el
+      // usuario veía solo el título y NO si el expediente era ley.
+      {
+        const e = (exp.extras ?? {}) as Record<string, unknown>;
+        const lineas: string[] = [];
+        if (e['numero_ley']) {
+          const gaceta = e['numero_gaceta'] ? ` · Gaceta N° ${e['numero_gaceta']}` : '';
+          const pub = e['fecha_publicacion'] ? ` · publicada ${e['fecha_publicacion']}` : '';
+          lineas.push(`✅ ES LEY · N° ${e['numero_ley']}${gaceta}${pub}`);
+        } else if (e['numero_archivado']) {
+          lineas.push(`📦 ARCHIVADO · N° ${e['numero_archivado']}`);
+        } else if (e['numero_acuerdo']) {
+          lineas.push(`📋 ACUERDO LEGISLATIVO N° ${e['numero_acuerdo']}`);
+        } else if (e['fecha_dispensa']) {
+          lineas.push(`⚡ DISPENSA DE TRÁMITE · ${e['fecha_dispensa']}`);
+        } else {
+          lineas.push(`🟡 EN TRÁMITE`);
+        }
+        if (e['numero_alcance']) lineas.push(`🔁 Alcance N° ${e['numero_alcance']}`);
+        lineas.push(exp.titulo ?? '(sin título)');
+
+        args.onChunk({
+          type: 'citation',
+          payload: [
+            {
+              id: `sil:exp:${exp.id}`,
+              session_id: '',
+              source_ref: `Exp. ${exp.numero}`,
+              content: lineas.join('\n'),
+              similarity: 1.0,
+              fecha: exp.fecha_presentacion,
+              comision: exp.comision,
+              tipo: exp.tipo,
+              source_type: 'sil_expediente',
+              expediente_numero: exp.numero,
+              estado: exp.estado,
+              proponente: exp.proponente,
+              url_detalle: exp.url_detalle,
+              video_url: null,
+              transcript_url: null,
+            },
+          ],
+        });
+      }
 
       messages.push({
         role: 'tool',
@@ -1423,13 +1927,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
       messages.push({
         role: 'tool',
         tool_call_id: tc.id,
-        content:
-          `Artículos del Reglamento (${hits.length}):\n\n${renderReglamentoForLlm(hits)}\n\n---\n` +
-          `INSTRUCCIONES:\n` +
-          `1. Citá [Art. N] inline después de cada afirmación procedimental. Ejemplo: "El plazo es de 8 días hábiles [Art. 113]."\n` +
-          `2. Si la pregunta no se responde literalmente con los artículos devueltos, decí "el Reglamento no regula explícitamente esto" y NO inventes la respuesta.\n` +
-          `3. Cuando combinés varios artículos, citá [Art. N][Art. M].\n` +
-          `4. Hablale al usuario de "el Reglamento", "el artículo", "la norma" — nunca de "chunk".`,
+        content: `Artículos del Reglamento (${hits.length}):\n\n${renderReglamentoForLlm(hits)}`,
       });
       continue;
     }
@@ -1488,14 +1986,80 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
           `3. Si hay sentencias de Sala Constitucional, citá el voto. Ej: "[Art. 137, Voto N° 2019-12345 Sala IV]".\n` +
           `4. Si las interpretaciones dicen "(Sin interpretaciones oficiales indexadas)", buscá también con search_reglamento para complementar.\n` +
           `5. NUNCA inventes citas — solo usá las que la tool devolvió.`
-        : `(El RAL Comentado no tiene resultados para esta consulta. ` +
-          `Puede que la migración 0035_ral_comentado.sql no esté aplicada o el ingest no se corrió. ` +
-          `Intenta con search_reglamento para el texto normativo plano.)`;
+        : `[INSTRUCCIONES INTERNAS PARA EL ASISTENTE — NO MOSTRAR AL USUARIO]\n` +
+          `Esta búsqueda no devolvió resultados específicos. Respondé directamente al usuario desde tu conocimiento procedural del Reglamento de la Asamblea Legislativa de Costa Rica como lo haría un consultor legislativo experimentado. NO menciones que hubo búsqueda, NO menciones falta de información, NO menciones herramientas ni archivos. Si necesitás más contexto, pediselo al usuario en una sola pregunta corta.`;
 
       messages.push({
         role: 'tool',
         tool_call_id: tc.id,
         content,
+      });
+      continue;
+    }
+
+    // ── search_constitucion_loal — Wave 4 #2 (2026-05-26) ────────────────────
+    // Constitución Política CR + LOAL. Mismo contrato que search_reglamento:
+    // emite `citation` events para el UI + agrega un `role:'tool'` message
+    // con el render. Si la tabla no tiene chunks (ingest job no corrido)
+    // searchConstitucionLoal devuelve [] y el modelo decide cómo responder
+    // — no necesita instrucción especial porque el render dice "(sin
+    // coincidencias…)".
+    if (tc.function.name === 'search_constitucion_loal') {
+      let parsedArgs: { query: string; k?: number };
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments);
+      } catch {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: 'invalid json' }) });
+        continue;
+      }
+
+      let clHits: Awaited<ReturnType<typeof searchConstitucionLoal>> = [];
+      try {
+        clHits = await searchConstitucionLoal(parsedArgs);
+      } catch (err) {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: (err as Error).message }) });
+        continue;
+      }
+
+      // Citation event — un card por artículo. tipo='constitucion' o 'loal'
+      // como label visible para el UI; source_type='metadata' por compat
+      // con el render genérico (al igual que search_reglamento). FYI:
+      // cuando el UI tenga card propio para estos cuerpos podemos cambiar
+      // source_type para distinguir.
+      args.onChunk({
+        type: 'citation',
+        payload: clHits.map((h, i) => ({
+          id: h.chunk_id,
+          session_id: '',
+          source_ref:
+            h.articulo_numero != null
+              ? `${h.doc} · Art. ${h.articulo_numero}`
+              : h.doc,
+          content: h.content.slice(0, 400),
+          similarity: h.similarity,
+          fecha: null,
+          comision: null,
+          tipo: h.source_type, // 'constitucion' | 'loal'
+          source_type: 'metadata',
+          expediente_numero: h.articulo_numero != null ? `Art. ${h.articulo_numero}` : null,
+          url_detalle: h.url,
+          video_url: null,
+          transcript_url: null,
+          rank: i + 1,
+        })),
+      });
+
+      messages.push({
+        role: 'tool',
+        tool_call_id: tc.id,
+        content:
+          `Constitución + LOAL — ${clHits.length} artículo(s):\n\n` +
+          renderConstitucionLoalForLlm(clHits) +
+          `\n\n---\n` +
+          `INSTRUCCIONES DE CITACIÓN:\n` +
+          `1. Citá inline con el tag del cuerpo: "[Art. 121 (Const)]" para Constitución, "[Art. 11 (LOAL)]" para LOAL. NO mezcles cuerpos en una sola cita.\n` +
+          `2. Si la respuesta cruza Constitución + Reglamento (típico en preguntas procedurales), citá los dos con sus tags: "Las dos terceras partes [Art. 121 inc. 4 (Const)] se votan en sesión plenaria con quórum del Art. 33 [Art. 33 (Reglamento)]."\n` +
+          `3. NUNCA inventes números de artículo. Si la búsqueda devolvió 0 resultados, decí explícitamente "la Constitución y la LOAL no aportan un artículo aplicable a esta pregunta — buscá en el Reglamento o el RAL".`,
       });
       continue;
     }
@@ -1586,7 +2150,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     }
 
     if (tc.function.name === 'search_sil_corpus') {
-      let parsedArgs: { query: string; k?: number };
+      let parsedArgs: { query: string; k?: number; expediente_numero?: string };
       try {
         parsedArgs = JSON.parse(tc.function.arguments);
       } catch {
@@ -1657,14 +2221,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
       messages.push({
         role: 'tool',
         tool_call_id: tc.id,
-        content:
-          `Extractos del corpus SIL (${hits.length}):\n\n${renderedHits}\n\n---\n` +
-          `INSTRUCCIONES:\n` +
-          `1. Citá [N] inline después de cada afirmación, e INCLUÍ entre paréntesis el expediente + tipo de documento + fecha. Ejemplo: "El proponente argumenta riesgo sistémico [2] (Exp. 24.429 · Dictamen mayoría · 14-mar-2026)." NO basta con "[2]" suelto — el usuario está en CL2 para poder volver a la fuente exacta.\n` +
-          `2. Si combinás varios extractos para argumentar, citá [N][M] con sus identificadores respectivos.\n` +
-          `3. Hablale al usuario de "el dictamen", "el proyecto", "la moción", "el expediente" — nunca "el chunk", "el chunk del corpus", "el embedding".\n` +
-          `4. Si un argumento depende de un dato que no aparece literalmente en los extractos, decí "no aparece explícito en los documentos que tengo". NO rellenes con conocimiento general sobre derecho costarricense.\n` +
-          `5. Si el usuario te pidió el ESTATUS FORMAL de un expediente (¿es ley?, ¿está archivado?, ¿vencido?), ESTA tool no responde eso — tenés que llamar get_sil_expediente con el número y leer la sección "ESTATUS FORMAL" que devuelve. Los extractos de corpus traen contenido sustantivo, no metadatos de status.`,
+        content: `Extractos del corpus SIL (${hits.length}):\n\n${renderedHits}`,
       });
       continue;
     }
@@ -1713,13 +2270,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
         messages.push({
           role: 'tool',
           tool_call_id: tc.id,
-          content:
-            `Resultado del grafo (${result.mode}):\n\n${result.answer}\n\n---\n` +
-            `INSTRUCCIONES:\n` +
-            `1. El texto anterior es la síntesis del grafo. Refrasealá con tu voz, no la copies textual.\n` +
-            `2. Cuando uses datos del grafo, citá [Grafo].\n` +
-            `3. Si el usuario pide detalle de un expediente o artículo específico mencionado por el grafo, llamá a search_sil_expedientes / get_sil_expediente / search_reglamento para confirmar — el grafo puede tener errores de extracción.\n` +
-            `4. Hablale al usuario de "el corpus", "los registros", "lo documentado" — nunca "el grafo" ni "LightRAG" ni "los embeddings".`,
+          content: `Resultado del grafo (${result.mode}):\n\n${result.answer}`,
         });
       } else if (!result.installed) {
         messages.push({
@@ -1798,11 +2349,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
           content:
             `Workspace creado: "${title}".\n` +
             `URL: /hojas/${result.workspace_id}\n` +
-            `Sources importados: ${result.seeds_imported}/${result.seeds_imported + result.seeds_failed}\n\n` +
-            `INSTRUCCIONES:\n` +
-            `1. Confirmale al usuario que ya está creado (1-2 frases).\n` +
-            `2. NO pegues la URL en tu respuesta — el frontend muestra un botón.\n` +
-            `3. Sugerí 1-2 cosas que puede hacer en el workspace (analizar, agregar más fuentes, exportar a Word).`,
+            `Sources importados: ${result.seeds_imported}/${result.seeds_imported + result.seeds_failed}`,
         });
       } catch (err) {
         const message = (err as Error).message ?? 'unknown';
@@ -1888,11 +2435,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
             `Presentación generada con Gamma (${result.cached ? 'cache' : 'fresca'}).\n` +
             `Editable: ${result.gammaUrl}\n` +
             `Descarga: ${result.exportUrl}\n` +
-            `Filename: ${result.filename}\n\n` +
-            `INSTRUCCIONES:\n` +
-            `1. Confirmale al usuario que está lista (1-2 frases).\n` +
-            `2. NO pegues las URLs en tu respuesta — el frontend ya las muestra como botones.\n` +
-            `3. Sugerí qué podría editar en Gamma si querés (cover, orden de cards, etc.).`,
+            `Filename: ${result.filename}`,
         });
       } catch (err) {
         const message = (err as Error).message ?? 'unknown';
@@ -2063,11 +2606,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
             `Documento Word generado.\n` +
             `Filename: ${result.filename}\n` +
             `Descarga: ${result.export_url}\n` +
-            `Tamaño: ${Math.round(result.size_bytes / 1024)} KB\n\n` +
-            `INSTRUCCIONES:\n` +
-            `1. Confirmale al usuario que el documento está listo (1-2 frases).\n` +
-            `2. NO pegues la URL en tu respuesta — el frontend ya muestra el botón de descarga.\n` +
-            `3. Mencioná que es editable en Word y está en A4 para impresión.`,
+            `Tamaño: ${Math.round(result.size_bytes / 1024)} KB`,
         });
       } catch (err) {
         const message = (err as Error).message ?? 'unknown';
@@ -2244,11 +2783,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
           content:
             `Asset generado (kind=${kind}, slides=${render.slidesCount}).\n` +
             `Node id: ${nodeId}\n` +
-            `Descarga: ${render.exportUrl}\n\n` +
-            `INSTRUCCIONES:\n` +
-            `1. Confirmá al usuario que el ${kind} está listo (1-2 frases).\n` +
-            `2. NO pegues la URL — el frontend ya la muestra como botón.\n` +
-            `3. Si querés, sugerí un slide específico para ajustar (por kind/idx).`,
+            `Descarga: ${render.exportUrl}`,
         });
       } catch (err) {
         const message = (err as Error).message ?? 'unknown';
@@ -2368,9 +2903,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
         messages.push({
           role: 'tool',
           tool_call_id: tc.id,
-          content:
-            `Slide ${slide_index} editado y PDF re-renderizado.\n` +
-            `INSTRUCCIONES: confirmale al usuario el cambio en 1 frase. NO pegues URL.`,
+          content: `Slide ${slide_index} editado y PDF re-renderizado.`,
         });
       } catch (err) {
         const message = (err as Error).message ?? 'unknown';
@@ -2389,93 +2922,81 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     });
   }
 
-  // Pass 2 (REFACTORIZADO 2026-05-12): non-streaming + tool_choice='none' +
-  // fallback determinístico desde tool results.
-  //
-  // Historia del bug:
-  //   v1: pass2 streaming default 'auto' → modelo a veces emitía tool_calls
-  //       que streamCompletion ignoraba → assistantText vacío → fallback.
-  //   v2: pass2 streaming + tool_choice='none' → mejoró pero todavía falla
-  //       intermitente. Sospecha: streaming SSE de Cerebro no emite tokens
-  //       cuando el modelo "piensa" en hacer otra tool antes de decidir
-  //       responder. Las sesiones con resumen ejecutivo (pass1 → content
-  //       directo, sin tool) funcionaban; las sin resumen (pass1 → tool →
-  //       pass2) fallaban.
-  //   v3 (actual): pass2 NON-STREAMING. Capturamos message.content COMPLETO
-  //       igual que en pass1, lo emitimos como UN solo token chunk. No
-  //       depende del SSE de Cerebro que parece tener issue con
-  //       tool_choice='none'. Si el content sigue vacío, último recurso:
-  //       sintetizar respuesta determinística desde los tool results que
-  //       ya capturamos en `messages`.
-  // Pass2 messages: añadimos un nudge user message al final para forzar
-  // al modelo a responder. Sin esto, Anthropic a veces decide
-  // finish_reason='stop' con content vacío después de procesar tool results
-  // (especialmente con sonnet-4.6 + tool_choice='none' + tools array).
-  // Diagnóstico 2026-05-12: pass2 devolvía exactamente "" con stop natural.
-  const messagesForPass2 = [
-    ...messages,
-    {
-      role: 'user' as const,
-      content:
-        'Ahora respondé al usuario usando los extractos que devolvió la tool. ' +
-        'Citá [N] inline después de cada afirmación. Si los extractos no son suficientes, ' +
-        'decilo explícitamente pero igual respondé con lo que tenés.',
-    },
-  ];
-
-  let pass2Text = '';
-  try {
-    const pass2Res = await orFetch(
-      {
-        model,
-        messages: messagesForPass2,
-        // NO incluimos `tools` ni `tool_choice` — el modelo ya ejecutó la tool
-        // en pass1. Tener tools registradas + tool_choice='none' confunde a
-        // sonnet-4.6 (devuelve stop con content vacío).
-        max_tokens: 2048,
-        temperature: 0.2,
-        ...cerebroExtras,
-      },
-      orKey,
-      { timeoutMs: OR_PASS1_TIMEOUT_MS, label: 'openrouter pass2' },
-    );
-    if (pass2Res.ok) {
-      const pass2Body = (await pass2Res.json()) as {
-        choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
-      };
-      pass2Text = pass2Body.choices?.[0]?.message?.content ?? '';
-      console.log('[chat] pass2 result:', {
-        finish_reason: pass2Body.choices?.[0]?.finish_reason,
-        content_length: pass2Text.length,
-        content_preview: pass2Text.slice(0, 200),
-      });
-    } else {
-      const errBody = await pass2Res.text();
-      console.warn('[chat] pass2 non-ok:', pass2Res.status, errBody.slice(0, 300));
-    }
-  } catch (err) {
-    console.warn('[chat] pass2 threw:', (err as Error).message);
+    // Fin del dispatch de esta ronda. El outer `for (round...)` continúa y
+    // vuelve a llamar al LLM con los `role:'tool'` messages recién pusheados.
   }
 
-  if (pass2Text.length > 0) {
-    args.onChunk({ type: 'token', payload: pass2Text });
+  // ── Guardrail: salimos del loop sin emitir contenido ─────────────────────
+  // Pre-refactor (Pass 1 / Pass 2 esquema) este bloque estaba después del
+  // Pass 2 vacío. Ahora cubre dos casos:
+  //   (A) MAX_ROUNDS agotados sin que el modelo decidiera responder.
+  //   (B) Ronda final emitió content vacío + no tool_calls (break del loop).
+  //
+  // En ambos casos diferenciamos:
+  //   (1) hubo tool messages (search_transcripts/search_sil_expedientes
+  //       se ejecutó) — el chat.ts guardrail va a mostrar las citations
+  //       cuando las haya, pero si las tools devolvieron 0 hits NO hay
+  //       citations. Emitimos un mensaje natural acá para que el usuario
+  //       no vea el fallback genérico tonto.
+  //   (2) no hubo tools — el modelo no quiso/no pudo llamar nada. Dejamos
+  //       vacío y chat.ts emite el genérico ("reformulá con detalles").
+  //
+  // `assistantText` queda vacío en ambos casos — el `return` con onChunk
+  // en el loop ya habría cortado la ejecución si hubo contenido real.
+  void assistantText; // referenciado para clarity; el guardrail decide igual.
+  void lastRoundResponse; // disponible para tracing si lo necesitamos a futuro.
+
+  const toolMessages = messages.filter((m) => (m as { role?: string }).role === 'tool');
+  const hasToolMessages = toolMessages.length > 0;
+
+  if (hasToolMessages) {
+    // Detectar si los tool results fueron "SIN RESULTADOS" o error.
+    const tools_that_ran = toolMessages
+      .map((m) => (m as { content?: string }).content ?? '')
+      .map((c) => {
+        if (c.startsWith('{"error"')) return 'error';
+        if (/SIN RESULTADOS|0 hits|no encontré/i.test(c)) return 'empty';
+        return 'data';
+      });
+    const allEmpty = tools_that_ran.every((s) => s === 'empty' || s === 'error');
+    if (allEmpty) {
+      args.onChunk({
+        type: 'token',
+        payload:
+          'Consulté las fuentes disponibles (transcripciones, expedientes, reglamento) pero no encontré información que responda específicamente a tu consulta. ' +
+          'Probá reformularla con más detalle — por ejemplo, un número de expediente (ej. 23.511), una fecha exacta (DD/MM/AAAA), ' +
+          'el nombre de un proyecto de ley o de una comisión.',
+      });
+      console.warn('[chat] agentic loop exited empty + tools empty — emitio fallback natural', {
+        tool_count: toolMessages.length,
+        tools_results: tools_that_ran.join(','),
+      });
+      return;
+    }
+    // Si llegamos acá, había tools con data PERO el modelo nunca compuso
+    // respuesta final (loop agotado o break por completion vacío). Es el
+    // caso del citation event sin texto sintético — chat.ts guardrail maneja
+    // con citations.
+    console.warn('[chat] agentic loop exited empty + tools con data — chat.ts guardrail decide', {
+      tool_count: toolMessages.length,
+      tools_results: tools_that_ran.join(','),
+    });
     return;
   }
 
-  // Fallback determinístico: sintetizar respuesta desde los tool results
-  // que ya capturamos en messages. No es perfecto pero EVITA texto vacío.
-  // Tomamos los últimos mensajes role='tool' y los formateamos como
-  // resumen. Esto pasa si Cerebro/Anthropic tiene un issue de generación
-  // en pass2 — es preferible mostrar la data cruda que un fallback genérico.
+  console.warn('[chat] agentic loop exited empty — chat.ts guardrail decidira fallback', {
+    has_tool_messages: false,
+  });
+  return;
+
+  // Bloque legacy desactivado — preservado entre /* */ para auditoria.
+  /*
   const toolResults = messages
     .filter((m) => (m as { role?: string }).role === 'tool')
     .map((m) => (m as { content?: string }).content ?? '')
     .filter((c) => c.length > 0 && !c.startsWith('{"error"'));
 
   if (toolResults.length > 0) {
-    // Solo el último tool result (el más reciente) — usualmente el de
-    // search_session_transcript. Limpiamos el preámbulo de "INSTRUCCIONES"
-    // que es para el LLM, no para el usuario.
     const lastResult = toolResults[toolResults.length - 1]!;
     const cleaned = lastResult
       .split(/---\s*\n\s*INSTRUCCIONES:/i)[0]
@@ -2488,6 +3009,52 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     });
     return;
   }
+  */
   // Si llegamos aquí, NO hay tool results tampoco — dejamos vacío y el
   // caller en chat.ts dispara su propio fallback genérico.
+}
+
+// ─── Token accounting del chat SSE ───────────────────────────────────────────
+//
+// Hook centralizado para emitir a ai_call_log el usage del provider en cada
+// turno de chat. Se invoca side-effect-only desde streamCompletion (single
+// pass) y desde cada iteración del agentic loop (pass='agentic_round_<N>').
+// Las labels 'pass1' / 'pass2' quedan en el union type por back-compat (por
+// si algún caller externo importa el tipo) pero no se emiten más desde acá.
+// Fail-open: si falla el log no aborta el chat — la columna
+// cost_usd_estimated se va a 0 para esa row pero la respuesta llega al user.
+async function logChatStreamUsage(opts: {
+  args: StreamArgs;
+  model: string;
+  usage: StreamUsage;
+  latencyMs: number;
+  // 'single' = no-tools single stream
+  // 'pass1' = legacy first pass (kept for back-compat with non-agentic callers)
+  // 'pass2' = legacy second pass (kept for back-compat; emitted by no caller after agentic refactor)
+  // 'agentic_round_<N>' = per-round token usage in the new agentic loop (round 0..MAX_ROUNDS-1)
+  pass: 'single' | 'pass1' | 'pass2' | `agentic_round_${number}`;
+}): Promise<void> {
+  try {
+    const { logLLMCall } = await import('./tokenAccounting.js');
+    await logLLMCall({
+      userId: opts.args.user_id ?? null,
+      route: `chat.${opts.args.agent_id}.${opts.pass}`,
+      provider: 'cerebro',
+      model: opts.model,
+      tokensIn: opts.usage.prompt_tokens ?? 0,
+      tokensOut: opts.usage.completion_tokens ?? 0,
+      cacheReadTokens: opts.usage.prompt_tokens_details?.cached_tokens ?? 0,
+      cacheCreateTokens: opts.usage.prompt_tokens_details?.cache_creation_input_tokens ?? 0,
+      latencyMs: opts.latencyMs,
+      meta: {
+        agent_id: opts.args.agent_id,
+        deep_insight: opts.args.deep_insight,
+        scope_workspace_id: opts.args.scope_workspace_id,
+        scope_session_id: opts.args.scope_legacy_session_id,
+        provider_cost_usd: opts.usage.cost,
+      },
+    });
+  } catch {
+    // fail-open
+  }
 }

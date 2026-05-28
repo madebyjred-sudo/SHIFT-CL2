@@ -339,8 +339,28 @@ export async function parseDecretoPdf(
   const fromFilename = opts.fileLeafRef ? extractFromFilename(opts.fileLeafRef) : {};
 
   if (!rawText || rawText.trim().length < 50) {
-    // PDF scaneado o dañado — pero podemos rescatar número y fecha del filename
-    // si está disponible. Eso reduce la penalidad y deja el row utilizable.
+    // PDF escaneado o dañado — texto vectorial vacío. Antes devolvíamos
+    // solo lo del filename (numero + fecha), con expedientes=[] y
+    // needs_manual_review=true. Eso explicaba los 180/199 manual_review.
+    //
+    // 2026-05-23: caemos a Vertex Gemini Vision como fallback. El PDF se
+    // manda como inline_data multimodal y Gemini extrae estructura completa:
+    // numero_decreto + fecha + tipo + lista de expedientes ampliados/retirados.
+    // Costo ~$0.003 por decreto con Pro. Si Vision falla, devolvemos lo del
+    // filename como hasta hoy.
+    const visionResult = await tryVisionFallback(pdfBuffer, opts.fileLeafRef);
+    if (visionResult) {
+      return {
+        numero_decreto: visionResult.numero_decreto ?? fromFilename.numero ?? null,
+        fecha: visionResult.fecha ?? fromFilename.fecha ?? new Date(),
+        tipo: visionResult.tipo ?? 'ampliacion',
+        expedientes_ampliados: visionResult.expedientes_ampliados ?? [],
+        expedientes_retirados: visionResult.expedientes_retirados ?? [],
+        parser_confidence: 0.85,
+        needs_manual_review: false,
+        raw_text: '[vision fallback — PDF escaneado]',
+      };
+    }
     return {
       numero_decreto: fromFilename.numero ?? null,
       fecha: fromFilename.fecha ?? new Date(),
@@ -445,6 +465,69 @@ export async function parseDecretoPdf(
     needs_manual_review,
     raw_text: rawText,
   };
+}
+
+// ─── Vision fallback (Sprint 2 implementation 2026-05-23) ───────────────────
+
+interface VisionDecreto {
+  numero_decreto?: string | null;
+  fecha_iso?: string | null;
+  tipo?: 'ampliacion' | 'retiro' | 'mixto';
+  expedientes_ampliados?: string[];
+  expedientes_retirados?: string[];
+}
+
+interface VisionDecretoNormalized {
+  numero_decreto: string | null;
+  fecha: Date | null;
+  tipo: 'ampliacion' | 'retiro' | 'mixto';
+  expedientes_ampliados: string[];
+  expedientes_retirados: string[];
+}
+
+async function tryVisionFallback(
+  pdfBuffer: Buffer,
+  fileLeafRef?: string,
+): Promise<VisionDecretoNormalized | null> {
+  try {
+    const { visionParsePdf } = await import('./visionPdfFallback.js');
+    const prompt = `Sos un parser estructurado de decretos ejecutivos de Costa Rica que convocan o retiran proyectos de ley de sesiones extraordinarias del Plenario Legislativo.
+
+Extraé del PDF (escaneado) los siguientes campos en JSON:
+{
+  "numero_decreto": "44750-MP" (formato "DDDDD-LETRAS"),
+  "fecha_iso": "2024-11-12" (YYYY-MM-DD),
+  "tipo": "ampliacion" | "retiro" | "mixto",
+  "expedientes_ampliados": ["23.511", "24.018"] (los que se AGREGAN a la convocatoria),
+  "expedientes_retirados": ["22.293"] (los que se RETIRAN de la convocatoria)
+}
+
+Reglas:
+- Los expedientes en CR tienen formato DD.DDD (2 dígitos, punto, 3 dígitos), siempre con el punto.
+- Buscá las secciones "AMPLÍASE LA CONVOCATORIA" (ampliados) y "RETÍRASE DE LA CONVOCATORIA" (retirados).
+- Si solo hay ampliación: tipo="ampliacion", retirados=[].
+- Si solo hay retiro: tipo="retiro", ampliados=[].
+- Si hay ambas: tipo="mixto".
+- Si no encontrás un campo, usá null o [].
+- Solo emitís JSON, sin texto adicional ni \`\`\`json\`\`\` fences.`;
+    const result = await visionParsePdf<VisionDecreto>(pdfBuffer, {
+      route: 'decreto.vision_fallback',
+      modelTier: 'pro',
+      label: fileLeafRef,
+      prompt,
+    });
+    if (!result) return null;
+    return {
+      numero_decreto: result.numero_decreto ?? null,
+      fecha: result.fecha_iso ? new Date(`${result.fecha_iso}T12:00:00`) : null,
+      tipo: result.tipo ?? 'ampliacion',
+      expedientes_ampliados: (result.expedientes_ampliados ?? []).filter((e) => /^\d{1,2}\.\d{3}$/.test(e)),
+      expedientes_retirados: (result.expedientes_retirados ?? []).filter((e) => /^\d{1,2}\.\d{3}$/.test(e)),
+    };
+  } catch (err) {
+    logger.warn('[decretoPdfParser] vision fallback failed', { error: (err as Error).message });
+    return null;
+  }
 }
 
 // ─── TODO Sprint 2: LLM fallback ─────────────────────────────────────────────

@@ -42,13 +42,19 @@ interface Props {
 }
 
 function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString('es-CR', {
+  // Parse as noon UTC to prevent timezone shift — Costa Rica is UTC-6,
+  // so "2026-07-29" parsed as midnight UTC would display as July 28.
+  return new Date(`${iso.slice(0, 10)}T12:00:00`).toLocaleDateString('es-CR', {
     day: '2-digit', month: 'long', year: 'numeric',
   });
 }
 
 export function FechasExtraidasPanel({ vigente, historial, otrasFechas }: Props) {
-  if (!vigente && !otrasFechas) {
+  const hasOtrasFechas = otrasFechas && Object.keys(otrasFechas).filter(
+    (k) => otrasFechas[k]?.valor,
+  ).length > 0;
+
+  if (!vigente && !hasOtrasFechas) {
     return (
       <div className="rounded-xl border border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-white/60 dark:bg-white/[0.025] p-8 text-center">
         <Calendar className="w-7 h-7 mx-auto mb-3 text-[#0e1745]/30 dark:text-white/30" />
@@ -56,6 +62,68 @@ export function FechasExtraidasPanel({ vigente, historial, otrasFechas }: Props)
           Aún no se han extraído fechas tentativas para este expediente desde
           documentos del SIL.
         </p>
+      </div>
+    );
+  }
+
+  // ── Caso sin fecha de dictamen extraída: empty state explícito ────────────
+  // Reportado 2026-05-20: el cliente veía "13 de mayo de 2030" prominente y
+  // pensaba que era la fecha estimada de dictamen. NO lo es — es el deadline
+  // legal cuatrenial. Cuando NO hay fecha_dictamen_estimada extraída, el
+  // panel ahora dice CLARO "aún no se extrajo una fecha estimada" y muestra
+  // la cuatrenal como info contextual pequeña al pie, no como dato principal.
+  if (!vigente && hasOtrasFechas) {
+    return (
+      <div className="space-y-3">
+        <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.04] p-5">
+          <div className="flex items-start gap-3">
+            <Calendar className="w-5 h-5 shrink-0 text-amber-600/70 dark:text-amber-300/70 mt-0.5" />
+            <div className="flex-1">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-amber-700 dark:text-amber-300 mb-1">
+                Sin fecha estimada de dictamen
+              </div>
+              <p className="text-[13px] text-[#0e1745]/70 dark:text-white/70 leading-snug">
+                Aún no se ha detectado una fecha estimada de dictamen en los documentos
+                del SIL para este expediente. El extractor revisa los dictámenes,
+                informes técnicos y órdenes del día buscando menciones tipo
+                <span className="font-medium"> "Fecha para dictaminar: ..."</span>.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Plazos legales — solo info, NO es la "fecha estimada" */}
+        <div className="rounded-xl border border-[#0e1745]/[0.05] dark:border-white/[0.05] bg-white/40 dark:bg-white/[0.015] p-4">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#0e1745]/40 dark:text-white/40 mb-2">
+            Plazos legales (informativo)
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            {Object.entries(otrasFechas!).map(([campo, fecha]) => {
+              if (!fecha?.valor) return null;
+              const label =
+                campo === 'fecha_cuatrienal'
+                  ? 'Vence cuatrienio (4 años)'
+                  : campo === 'vence_subcomision'
+                    ? 'Vencimiento ordinario'
+                    : campo.replace(/_/g, ' ');
+              return (
+                <div key={campo} className="space-y-0.5">
+                  <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-[#0e1745]/55 dark:text-white/55">
+                    {label}
+                  </div>
+                  <div className="text-[13px] font-medium text-[#0e1745]/80 dark:text-white/80">
+                    {formatDate(fecha.valor)}
+                  </div>
+                  {fecha.texto && (
+                    <div className="text-[10.5px] italic text-[#0e1745]/45 dark:text-white/45">
+                      {fecha.texto}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
       </div>
     );
   }
@@ -68,7 +136,9 @@ export function FechasExtraidasPanel({ vigente, historial, otrasFechas }: Props)
           <div className="flex items-start justify-between gap-4 mb-3">
             <div>
               <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-cl2-accent mb-1">
-                Fecha estimada de dictamen
+                {vigente.campo === 'vence_subcomision'
+                  ? 'Vencimiento ordinario (60 días)'
+                  : 'Fecha estimada de dictamen'}
               </div>
               <div className="text-2xl font-display font-light text-[#0e1745] dark:text-white">
                 {formatDate(vigente.valor_fecha)}
@@ -83,15 +153,9 @@ export function FechasExtraidasPanel({ vigente, historial, otrasFechas }: Props)
               {vigente.visual_marker === 'bold' && (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30">
                   <strong>B</strong>
-                  Extraído en NEGRITA
+                  Énfasis en negrita
                 </span>
               )}
-              <span className="text-[10.5px] text-[#0e1745]/50 dark:text-white/50">
-                confidence {(vigente.extraction_confidence * 100).toFixed(0)}%
-              </span>
-              <span className="text-[10.5px] text-[#0e1745]/50 dark:text-white/50 font-mono">
-                método: {vigente.extraction_method}
-              </span>
             </div>
           </div>
           {vigente.fuente_documento_url && (
@@ -113,22 +177,35 @@ export function FechasExtraidasPanel({ vigente, historial, otrasFechas }: Props)
       {/* ── Otras fechas relacionadas ── */}
       {otrasFechas && Object.keys(otrasFechas).length > 0 && (
         <div className="grid grid-cols-2 gap-3">
-          {Object.entries(otrasFechas).map(([campo, { valor, texto }]) => (
-            <div
-              key={campo}
-              className="rounded-xl border border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-white/70 dark:bg-white/[0.025] p-4"
-            >
-              <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-[#0e1745]/55 dark:text-white/55 mb-1">
-                {campo.replace(/_/g, ' ')}
+          {Object.entries(otrasFechas).map(([campo, fecha]) => {
+            // Guard contra rows malformadas (valor null/empty) — el frontend
+            // se rompía silenciosamente y mostraba "Invalid Date".
+            if (!fecha?.valor) return null;
+            const label =
+              campo === 'fecha_cuatrienal'
+                ? 'Vence cuatrienio (4 años)'
+                : campo === 'vence_subcomision'
+                  ? 'Vencimiento ordinario'
+                  : campo.replace(/_/g, ' ');
+            return (
+              <div
+                key={campo}
+                className="rounded-xl border border-[#0e1745]/[0.06] dark:border-white/[0.06] bg-white/70 dark:bg-white/[0.025] p-4"
+              >
+                <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-[#0e1745]/55 dark:text-white/55 mb-1">
+                  {label}
+                </div>
+                <div className="text-base font-medium text-[#0e1745] dark:text-white">
+                  {formatDate(fecha.valor)}
+                </div>
+                {fecha.texto && (
+                  <div className="text-[11px] italic text-[#0e1745]/50 dark:text-white/50 mt-1">
+                    "{fecha.texto}"
+                  </div>
+                )}
               </div>
-              <div className="text-base font-medium text-[#0e1745] dark:text-white">
-                {formatDate(valor)}
-              </div>
-              <div className="text-[11px] italic text-[#0e1745]/50 dark:text-white/50 mt-1">
-                "{texto}"
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

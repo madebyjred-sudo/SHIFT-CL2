@@ -21,6 +21,7 @@
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { randomUUID } from 'crypto';
+import { GoogleAuth } from 'google-auth-library';
 import { fetchTranscript, YoutubeTranscriptError } from '../services/youtubeTranscript.js';
 import { withRetry } from '../services/resilience.js';
 import { logger } from '../services/logger.js';
@@ -432,6 +433,287 @@ async function runLlmReview(
   return { llm_run_id, corrections_inserted: validCorrections.length };
 }
 
+// ── Resumen generation (NEW — ejecutivo + puntos_clave + acuerdos) ───────────
+//
+// Por qué este step existe:
+//   El LLM review pass de arriba solo genera *correcciones puntuales* (typos,
+//   nombres mal escritos, etc.) y las guarda en `transcript_corrections`. NO
+//   produce el análisis narrativo que el frontend `/sesiones` necesita.
+//
+//   Auditoría 2026-05-18: 14 plenarios post-2026-04 estaban indexed con
+//   transcripción + correcciones, pero sin `metadata.resumen.{ejecutivo,
+//   puntos_clave, acuerdos}`. El frontend mostraba "0 mins, sin puntos clave,
+//   sin acuerdos". El backfill se hizo a mano con Vertex Gemini 2.5 Pro;
+//   este step lo hace permanente.
+//
+// Por qué Vertex como fallback (y no como primario):
+//   Cerebro es el path canónico para todas las llamadas LLM (cost logging,
+//   prompt caching, observabilidad centralizada). Vertex es un emergency
+//   fallback exclusivo de ESTE job, no extensible a Lexa ni a otros agents
+//   del SPA. Se activa solo si Cerebro devuelve `openrouter_402` (sin créditos)
+//   o un 5xx upstream. Cualquier otro error (4xx, network, timeout) propaga
+//   normal para que la siguiente corrida lo reintente.
+//
+//   El fallback usa la Service Account del Cloud Run job (la misma que
+//   `geminiVideoTranscript.ts` usa para transcribir). No requiere claves
+//   adicionales. Modelo: gemini-2.5-pro (calidad equivalente a Sonnet 4.6
+//   para resúmenes de transcripción larga, costo similar).
+
+interface ResumenStructured {
+  ejecutivo: string;
+  puntos_clave: string;
+  acuerdos: string;
+}
+
+const RESUMEN_SYSTEM_PROMPT = `Eres un analista legislativo profesional. Recibís
+la transcripción completa de una sesión de la Asamblea Legislativa de Costa Rica
+y devolvés un análisis estructurado.
+
+REGLAS DURAS:
+- Tono periodístico-institucional, sin opinar, sin adjetivos cargados.
+- No inventes hechos. Si algo no está en la transcripción, no lo menciones.
+- Si la sesión no tuvo acuerdos formales, decílo explícito.
+
+OUTPUT — JSON estricto, sin markdown, sin texto adicional:
+{
+  "ejecutivo": "<6 a 10 oraciones que capturen qué pasó: temas, expedientes mencionados, posiciones políticas relevantes, momento clave, contexto institucional>",
+  "puntos_clave": "<5 a 10 bullets con '- ', cada uno una oración completa>",
+  "acuerdos": "<resumen de acuerdos formales (votaciones aprobadas, mociones, expedientes turnados); si no hubo, decílo explícito; máximo 6 oraciones>"
+}`;
+
+function buildResumenUserMessage(
+  session: { tipo: string | null; comision: string | null; fecha: string | null; metadata: Record<string, unknown> | null },
+  segments: Array<{ start_seconds: number; text: string }>,
+): string {
+  const meta = session.metadata ?? {};
+  const title = (meta as { raw_title?: string }).raw_title ?? '(sin título)';
+  const durMin = Math.round(((meta as { duration_seconds?: number }).duration_seconds ?? 0) / 60);
+
+  const header = [
+    `[Sesión] ${title}`,
+    `[Tipo] ${session.tipo ?? 'desconocido'} · [Comisión] ${session.comision ?? 'n/a'} · [Fecha] ${session.fecha ?? 'sin fecha'} · [Duración] ${durMin} min`,
+    `[Transcripción con marcas por minuto]`,
+  ].join('\n');
+
+  // Compacto: marca de minuto al inicio de cada bloque (no por segmento) para
+  // reducir tokens. Gemini y Sonnet pueden inferir contexto temporal igual.
+  const lines: string[] = [];
+  let lastMin = -1;
+  for (const s of segments) {
+    const m = Math.floor((s.start_seconds ?? 0) / 60);
+    if (m !== lastMin) {
+      lines.push(`\n[${String(m).padStart(3, '0')}:00] ${s.text}`);
+      lastMin = m;
+    } else {
+      lines.push(s.text);
+    }
+  }
+
+  return `${header}\n${lines.join(' ').trim()}`;
+}
+
+/** Tries Cerebro first; falls back to Vertex Gemini 2.5 Pro on credit/5xx errors. */
+async function invokeResumenLlm(
+  sessionId: string,
+  userMessage: string,
+): Promise<{ raw: string; model: string; provider: 'cerebro' | 'vertex' }> {
+  // 1) Cerebro canónico
+  try {
+    const llmResp = await cerebroInvoke({
+      model: 'anthropic/claude-sonnet-4.6',
+      messages: [
+        { role: 'system', content: RESUMEN_SYSTEM_PROMPT },
+        { role: 'user', content: userMessage },
+      ],
+      max_tokens: 4_000,
+      temperature: 0.2,
+      app_id: 'cl2',
+      trace_label: `transcripts:resumen:${sessionId}`,
+    });
+    return { raw: (llmResp.text || '').trim(), model: llmResp.model, provider: 'cerebro' };
+  } catch (err) {
+    const msg = (err as Error)?.message ?? String(err);
+    const isCreditsOut = /openrouter_402|Insufficient credits/i.test(msg);
+    const isUpstream5xx = /cerebro_invoke 5\d\d/i.test(msg);
+    if (!isCreditsOut && !isUpstream5xx) {
+      // Error real (4xx, network, timeout). Lo propagamos para que el caller
+      // decida (típicamente loguea + degrada sin resumen).
+      throw err;
+    }
+    logger.warn('transcript_resumen_cerebro_failed_fallback_vertex', {
+      session_id: sessionId,
+      cerebro_error: msg.slice(0, 200),
+    });
+  }
+
+  // 2) Fallback: Vertex Gemini 2.5 Pro (solo este job; no Lexa)
+  const PROJECT_ID = process.env.GCP_PROJECT_ID ?? 'sincere-burner-475520-g7';
+  const LOCATION = process.env.GCP_LOCATION ?? 'us-central1';
+  const VERTEX_MODEL = 'gemini-2.5-pro';
+
+  const auth = new GoogleAuth({
+    scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+  });
+  const client = await auth.getClient();
+  const tokenResp = await client.getAccessToken();
+  if (!tokenResp.token) throw new Error('Vertex fallback: no access token');
+
+  const url = `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${PROJECT_ID}/locations/${LOCATION}/publishers/google/models/${VERTEX_MODEL}:generateContent`;
+
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 300_000); // 5min — Vertex Pro con razonamiento + transcripts largos
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${tokenResp.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: `${RESUMEN_SYSTEM_PROMPT}\n\n${userMessage}` }],
+          },
+        ],
+        generationConfig: {
+          maxOutputTokens: 4000,
+          temperature: 0.2,
+          responseMimeType: 'application/json',
+        },
+      }),
+      signal: ctl.signal,
+    });
+
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      throw new Error(`Vertex resumen ${resp.status}: ${body.slice(0, 240)}`);
+    }
+
+    const data = (await resp.json()) as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    };
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    if (!text) throw new Error('Vertex resumen: empty response');
+
+    return { raw: text.trim(), model: `google/${VERTEX_MODEL}`, provider: 'vertex' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Genera ejecutivo + puntos_clave + acuerdos y los persiste en
+ * `sessions.metadata.resumen`.
+ *
+ * No-fatal: si falla (LLM no disponible, JSON malo, DB error), logueamos y
+ * dejamos la sesión sin resumen — el siguiente cron podrá re-correrlo.
+ *
+ * Idempotente: si `metadata.resumen.ejecutivo` ya existe y no está vacío, no
+ * regenera (a menos que `force=true`).
+ */
+async function generateAndPersistResumen(
+  session: SessionRow,
+  segments: Array<{ start_seconds: number; text: string }>,
+  opts?: { force?: boolean },
+): Promise<{ generated: boolean; provider?: 'cerebro' | 'vertex'; reason?: string }> {
+  const existingResumen = (session.metadata as { resumen?: { ejecutivo?: string } } | null)?.resumen;
+  if (!opts?.force && existingResumen?.ejecutivo) {
+    logger.info('transcript_resumen_already_present', { session_id: session.id });
+    return { generated: false, reason: 'already_present' };
+  }
+
+  if (segments.length === 0) {
+    logger.warn('transcript_resumen_no_segments', { session_id: session.id });
+    return { generated: false, reason: 'no_segments' };
+  }
+
+  const userMessage = buildResumenUserMessage(
+    {
+      tipo: session.tipo,
+      comision: session.comision,
+      fecha: session.fecha,
+      metadata: session.metadata,
+    },
+    segments,
+  );
+
+  let llmOut: { raw: string; model: string; provider: 'cerebro' | 'vertex' };
+  try {
+    llmOut = await invokeResumenLlm(session.id, userMessage);
+  } catch (err) {
+    logger.error('transcript_resumen_llm_failed', {
+      session_id: session.id,
+      error: (err as Error)?.message ?? String(err),
+    });
+    return { generated: false, reason: 'llm_failed' };
+  }
+
+  // Parse JSON, robust to fences
+  const parsed = parseJsonSafe(llmOut.raw);
+  if (!parsed || typeof parsed !== 'object') {
+    logger.warn('transcript_resumen_unparseable', {
+      session_id: session.id,
+      provider: llmOut.provider,
+      preview: llmOut.raw.slice(0, 400),
+    });
+    return { generated: false, reason: 'unparseable' };
+  }
+
+  const p = parsed as Partial<ResumenStructured>;
+  const ejecutivo = typeof p.ejecutivo === 'string' ? p.ejecutivo.trim() : '';
+  const puntos_clave = typeof p.puntos_clave === 'string' ? p.puntos_clave.trim() : '';
+  const acuerdos = typeof p.acuerdos === 'string' ? p.acuerdos.trim() : '';
+
+  if (!ejecutivo) {
+    // Al menos ejecutivo no puede estar vacío
+    logger.warn('transcript_resumen_invalid_shape', {
+      session_id: session.id,
+      provider: llmOut.provider,
+      keys: Object.keys(p),
+    });
+    return { generated: false, reason: 'invalid_shape' };
+  }
+
+  const newMetadata = {
+    ...(session.metadata ?? {}),
+    resumen: {
+      model: llmOut.model,
+      provider: llmOut.provider,
+      ejecutivo,
+      puntos_clave,
+      acuerdos,
+      raw: llmOut.raw,
+      generated_at: new Date().toISOString(),
+      source: 'transcript-process-cron',
+    },
+  };
+
+  const { error: upErr } = await supa()
+    .from('sessions')
+    .update({ metadata: newMetadata })
+    .eq('id', session.id);
+
+  if (upErr) {
+    logger.error('transcript_resumen_persist_failed', {
+      session_id: session.id,
+      error: upErr.message,
+    });
+    return { generated: false, reason: 'persist_failed' };
+  }
+
+  logger.info('transcript_resumen_generated', {
+    session_id: session.id,
+    provider: llmOut.provider,
+    model: llmOut.model,
+    ejecutivo_chars: ejecutivo.length,
+    puntos_clave_chars: puntos_clave.length,
+    acuerdos_chars: acuerdos.length,
+  });
+
+  return { generated: true, provider: llmOut.provider };
+}
+
 // ── Main exported function ────────────────────────────────────────────────────
 
 /**
@@ -547,6 +829,60 @@ export async function processSession(
           session_id: sessionId,
           code: err.code,
         });
+        return result;
+      }
+
+      // quality_rejected: all sources returned segments but they were garbage.
+      // Mark as transcript_broken (or error if DB constraint not yet migrated).
+      if (err.code === 'quality_rejected') {
+        const brokenStatus = 'transcript_broken' as const;
+        const { error: updErr } = await supa()
+          .from('sessions')
+          .update({
+            status: brokenStatus,
+            metadata: {
+              ...((session.metadata ?? {}) as Record<string, unknown>),
+              transcript_quality: 'unusable',
+              transcript_broken_reason: err.message,
+              transcript_broken_at: new Date().toISOString(),
+            },
+          })
+          .eq('id', sessionId);
+
+        if (updErr && updErr.message?.includes('violates check constraint')) {
+          // DB hasn't been migrated yet — fall back to 'error' status
+          await supa()
+            .from('sessions')
+            .update({
+              status: 'error',
+              metadata: {
+                ...((session.metadata ?? {}) as Record<string, unknown>),
+                transcript_quality: 'unusable',
+                transcript_broken_reason: err.message,
+                transcript_broken_at: new Date().toISOString(),
+              },
+            })
+            .eq('id', sessionId);
+          logger.warn('transcript_process_quality_rejected_fallback', {
+            session_id: sessionId,
+            reason: 'DB constraint missing transcript_broken; falling back to error',
+            error: err.message,
+          });
+        } else if (updErr) {
+          logger.error('transcript_process_broken_update_failed', {
+            session_id: sessionId,
+            error: updErr.message,
+          });
+        } else {
+          logger.error('transcript_process_quality_rejected', {
+            session_id: sessionId,
+            error: err.message,
+          });
+        }
+
+        result.duration_ms = Date.now() - startMs;
+        result.status = 'permanent_failure';
+        result.error = `quality_rejected: ${err.message}`;
         return result;
       }
 
@@ -684,22 +1020,64 @@ export async function processSession(
     logger.info('transcript_process_llm_skipped', { session_id: sessionId });
   }
 
-  // ── Step 6: Mark as 'pending_review' (no 'indexed' directo) ───────────────
-  // Cambio 2026-05-10 (migration 0024): el pipeline ya no auto-publica al
-  // equipo. Cuando un transcript se descarga + parsea OK, queda
-  // 'pending_review' esperando que un operador lo apruebe en
-  // /admin/transcripciones. Una vez aprobado, status pasa a 'indexed' y
-  // entonces aparece en /sesiones para todo el equipo.
+  // ── Step 5b: Generate + persist resumen (ejecutivo/puntos_clave/acuerdos) ──
+  // Non-fatal: si el LLM falla o el JSON sale mal, la sesión queda indexed
+  // sin resumen y un re-run del cron va a regenerarlo. El frontend tolera el
+  // estado "sin resumen" (muestra la transcripción cruda).
   //
-  // Esto implementa el "human-in-the-loop" que CL2 Consultoría pidió:
-  // que un revisor confirme calidad antes de que el equipo lo use.
+  // Por qué después del LLM review y no en paralelo:
+  //   - Las correcciones del review modifican el texto pero a través de la
+  //     tabla `transcript_corrections`, no in-place. Para el resumen pedimos
+  //     el texto crudo del segment (que es lo que el cliente termina viendo),
+  //     entonces el orden no es estrictamente necesario.
+  //   - Sin embargo, las correcciones agregan ruido al log si fallan; correr
+  //     este step después agrupa errores LLM en el flujo, no mezclados con
+  //     errores de segments.
+  if (!opts?.skipLlmReview) {
+    try {
+      // Re-leemos session limpio del DB en caso de que el step 5 haya
+      // tocado algo (no debería, pero por defensa).
+      const { data: freshSessionData } = await supa()
+        .from('sessions')
+        .select('id, youtube_video_id, status, comision, fecha, tipo, metadata')
+        .eq('id', sessionId)
+        .single();
+      await generateAndPersistResumen(
+        (freshSessionData ?? session) as SessionRow,
+        segments.map((s) => ({
+          start_seconds: Number(s.start_seconds),
+          text: s.text,
+        })),
+      );
+    } catch (err) {
+      // Defensivo: generateAndPersistResumen ya maneja sus propios errores
+      // y nunca debería propagar, pero por las dudas no rompemos el pipeline.
+      logger.error('transcript_process_resumen_unexpected', {
+        session_id: sessionId,
+        error: (err as Error)?.message ?? String(err),
+      });
+    }
+  }
+
+  // ── Step 6: Mark as 'indexed' (auto-aprobación) ────────────────────────────
+  // Cambio 2026-05-17 (revertido el human-in-the-loop de 2026-05-10): el
+  // cliente pidió que las sesiones se publiquen automáticamente para que
+  // el equipo no dependa de aprobación admin. El LLM review pass de Step 5
+  // (Sonnet 4.6) sigue corriendo y guarda transcript_corrections en DB —
+  // el admin puede revisar y editar a posteriori desde /admin/transcripciones
+  // si detecta algo, pero la sesión YA es visible en /sesiones y Lexa YA la
+  // puede citar (vía ingest-transcript-chunks, cada hora :30).
+  //
+  // Trade-off explícito: errores LLM en el transcript pueden llegar al
+  // equipo antes que el admin los catache. Mitigado por el LLM review
+  // que ya marca low-confidence segments para revisión posterior.
   const { error: indexedErr } = await supa()
     .from('sessions')
-    .update({ status: 'pending_review' })
+    .update({ status: 'indexed' })
     .eq('id', sessionId);
 
   if (indexedErr) {
-    throw new Error(`failed to mark session pending_review: ${indexedErr.message}`);
+    throw new Error(`failed to mark session indexed: ${indexedErr.message}`);
   }
 
   result.status = 'success';
@@ -740,3 +1118,10 @@ export async function processSession(
 export function _resetSupaClient(): void {
   _supa = null;
 }
+
+// Internal exports for unit testing only (the `_` prefix signals the convention).
+export {
+  generateAndPersistResumen as _generateAndPersistResumen,
+  invokeResumenLlm as _invokeResumenLlm,
+  buildResumenUserMessage as _buildResumenUserMessage,
+};
