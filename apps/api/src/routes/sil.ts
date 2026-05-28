@@ -253,7 +253,7 @@ silRouter.get('/expedientes', async (req, res) => {
     }
 
     const { data: rows, error, count: totalRows } = await q1
-      .order('fecha_presentacion', { ascending: false })
+      .order('fecha_presentacion', { ascending: false, nullsFirst: false })
       .order('id', { ascending: false })
       .range(offset, offset + limit - 1);
 
@@ -305,3 +305,6 @@ silRouter.get('/expedientes', async (req, res) => {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
 });
+
+import { silDownloadHandler } from './sil_download.js';
+silRouter.get('/documentos/:docId/download', silDownloadHandler);

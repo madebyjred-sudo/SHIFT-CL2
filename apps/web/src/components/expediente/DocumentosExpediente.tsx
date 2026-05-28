@@ -218,17 +218,30 @@ export function DocumentosExpediente({ documentos }: Props) {
                       </p>
                     )}
                   </div>
-                  {/* Open link */}
-                  <a
-                    href={doc.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="shrink-0 mt-0.5 inline-flex items-center gap-1 text-[11px] text-cl2-accent hover:underline"
-                    title="Abrir PDF"
-                  >
-                    <ExternalLink size={12} />
-                    <span className="hidden sm:inline">Abrir</span>
-                  </a>
+                  {/* Actions */}
+                  <div className="flex items-center gap-3 shrink-0 mt-0.5">
+                    {doc.storage_path ? (
+                      <a
+                        href={`/api/sil/documentos/${doc.id}/download`}
+                        className="inline-flex items-center gap-1 text-[11px] text-cl2-accent font-medium hover:underline bg-cl2-accent/10 px-2 py-1 rounded-md"
+                        title="Descargar documento (servido desde Shift CL2)"
+                      >
+                        <Download size={12} />
+                        <span className="hidden sm:inline">Descargar</span>
+                      </a>
+                    ) : (
+                      <a
+                        href={doc.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-[11px] text-cl2-accent hover:underline"
+                        title="Abrir PDF en asamblea.go.cr"
+                      >
+                        <ExternalLink size={12} />
+                        <span className="hidden sm:inline">Abrir</span>
+                      </a>
+                    )}
+                  </div>
                 </li>
               );
             })}
