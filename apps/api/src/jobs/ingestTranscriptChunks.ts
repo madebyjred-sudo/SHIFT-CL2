@@ -71,7 +71,7 @@ function supa(): SupabaseClient {
 async function paginatedDistinct(s: SupabaseClient, table: string, col: string, eq?: { col: string; val: string }): Promise<Set<string>> {
   const out = new Set<string>();
   for (let off = 0; off < 200_000; off += 1000) {
-    let q = s.from(table).select(col).range(off, off + 999);
+    let q = s.from(table).select(col).order('id', { ascending: true }).range(off, off + 999);
     if (eq) q = q.eq(eq.col, eq.val);
     const { data, error } = await q;
     if (error) throw new Error(`paginate ${table}.${col}: ${error.message}`);

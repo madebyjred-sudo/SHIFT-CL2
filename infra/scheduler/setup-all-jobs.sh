@@ -50,7 +50,12 @@ fi
 #   <job_name>|<cron>|<endpoint_path>|<descripcion>
 # Las descripciones son para identificación en `gcloud scheduler jobs list`.
 read -r -d '' JOBS <<'EOF' || true
-cl2-sil-discovery|0 4 * * *|/api/internal/centinela/sil-discovery|Descubre expedientes nuevos en el SIL (diario 4am CR)
+cl2-sil-discovery|0 3 * * *|/api/internal/centinela/sil-discovery|Descubre expedientes nuevos en el SIL (diario 3am CR)
+cl2-sil-download|30 3 * * *|/api/internal/centinela/sil-download|Descarga PDFs del SIL a GCS (diario 3:30am CR)
+cl2-sil-embed|0 4 * * *|/api/internal/centinela/sil-embed|Genera chunks + embeddings para docs SIL (diario 4am CR)
+cl2-sil-enrich|30 4 * * *|/api/internal/centinela/sil-enrich|Enriquece metadata de expedientes SIL (diario 4:30am CR)
+cl2-youtube-sync|0 * * * *|/api/internal/youtube-sync|Sincroniza videos de AsambleaCRC (cada hora)
+cl2-process-pending|*/10 * * * *|/api/internal/process-pending|Procesa transcripts de sesiones pendientes (cada 10 min)
 cl2-agenda-scrape|*/30 * * * *|/api/internal/centinela/agenda-scrape|Re-scrapea agenda del plenario (cada 30 min)
 cl2-novelty-scan|*/30 * * * *|/api/internal/centinela/novelty-scan|Detector P16j de novedades pre-SIL (cada 30 min)
 cl2-scan-mociones|*/30 * * * *|/api/internal/centinela/scan-mociones|Alerter P11/P11bis de mociones nuevas (cada 30 min)
@@ -92,7 +97,7 @@ while IFS='|' read -r name cron path desc; do
       --location="$REGION" --project="$PROJECT" \
       --schedule="$cron" --time-zone="$TZ" \
       --uri="$uri" --http-method=POST \
-      --headers="X-Internal-Trigger=$INTERNAL_TRIGGER_SECRET,Content-Type=application/json" \
+      --update-headers="X-Internal-Trigger=$INTERNAL_TRIGGER_SECRET,Content-Type=application/json" \
       --message-body='{}' \
       --description="$desc" \
       --attempt-deadline=1800s \

@@ -34,6 +34,8 @@ import { scrapeAgenda } from '../jobs/agendaScrape.js';
 import { detectSimilarExpedientes } from '../jobs/centinelaSimilarDetect.js';
 import { runSilDiscovery } from '../jobs/silDiscovery.js';
 import { enrichExpedientesBulk } from '../jobs/silEnrichExpediente.js';
+import { runSilDownloadDocs } from '../jobs/silDownloadDocs.js';
+import { runSilEmbedDocs } from '../jobs/silEmbedDocs.js';
 import { createClient as createSupaClient } from '@supabase/supabase-js';
 import { getUserFromRequest, getUserIdFromRequest, type AuthedUser } from '../services/auth.js';
 import { logger } from '../services/logger.js';
@@ -810,6 +812,65 @@ centinelaInternalRouter.post('/process-ordenes-dia', async (req, res) => {
   } catch (err) {
     const message = (err as Error)?.message ?? String(err);
     req.log?.error('centinela_internal_process_ordenes_dia_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/sil-download
+ *
+ * Descarga documentos PDF del SIL para expedientes sin docs en GCS.
+ * Cloud Scheduler: diario 3:30am CR.
+ */
+centinelaInternalRouter.post('/sil-download', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  const body = (req.body ?? {}) as {
+    limit?: number;
+    maxDocBytes?: number;
+    enableOcr?: boolean;
+    concurrency?: number;
+    delayMs?: number;
+  };
+
+  try {
+    const result = await runSilDownloadDocs({
+      limit: body.limit,
+      maxDocBytes: body.maxDocBytes,
+      enableOcr: body.enableOcr,
+      concurrency: body.concurrency,
+      delayMs: body.delayMs,
+    });
+    logger.info('centinela_internal_sil_download_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_sil_download_failed', { error: message });
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /api/internal/centinela/sil-embed
+ *
+ * Genera chunks + embeddings para docs de sil_documentos sin embeddings.
+ * Cloud Scheduler: diario 4:00am CR.
+ */
+centinelaInternalRouter.post('/sil-embed', async (req, res) => {
+  if (!validateInternalTrigger(req, res)) return;
+
+  const body = (req.body ?? {}) as { limit?: number; chunkChars?: number };
+
+  try {
+    const result = await runSilEmbedDocs({
+      limit: body.limit,
+      chunkChars: body.chunkChars,
+    });
+    logger.info('centinela_internal_sil_embed_complete', { ...result });
+    res.json({ ok: true, result });
+  } catch (err) {
+    const message = (err as Error)?.message ?? String(err);
+    req.log?.error('centinela_internal_sil_embed_failed', { error: message });
     res.status(500).json({ ok: false, error: message });
   }
 });

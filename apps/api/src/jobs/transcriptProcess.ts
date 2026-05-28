@@ -981,10 +981,15 @@ export async function processSession(
   //     errores de segments.
   if (!opts?.skipLlmReview) {
     try {
+      // Re-leemos session limpio del DB en caso de que el step 5 haya
+      // tocado algo (no debería, pero por defensa).
+      const { data: freshSessionData } = await supa()
+        .from('sessions')
+        .select('id, youtube_video_id, status, comision, fecha, tipo, metadata')
+        .eq('id', sessionId)
+        .single();
       await generateAndPersistResumen(
-        // Re-leemos session limpio del DB en caso de que el step 5 haya
-        // tocado algo (no debería, pero por defensa).
-        session,
+        (freshSessionData ?? session) as SessionRow,
         segments.map((s) => ({
           start_seconds: Number(s.start_seconds),
           text: s.text,

@@ -54,6 +54,8 @@ function statusToEstado(status: string): number {
     case 'pending':         return 0; // en cola
     case 'transcript_not_ready': return 0;
     case 'error':           return 4; // sensible
+    case 'permanent_failure': return 4;
+    case 'rejected':        return 4;
     default:                return 0;
   }
 }
