@@ -194,6 +194,11 @@ export type ChatScope =
   // session_uuid y carga el contexto desde la tabla `sessions` + transcript_segments
   // + metadata.resumen. SesionViewPage envía esto cuando el id detectado es UUID.
   | { kind: 'session_uuid'; session_uuid: string; label: string }
+  // Expediente SIL (número con punto, ej. "23.511"). El backend carga el
+  // contexto de enriquecimiento (trámite, proponentes, documentos, fechas)
+  // e inyecta un system prompt scoped. El modelo usa search_sil_corpus
+  // filtrado por este expediente para responder sobre contenido de documentos.
+  | { kind: 'expediente'; expediente_numero: string; label: string }
   | {
       kind: 'workspace';
       workspace_id: string;

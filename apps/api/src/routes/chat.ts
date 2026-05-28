@@ -13,6 +13,10 @@ import {
   buildSessionSystemPromptByUuid,
 } from '../services/sessionContextLoader.js';
 import {
+  loadExpedienteContext,
+  buildExpedienteSystemPrompt,
+} from '../services/expedienteContextLoader.js';
+import {
   ensureConversation,
   insertUserMessage,
   insertAssistantMessage,
@@ -183,6 +187,15 @@ chatRouter.post('/stream', async (req, res) => {
       ? scopeWorkspaceIdRaw
       : null;
 
+  // Expediente scope: when the user is chatting from /expediente/:numero, the
+  // client passes scope.expediente_numero. Loads enrichment context + enables
+  // scoped search_sil_corpus over this expediente's documents.
+  const scopeExpedienteNumeroRaw = (body.scope as { expediente_numero?: unknown } | undefined)?.expediente_numero;
+  const scopeExpedienteNumero =
+    typeof scopeExpedienteNumeroRaw === 'string' && /^\d{1,2}\.\d{3}$/.test(scopeExpedienteNumeroRaw)
+      ? scopeExpedienteNumeroRaw
+      : null;
+
   let scopeSystemPrompt: string | undefined;
   if (scopeLegacySessionId !== null) {
     try {
@@ -210,6 +223,20 @@ chatRouter.post('/stream', async (req, res) => {
       req.log.error('scope_uuid_load_failed', {
         error: (err as Error).message,
         uuid: scopeSessionUuid,
+      });
+    }
+  } else if (scopeExpedienteNumero !== null) {
+    try {
+      const ctx = await loadExpedienteContext(scopeExpedienteNumero);
+      if (ctx) {
+        scopeSystemPrompt = buildExpedienteSystemPrompt(ctx);
+      } else {
+        req.log.warn('scope_expediente_not_found', { numero: scopeExpedienteNumero });
+      }
+    } catch (err) {
+      req.log.error('scope_expediente_load_failed', {
+        error: (err as Error).message,
+        numero: scopeExpedienteNumero,
       });
     }
   }
@@ -342,12 +369,14 @@ chatRouter.post('/stream', async (req, res) => {
       scope_legacy_session_id: scopeLegacySessionId,
       scope_session_uuid: scopeSessionUuid,
       scope_workspace_id: scopeWorkspaceId,
+      scope_expediente_numero: scopeExpedienteNumero,
       // DEBUG: log de scope propagation — quitar tras confirmar el flow
       ...((): Record<string, never> => {
         req.log.info('chat_scope_propagated', {
           scope_legacy_session_id: scopeLegacySessionId,
           scope_session_uuid: scopeSessionUuid,
           scope_workspace_id: scopeWorkspaceId,
+          scope_expediente_numero: scopeExpedienteNumero,
           has_scope_system_prompt: scopeSystemPrompt !== undefined,
         });
         return {};

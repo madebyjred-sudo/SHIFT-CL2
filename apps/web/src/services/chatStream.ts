@@ -129,6 +129,8 @@ export async function streamChat(opts: StreamChatOptions): Promise<void> {
       ? { legacy_session_id: opts.scope.legacy_session_id }
       : opts.scope?.kind === 'session_uuid'
       ? { session_uuid: opts.scope.session_uuid }
+      : opts.scope?.kind === 'expediente'
+      ? { expediente_numero: opts.scope.expediente_numero }
       : opts.scope?.kind === 'workspace'
       ? { workspace_id: opts.scope.workspace_id }
       : undefined;

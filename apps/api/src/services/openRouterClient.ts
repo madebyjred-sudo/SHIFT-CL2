@@ -62,6 +62,10 @@ interface StreamArgs {
   // El handler de la tool elige el path según cuál esté presente.
   scope_legacy_session_id?: number | null;
   scope_session_uuid?: string | null;
+  // When set, enables scoped search_sil_corpus over this expediente's docs.
+  // The chat router injects an expediente context system prompt and the
+  // model is instructed to pass expediente_numero to search_sil_corpus.
+  scope_expediente_numero?: string | null;
   // When set, enables `generate_presentation` for Atlas. The tool composes
   // every hoja in this workspace into a Gamma deck and emits a `pptx_ready`
   // chunk to the client. Without this scope, Atlas can't generate decks
@@ -751,18 +755,22 @@ const SEARCH_SIL_CORPUS_TOOL = {
   function: {
     name: 'search_sil_corpus',
     description:
-      'Búsqueda semántica sobre el corpus indexado del SIL (textos de proyectos, dictámenes, mociones). Usá esta tool cuando la pregunta requiere análisis de CONTENIDO, no solo títulos: "¿cómo se ha discutido X en el congreso?", "argumentos a favor/en contra de Y", "qué dice el dictamen de mayoría sobre Z". Más cara que search_sil_expedientes — preferila SOLO si el deep_insight está activado o si la pregunta es claramente analítica.',
+      'Búsqueda híbrida (semántica + palabra exacta) sobre el corpus indexado del SIL (textos de proyectos, dictámenes, mociones). Usá esta tool cuando la pregunta requiere análisis de CONTENIDO: "¿cómo se ha discutido X?", "qué dice el dictamen sobre Z". Si la pregunta es sobre un expediente en particular, pasá el número en expediente_numero para filtrar exactamente esos documentos y humanizar la búsqueda.',
     parameters: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
-          description: 'Pregunta o tema en lenguaje natural. La tool embebe la consulta y trae los chunks más cercanos.',
+          description: 'Pregunta o tema en lenguaje natural. La tool hace una búsqueda híbrida (vectores + exact match).',
         },
         k: {
           type: 'integer',
           description: 'Número de extractos a recuperar (default 6, max 15).',
           default: 6,
+        },
+        expediente_numero: {
+          type: 'string',
+          description: 'OPCIONAL. Si la pregunta es sobre un expediente específico, extrae el número aquí (ej: "25.600" o "22293"). Esto obliga a la base de datos a buscar solo dentro de ese expediente, garantizando exactitud sin depender de vectores.',
         },
       },
       required: ['query'],
@@ -1066,12 +1074,13 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   }
   const scopeId = args.scope_legacy_session_id ?? null;
   const scopeUuid = args.scope_session_uuid ?? null;
+  const scopeExpedienteNumero = args.scope_expediente_numero ?? null;
   // search_session_transcript se registra SOLO cuando NO tenemos el
   // transcript completo en el system prompt. Si scope_system_prompt
   // contiene "=== TRANSCRIPCIÓN COMPLETA ===" (sessions UUID con
   // transcript inline tras el refactor 2026-05-12), no hace falta la
   // tool — el modelo lee el transcript directo. Registrarla en ese
-  // caso solo agrega input tokens innecesarios y tienta al modelo a
+  // caso solo agrega input tokens innecesarias y tienta al modelo a
   // hacer una llamada que termina en pass2 vacío.
   // El path legacy (scope_legacy_session_id) NO incluye transcript en
   // el prompt todavía, entonces sigue necesitando la tool.
@@ -1087,6 +1096,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     has_search_session_transcript: scopeId !== null || scopeUuid !== null,
     scopeId,
     scopeUuid: scopeUuid?.slice(0, 8),
+    scopeExpedienteNumero,
     has_scope_system_prompt: typeof args.scope_system_prompt === 'string' && args.scope_system_prompt.length > 0,
   });
   // SIL tools: only registered when the agent YAML opts in. Letting every
@@ -2125,7 +2135,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     }
 
     if (tc.function.name === 'search_sil_corpus') {
-      let parsedArgs: { query: string; k?: number };
+      let parsedArgs: { query: string; k?: number; expediente_numero?: string };
       try {
         parsedArgs = JSON.parse(tc.function.arguments);
       } catch {
