@@ -72,13 +72,13 @@ interface GeneralRow {
 }
 
 interface TramiteRow {
-  fecha: string | null;
+  fecha_inicio: string | null;
   organo_legislativo: string | null;
   descripcion: string | null;
 }
 
 interface ProponenteRow {
-  nombre: string | null;
+  diputado_nombre: string | null;
   firma_orden: number | null;
 }
 
@@ -90,15 +90,16 @@ interface DocRow {
 
 interface FechaRow {
   campo: string | null;
-  valor: string | null;
-  fuente: string | null;
+  valor_fecha: string | null;
+  valor_texto_original: string | null;
+  fuente_documento_url: string | null;
 }
 
 interface LeyRow {
   numero_ley: string | null;
-  titulo_ley: string | null;
+  numero_gaceta: string | null;
+  alcance: string | null;
   fecha_publicacion: string | null;
-  boletin: string | null;
 }
 
 async function fetchGeneral(numero: string): Promise<GeneralRow | null> {
@@ -117,9 +118,9 @@ async function fetchGeneral(numero: string): Promise<GeneralRow | null> {
 async function fetchTramite(numero: string): Promise<TramiteRow[]> {
   const { data, error } = await supa()
     .from('sil_expediente_tramite')
-    .select('fecha, organo_legislativo, descripcion')
+    .select('fecha_inicio, organo_legislativo, descripcion')
     .eq('expediente_id', numero)
-    .order('fecha', { ascending: false })
+    .order('fecha_inicio', { ascending: false })
     .limit(10);
   if (error) {
     logger.warn('expediente_ctx_tramite_failed', { numero, error: error.message });
@@ -131,7 +132,7 @@ async function fetchTramite(numero: string): Promise<TramiteRow[]> {
 async function fetchProponentes(numero: string): Promise<ProponenteRow[]> {
   const { data, error } = await supa()
     .from('sil_expediente_proponentes')
-    .select('nombre, firma_orden')
+    .select('diputado_nombre, firma_orden')
     .eq('expediente_id', numero)
     .order('firma_orden', { ascending: true })
     .limit(20);
@@ -174,7 +175,7 @@ async function fetchDocumentos(numero: string): Promise<DocRow[]> {
 async function fetchFechas(numero: string): Promise<FechaRow[]> {
   const { data, error } = await supa()
     .from('sil_expediente_fechas_vigentes')
-    .select('campo, valor, fuente')
+    .select('campo, valor_fecha, valor_texto_original, fuente_documento_url')
     .eq('expediente_id', numero)
     .limit(10);
   if (error) {
@@ -187,7 +188,7 @@ async function fetchFechas(numero: string): Promise<FechaRow[]> {
 async function fetchLey(numero: string): Promise<LeyRow | null> {
   const { data, error } = await supa()
     .from('sil_leyes')
-    .select('numero_ley, titulo_ley, fecha_publicacion, boletin')
+    .select('numero_ley, numero_gaceta, alcance, fecha_publicacion')
     .eq('expediente_origen_id', numero)
     .maybeSingle();
   if (error) {
@@ -227,7 +228,7 @@ export async function loadExpedienteContext(numero: string): Promise<ExpedienteC
     ? tramite
         .map((t) => {
           const parts: string[] = [];
-          if (t.fecha) parts.push(t.fecha.slice(0, 10));
+          if (t.fecha_inicio) parts.push(t.fecha_inicio.slice(0, 10));
           if (t.organo_legislativo) parts.push(t.organo_legislativo);
           if (t.descripcion) parts.push(t.descripcion);
           return `- ${parts.join(' · ')}`;
@@ -236,7 +237,7 @@ export async function loadExpedienteContext(numero: string): Promise<ExpedienteC
     : null;
 
   const proponentesResumen = proponentes.length
-    ? proponentes.map((p) => `- ${p.nombre ?? 'Desconocido'}`).join('\n')
+    ? proponentes.map((p) => `- ${p.diputado_nombre ?? 'Desconocido'}`).join('\n')
     : null;
 
   const documentosResumen = documentos.length
@@ -250,11 +251,11 @@ export async function loadExpedienteContext(numero: string): Promise<ExpedienteC
     : null;
 
   const fechasResumen = fechas.length
-    ? fechas.map((f) => `- ${f.campo ?? 'fecha'}: ${f.valor ?? '?'}`).join('\n')
+    ? fechas.map((f) => `- ${f.campo ?? 'fecha'}: ${f.valor_texto_original ?? f.valor_fecha ?? '?'}`).join('\n')
     : null;
 
   const leyResumen = ley
-    ? `Ley N°${ley.numero_ley ?? '?'}: ${ley.titulo_ley ?? 'sin título'}${ley.fecha_publicacion ? ` (publicada ${ley.fecha_publicacion})` : ''}`
+    ? `Ley N°${ley.numero_ley ?? '?'}${ley.alcance ? ` — ${ley.alcance}` : ''}${ley.numero_gaceta ? ` (Gaceta ${ley.numero_gaceta})` : ''}${ley.fecha_publicacion ? `, publicada ${ley.fecha_publicacion}` : ''}`
     : null;
 
   const ctx: ExpedienteContext = {
@@ -349,12 +350,13 @@ export function buildExpedienteSystemPrompt(ctx: ExpedienteContext): string {
 
   lines.push(
     '',
-    `INSTRUCCIONES PARA RESPONDER:`,
-    `1. Cuando el usuario pregunte por "este expediente", "el proyecto" o algo similar sin nombrar otro, asumí que se refiere al expediente ${ctx.numero} («${ctx.titulo}»).`,
-    `2. Para preguntas sobre el CONTENIDO de los documentos del expediente (texto base, dictámenes, mociones), usá la tool \`search_sil_corpus\` pasando \`expediente_numero: "${ctx.numero}"\` junto con las palabras clave. Esto busca SOLO dentro de los documentos de este expediente.`,
-    `3. Para preguntas sobre trámite, proponentes o fechas, usá la información de arriba — no necesitás llamar tools.`,
-    `4. Si no tenés la información, decilo claramente: "No tengo información sobre X para este expediente." No inventes datos.`,
-    `5. Citá las fuentes cuando uses \`search_sil_corpus\`: [N] (tipo de documento · fecha).`,
+    `INSTRUCCIONES OBLIGATORIAS:`,
+    `1. ESTÁS EN UNA CONVERSACIÓN SOBRE EL EXPEDIENTE ${ctx.numero} — «${ctx.titulo}». NO le pidas al usuario el número de expediente. Ya lo tenés.`,
+    `2. Cuando el usuario pregunte "de qué trata este expediente", "quiénes son los proponentes", "en qué estado está", etc., respondé DIRECTAMENTE usando la información de arriba. NO digas "pasame el número de expediente".`,
+    `3. Para preguntas sobre el CONTENIDO de los documentos del expediente (texto base, dictámenes, mociones), usá la tool \`search_sil_corpus\` pasando \`expediente_numero: "${ctx.numero}"\` junto con las palabras clave. Esto busca SOLO dentro de los documentos de este expediente.`,
+    `4. Para preguntas sobre trámite, proponentes o fechas, usá la información de arriba — no necesitás llamar tools.`,
+    `5. Si no tenés la información, decilo claramente: "No tengo información sobre X para este expediente." No inventes datos.`,
+    `6. Citá las fuentes cuando uses \`search_sil_corpus\`: [N] (tipo de documento · fecha).`,
   );
 
   return lines.join('\n');
