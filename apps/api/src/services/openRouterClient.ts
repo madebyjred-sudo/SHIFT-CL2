@@ -1081,7 +1081,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   }
   const scopeId = args.scope_legacy_session_id ?? null;
   const scopeUuid = args.scope_session_uuid ?? null;
-  const scopeExpedienteNumero = normalizeExpedienteNumero(args.scope_expediente_numero) ?? args.scope_expediente_numero ?? null;
+  const scopeExpedienteNumero = normalizeExpedienteNumero(args.scope_expediente_numero ?? undefined) ?? args.scope_expediente_numero ?? null;
   // search_session_transcript se registra SOLO cuando NO tenemos el
   // transcript completo en el system prompt. Si scope_system_prompt
   // contiene "=== TRANSCRIPCIÓN COMPLETA ===" (sessions UUID con

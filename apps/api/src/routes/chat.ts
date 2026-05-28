@@ -192,7 +192,7 @@ chatRouter.post('/stream', async (req, res) => {
   // client passes scope.expediente_numero. Loads enrichment context + enables
   // scoped search_sil_corpus over this expediente's documents.
   const scopeExpedienteNumeroRaw = (body.scope as { expediente_numero?: unknown } | undefined)?.expediente_numero;
-  const scopeExpedienteNumero = normalizeExpedienteNumero(scopeExpedienteNumeroRaw);
+  const scopeExpedienteNumero = normalizeExpedienteNumero(scopeExpedienteNumeroRaw as string | number | undefined);
 
   let scopeSystemPrompt: string | undefined;
   if (scopeLegacySessionId !== null) {
