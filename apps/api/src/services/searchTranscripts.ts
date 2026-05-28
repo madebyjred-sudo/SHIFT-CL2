@@ -183,8 +183,10 @@ export async function searchTranscripts(args: SearchArgs): Promise<ChunkHit[]> {
     () =>
       withTimeout(
         async (signal) => {
-          // Try v3 first (returns metadata). If the RPC doesn't exist yet
-          // (migration not applied), fall back to v1 so we keep working.
+          // 2026-05-28: filter by source_type='transcript' so transcripts only
+          // compete against transcripts in the ranking. Without this filter,
+          // SIL/reglamento chunks (denser metadata, higher similarity scores)
+          // drown out transcript chunks for conversational queries.
           const v3 = await supa()
             .rpc('match_chunks_v3', {
               query_embedding: queryEmbedding,
@@ -193,7 +195,7 @@ export async function searchTranscripts(args: SearchArgs): Promise<ChunkHit[]> {
               filter_comision: cleanComision,
               filter_fecha_from: cleanFechaFrom,
               filter_fecha_to: cleanFechaTo,
-              filter_source_type: null,
+              filter_source_type: 'transcript',
               filter_source_ref_prefix: null,
             })
             .abortSignal(signal);
@@ -208,7 +210,9 @@ export async function searchTranscripts(args: SearchArgs): Promise<ChunkHit[]> {
             throw new Error(`match_chunks_v3 rpc: ${msg}`);
           }
 
-          // Fallback path — no metadata, but search still works.
+          // Fallback path — no metadata, no source_type filter. Degraded but
+          // keeps search working if the RPC is temporarily unavailable.
+          console.warn('[searchTranscripts] match_chunks_v3 unavailable (42883) — falling back to match_chunks v1 without source_type filter. Transcripts may be drowned by SIL/reglamento hits.');
           const v1 = await supa()
             .rpc('match_chunks', {
               query_embedding: queryEmbedding,

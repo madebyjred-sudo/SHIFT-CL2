@@ -24,6 +24,7 @@ import {
 } from './ralReglasEvaluator.js';
 import { queryLightrag, type LightragMode } from './lightragClient.js';
 import { withTimeout, withRetry, ResilienceError } from './resilience.js';
+import { insightRetrieve } from './insightAssembler.js';
 
 // Pass-1 (non-stream) is short and idempotent → retry safely.
 // Stream requests are NOT retried mid-flight (would duplicate tokens).
@@ -683,6 +684,46 @@ const EVALUATE_RAL_APLICACION_TOOL = {
   },
 };
 
+// ─── insight_retrieve tool — Deep Insight parallel retrieval ────────────
+// Replaces individual search tools in deep_insight mode. Instead of letting
+// the model call search_transcripts, search_sil_corpus, search_reglamento,
+// etc. one by one, insight_retrieve does parallel retrieval across all
+// domains and returns a unified context. The model sees the assembled
+// result in a single pass.
+const INSIGHT_RETRIEVE_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'insight_retrieve',
+    description:
+      'Deep Insight: recupera información de TODAS las fuentes legislativas en paralelo (transcripciones de sesiones, SIL, Reglamento, Constitución/LOAL) y devuelve un contexto ensamblado. ' +
+      'Usá esta tool SIEMPRE cuando deep_insight esté activo y la pregunta requiera análisis agregado o cross-domain. ' +
+      'NO la uses para preguntas puntuales de un solo dominio (ej. "qué pasó en la sesión del 21 de mayo" → usá get_session_by_date; "qué dice el Art. 80 del RAL" → usá search_reglamento). ' +
+      'La tool acepta una dimensión de análisis que pondera las fuentes: "impacto_normativo" prioriza reglamento+constitución, "contexto_debate" prioriza transcripts, "estado_expediente" prioriza SIL.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Pregunta o tema a investigar en español.',
+        },
+        dimension: {
+          type: 'string',
+          enum: ['general', 'impacto_normativo', 'contexto_debate', 'estado_expediente', 'procedimiento'],
+          description:
+            'Dimensión del análisis. "general" para balance igualado; "impacto_normativo" para ver qué regula; "contexto_debate" para ver qué se dijo; "estado_expediente" para ver qué pasó en SIL; "procedimiento" para ver cómo se hace.',
+          default: 'general',
+        },
+        k_per_bucket: {
+          type: 'integer',
+          description: 'Cuántos hits traer de cada taza (default 5, max 10).',
+          default: 5,
+        },
+      },
+      required: ['query'],
+    },
+  },
+};
+
 // ─── SIL tool definitions ─────────────────────────────────────────────
 // These three cover the breadth of legislative-file queries:
 //   - search_sil_expedientes: keyword over titles (cheap, instant — use FIRST
@@ -1150,6 +1191,16 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   if (hasConstitucionLoalTool(agent.tools)) {
     tools.push(SEARCH_CONSTITUCION_LOAL_TOOL);
   }
+  // Deep Insight: parallel retrieval across all domains.
+  // When deep_insight is on, we offer insight_retrieve as a single tool
+  // that does cross-domain retrieval + assembly. The model can still use
+  // individual tools (search_transcripts, search_sil_corpus, etc.) for
+  // point queries, but insight_retrieve is the preferred path for
+  // aggregated analysis.
+  if (args.deep_insight) {
+    tools.push(INSIGHT_RETRIEVE_TOOL);
+  }
+
   // Graph-augmented retrieval (LightRAG). DEEP-INSIGHT-GATED.
   // The graph traversal + Opus 4.7 synthesis is our "premium reasoning" tier
   // — token-heavy, expensive, and only justified when the user explicitly
@@ -2161,9 +2212,17 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
 
       let hits: Awaited<ReturnType<typeof searchSilCorpus>> = [];
       try {
+        // FORCE expediente_numero when scoped: if the model omitted it or passed
+        // a different number, override with the scoped expediente. This prevents
+        // the model from doing a global corpus search when we already know
+        // exactly which expediente the user is asking about.
+        const effectiveExpedienteNumero = scopeExpedienteNumero
+          ? normalizeExpedienteNumero(scopeExpedienteNumero)
+          : normalizeExpedienteNumero(parsedArgs.expediente_numero) ?? parsedArgs.expediente_numero;
+
         const normalizedArgs = {
           ...parsedArgs,
-          expediente_numero: normalizeExpedienteNumero(parsedArgs.expediente_numero) ?? parsedArgs.expediente_numero,
+          expediente_numero: effectiveExpedienteNumero ?? undefined,
         };
         hits = await searchSilCorpus(normalizedArgs);
       } catch (err) {
@@ -2293,6 +2352,52 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
           content: `Error al consultar el grafo: ${result.detail}. Caé a search_sil_corpus para esta pregunta.`,
         });
       }
+      continue;
+    }
+
+    if (tc.function.name === 'insight_retrieve') {
+      let parsedArgs: { query: string; dimension?: string; k_per_bucket?: number };
+      try {
+        parsedArgs = JSON.parse(tc.function.arguments);
+      } catch {
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify({ error: 'invalid json' }) });
+        continue;
+      }
+
+      const result = await insightRetrieve({
+        query: parsedArgs.query,
+        k_per_bucket: parsedArgs.k_per_bucket,
+      });
+
+      // Surface a single citation event with the summary so the UI shows
+      // that insight retrieval ran and how many sources each domain contributed.
+      args.onChunk({
+        type: 'citation',
+        payload: [
+          {
+            id: `insight:${parsedArgs.query.slice(0, 32)}`,
+            session_id: '',
+            source_ref: 'Deep Insight',
+            content: `Fuentes consultadas: ${result.summary.transcripts} transcripts, ${result.summary.sil} SIL, ${result.summary.reglamento} reglamento, ${result.summary.constitucion_loal} constitución/LOAL.`,
+            similarity: 1.0,
+            fecha: null,
+            comision: null,
+            tipo: 'insight',
+            source_type: 'metadata',
+            expediente_numero: null,
+            url_detalle: null,
+            video_url: null,
+            transcript_url: null,
+            rank: 1,
+          },
+        ],
+      });
+
+      messages.push({
+        role: 'tool',
+        tool_call_id: tc.id,
+        content: result.rendered,
+      });
       continue;
     }
 
