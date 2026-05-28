@@ -81,6 +81,8 @@ export interface SearchArgs {
   comision?: string;
   fecha_from?: string;
   fecha_to?: string;
+  /** Número de expediente para pre-fetch exacto en chunks de votación */
+  expediente_numero?: string;
 }
 
 let _supa: SupabaseClient | null = null;
@@ -129,8 +131,13 @@ export async function searchTranscripts(args: SearchArgs): Promise<ChunkHit[]> {
   // (preguntar por un expediente específico), incluso si el HNSW falla.
   const mentionedExpedientes = extractExpedienteMentions(args.query);
   const exactHits: ChunkHit[] = [];
-  if (mentionedExpedientes.length > 0) {
-    for (const exp of mentionedExpedientes) {
+  // Pre-fetch exacto por expediente: ya sea detectado en query o pasado explícitamente
+  const expedientesToPrefetch = new Set<string>(mentionedExpedientes);
+  if (args.expediente_numero) {
+    expedientesToPrefetch.add(args.expediente_numero);
+  }
+  if (expedientesToPrefetch.size > 0) {
+    for (const exp of expedientesToPrefetch) {
       const { data, error } = await supa()
         .from('legislative_chunks')
         .select('id, session_id, source_ref, source_type, chunk_index, content, metadata')

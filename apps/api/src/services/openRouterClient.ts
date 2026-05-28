@@ -120,7 +120,7 @@ const SEARCH_TRANSCRIPTS_TOOL = {
   function: {
     name: 'search_transcripts',
     description:
-      'Busca en transcripciones legislativas de la Asamblea de Costa Rica. Retorna extractos numerados [1], [2], ... con metadata (fecha, comisión, video URL). Llamá esta función SIEMPRE antes de responder consultas sobre actas, sesiones, votaciones, mociones o cualquier hecho legislativo. Después de llamarla, citá [N] inline después de cada afirmación. NO inferas ni combines info entre extractos distintos: si un extracto no contiene la respuesta literal, decí "no encontré". IMPORTANTE: nunca le hables al usuario de "chunks" — usá "transcripciones", "fuentes", "registros" o "lo documentado".',
+      'Deep Insight: recupera información legislativa clasificando la pregunta del usuario en una dimensión (impacto normativo, contexto de debate, estado de expediente, riesgo de obstrucción, red de proponentes, o síntesis general) y buscando SOLO en los dominios relevantes. Retorna 5-8 chunks curados y etiquetados por fuente. Usá esta función cuando deep_insight esté activo y la pregunta requiera análisis agregado. NO la uses para consultas puntuales de un solo dominio (ej. "qué pasó en la sesión del 21 de mayo" → usá get_session_by_date; "qué dice el Art. 80" → usá search_reglamento).',
     parameters: {
       type: 'object',
       properties: {
@@ -695,10 +695,9 @@ const INSIGHT_RETRIEVE_TOOL = {
   function: {
     name: 'insight_retrieve',
     description:
-      'Deep Insight: recupera información de TODAS las fuentes legislativas en paralelo (transcripciones de sesiones, SIL, Reglamento, Constitución/LOAL) y devuelve un contexto ensamblado. ' +
-      'Usá esta tool SIEMPRE cuando deep_insight esté activo y la pregunta requiera análisis agregado o cross-domain. ' +
-      'NO la uses para preguntas puntuales de un solo dominio (ej. "qué pasó en la sesión del 21 de mayo" → usá get_session_by_date; "qué dice el Art. 80 del RAL" → usá search_reglamento). ' +
-      'La tool acepta una dimensión de análisis que pondera las fuentes: "impacto_normativo" prioriza reglamento+constitución, "contexto_debate" prioriza transcripts, "estado_expediente" prioriza SIL.',
+      'Deep Insight: clasifica la intención del usuario en una dimensión y busca SOLO en los dominios legislativos relevantes. Retorna 5-8 chunks curados y etiquetados por fuente. ' +
+      'Dimensiones: "impacto_normativo" → reglamento + constitución/LOAL; "contexto_debate" → transcripts; "estado_expediente" → SIL; "riesgo_obstruccion" → SIL (plazos, trámites); "red_proponentes" → SIL (historial); "sintesis_general" → SIL o transcripts según contexto. ' +
+      'Usá esta tool cuando deep_insight esté activo y la pregunta requiera análisis agregado. NO para consultas puntuales de un solo dominio.',
     parameters: {
       type: 'object',
       properties: {
@@ -706,16 +705,13 @@ const INSIGHT_RETRIEVE_TOOL = {
           type: 'string',
           description: 'Pregunta o tema a investigar en español.',
         },
-        dimension: {
+        expediente_numero: {
           type: 'string',
-          enum: ['general', 'impacto_normativo', 'contexto_debate', 'estado_expediente', 'procedimiento'],
-          description:
-            'Dimensión del análisis. "general" para balance igualado; "impacto_normativo" para ver qué regula; "contexto_debate" para ver qué se dijo; "estado_expediente" para ver qué pasó en SIL; "procedimiento" para ver cómo se hace.',
-          default: 'general',
+          description: 'Número de expediente si el contexto es sobre uno específico (ej. "25.602"). Opcional.',
         },
         k_per_bucket: {
           type: 'integer',
-          description: 'Cuántos hits traer de cada taza (default 5, max 10).',
+          description: 'Cuántos hits traer por dominio (default 5, max 5).',
           default: 5,
         },
       },
@@ -2356,7 +2352,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     }
 
     if (tc.function.name === 'insight_retrieve') {
-      let parsedArgs: { query: string; dimension?: string; k_per_bucket?: number };
+      let parsedArgs: { query: string; expediente_numero?: string; k_per_bucket?: number };
       try {
         parsedArgs = JSON.parse(tc.function.arguments);
       } catch {
@@ -2366,6 +2362,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
 
       const result = await insightRetrieve({
         query: parsedArgs.query,
+        expediente_numero: parsedArgs.expediente_numero,
         k_per_bucket: parsedArgs.k_per_bucket,
       });
 
@@ -2378,7 +2375,7 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
             id: `insight:${parsedArgs.query.slice(0, 32)}`,
             session_id: '',
             source_ref: 'Deep Insight',
-            content: `Fuentes consultadas: ${result.summary.transcripts} transcripts, ${result.summary.sil} SIL, ${result.summary.reglamento} reglamento, ${result.summary.constitucion_loal} constitución/LOAL.`,
+            content: `Dimensión: ${result.dimension} — Fuentes: ${result.summary.transcripts} transcripts, ${result.summary.sil} SIL, ${result.summary.reglamento} reglamento, ${result.summary.constitucion_loal} constitución/LOAL.`,
             similarity: 1.0,
             fecha: null,
             comision: null,
