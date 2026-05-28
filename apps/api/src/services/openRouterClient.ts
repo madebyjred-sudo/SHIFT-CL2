@@ -1042,13 +1042,19 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
     ? [{ role: 'system' as const, content: buildTranscriptHintMessage(transcriptShortcut) }]
     : [];
 
+  // Wave 4 / Expediente chat (2026-05-28): prepend the scope context to the
+  // main system prompt instead of appending it as a separate system message.
+  // GPT-5.5 (and Claude) give higher priority to the FIRST system instructions.
+  // When the expediente context comes after the lexa.yaml persona, the model
+  // often ignores it and asks "which expediente?". Prepending fixes this.
+  const effectiveSystemPrompt = args.scope_system_prompt
+    ? `${args.scope_system_prompt}\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n${systemPrompt}`
+    : systemPrompt;
+
   const messages: OAMessage[] = [
-    { role: 'system', content: systemPrompt },
+    { role: 'system', content: effectiveSystemPrompt },
     ...(args.dynamic_rag_prompt
       ? [{ role: 'system' as const, content: args.dynamic_rag_prompt }]
-      : []),
-    ...(args.scope_system_prompt
-      ? [{ role: 'system' as const, content: args.scope_system_prompt }]
       : []),
     ...reglamentoHintBlock,
     ...transcriptHintBlock,
