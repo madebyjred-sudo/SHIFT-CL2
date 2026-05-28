@@ -1104,7 +1104,16 @@ export async function openRouterStream(args: StreamArgs): Promise<void> {
   // model about when to use search_transcripts (plenarias) vs search_sil_*
   // (expedientes). Lexa keeps both, Atlas leans on SIL, Centinela none.
   if (hasSilTools(agent.tools)) {
-    tools.push(SEARCH_SIL_EXPEDIENTES_TOOL, GET_SIL_EXPEDIENTE_TOOL, SEARCH_SIL_CORPUS_TOOL);
+    // When scoped to a specific expediente, we already injected the full
+    // enrichment context as a system prompt. Don't register get_sil_expediente
+    // or search_sil_expedientes — they tempt the model to ask "which
+    // expediente?" instead of using the context we already gave it.
+    // Keep search_sil_corpus for deep document RAG (texto base, dictámenes).
+    if (scopeExpedienteNumero) {
+      tools.push(SEARCH_SIL_CORPUS_TOOL);
+    } else {
+      tools.push(SEARCH_SIL_EXPEDIENTES_TOOL, GET_SIL_EXPEDIENTE_TOOL, SEARCH_SIL_CORPUS_TOOL);
+    }
   }
   // Reglamento de la Asamblea — procedural knowledge layer. Lexa
   // declares it (Atlas could too, but the PROCEDURAL questions are

@@ -305,59 +305,77 @@ function fmtDateCR(ymd: string | null): string {
 
 /**
  * Build the system message that scopes the conversation to this expediente.
- * Kept dense so it doesn't crowd the agent persona — the model gets the
- * metadata it needs to answer "qué pasó con este expediente" without
- * hallucinating.
+ *
+ * CRITICAL: Lexa's persona is trained on numbered extracts [N] from
+ * transcripts. When we pass the expediente context as a flat bullet list,
+ * the model ignores it and falls back to tools (get_sil_expediente).
+ *
+ * Fix: format the context as NUMBERED EXTRACTS [N] so the model treats
+ * them as first-class sources, exactly like transcript chunks. This
+ * leverages the existing citation training without modifying lexa.yaml.
  */
 export function buildExpedienteSystemPrompt(ctx: ExpedienteContext): string {
-  const lines: string[] = [
-    `Contexto del expediente legislativo activo (vinculado a esta conversación):`,
-    `- Número: ${ctx.numero}`,
-    `- Título: ${ctx.titulo}`,
-    `- Estado: ${ctx.estado ?? 's/f'}`,
+  const extracts: string[] = [];
+  let idx = 1;
+
+  const pushExtract = (label: string, body: string) => {
+    extracts.push(`[${idx}] ${label}\n${body.trim()}`);
+    idx += 1;
+  };
+
+  // Extract 1 — Identidad
+  const identityParts = [
+    `Expediente ${ctx.numero} — ${ctx.titulo}`,
+    `Estado: ${ctx.estado ?? 's/f'}`,
+  ];
+  if (ctx.comision) identityParts.push(`Comisión: ${ctx.comision}`);
+  if (ctx.proponente_principal) identityParts.push(`Proponente principal: ${ctx.proponente_principal}`);
+  if (ctx.fecha_presentacion) identityParts.push(`Presentado: ${fmtDateCR(ctx.fecha_presentacion)}`);
+  if (ctx.tipo) identityParts.push(`Tipo: ${ctx.tipo}`);
+  if (ctx.legislatura) identityParts.push(`Legislatura: ${ctx.legislatura}`);
+  pushExtract('Identidad del expediente', identityParts.join('. '));
+
+  // Extract 2 — Resumen ejecutivo (if available)
+  if (ctx.resumen_ejecutivo) {
+    pushExtract('Resumen ejecutivo', ctx.resumen_ejecutivo);
+  }
+
+  // Extract 3 — Proponentes
+  if (ctx.proponentes_resumen) {
+    pushExtract('Proponentes (orden de firma)', ctx.proponentes_resumen);
+  }
+
+  // Extract 4 — Trámite reciente
+  if (ctx.tramite_resumen) {
+    pushExtract('Trámite reciente (eventos más recientes primero)', ctx.tramite_resumen);
+  }
+
+  // Extract 5 — Fechas clave
+  if (ctx.fechas_resumen) {
+    pushExtract('Fechas clave', ctx.fechas_resumen);
+  }
+
+  // Extract 6 — Documentos disponibles
+  if (ctx.documentos_resumen) {
+    pushExtract('Documentos disponibles en el expediente', ctx.documentos_resumen);
+  }
+
+  // Extract 7 — Ley (if applicable)
+  if (ctx.ley_resumen) {
+    pushExtract('Información de ley publicada', ctx.ley_resumen);
+  }
+
+  const blocks: string[] = [
+    `=== CONTEXTO DEL EXPEDIENTE ${ctx.numero} — USAR COMO FUENTE PRINCIPAL ===`,
+    '',
+    ...extracts,
+    '',
+    `=== INSTRUCCIONES ===`,
+    `• ESTÁS EN UNA CONVERSACIÓN SOBRE EL EXPEDIENTE ${ctx.numero}. NO le pidas al usuario el número de expediente.`,
+    `• Respondé directamente usando los extractos [${extracts.map((_, i) => i + 1).join('][')}] de arriba. Citá [N] cuando cites datos.`,
+    `• Para el CONTENIDO de documentos (texto base, dictámenes, mociones), usá \`search_sil_corpus\` con \`expediente_numero: "${ctx.numero}"\`.`,
+    `• Si no tenés la info, decilo: "No tengo información sobre X para este expediente."`,
   ];
 
-  if (ctx.comision) lines.push(`- Comisión: ${ctx.comision}`);
-  if (ctx.proponente_principal) lines.push(`- Proponente principal: ${ctx.proponente_principal}`);
-  if (ctx.fecha_presentacion) lines.push(`- Fecha de presentación: ${fmtDateCR(ctx.fecha_presentacion)}`);
-  if (ctx.tipo) lines.push(`- Tipo: ${ctx.tipo}`);
-  if (ctx.legislatura) lines.push(`- Legislatura: ${ctx.legislatura}`);
-  if (ctx.url_detalle) lines.push(`- Ficha oficial: ${ctx.url_detalle}`);
-
-  if (ctx.resumen_ejecutivo) {
-    lines.push('', 'Resumen ejecutivo:', ctx.resumen_ejecutivo);
-  }
-
-  if (ctx.proponentes_resumen) {
-    lines.push('', 'Proponentes:', ctx.proponentes_resumen);
-  }
-
-  if (ctx.tramite_resumen) {
-    lines.push('', 'Trámite reciente (últimos eventos):', ctx.tramite_resumen);
-  }
-
-  if (ctx.fechas_resumen) {
-    lines.push('', 'Fechas clave:', ctx.fechas_resumen);
-  }
-
-  if (ctx.documentos_resumen) {
-    lines.push('', 'Documentos disponibles:', ctx.documentos_resumen);
-  }
-
-  if (ctx.ley_resumen) {
-    lines.push('', 'Información de ley:', ctx.ley_resumen);
-  }
-
-  lines.push(
-    '',
-    `INSTRUCCIONES OBLIGATORIAS:`,
-    `1. ESTÁS EN UNA CONVERSACIÓN SOBRE EL EXPEDIENTE ${ctx.numero} — «${ctx.titulo}». NO le pidas al usuario el número de expediente. Ya lo tenés.`,
-    `2. Cuando el usuario pregunte "de qué trata este expediente", "quiénes son los proponentes", "en qué estado está", etc., respondé DIRECTAMENTE usando la información de arriba. NO digas "pasame el número de expediente".`,
-    `3. Para preguntas sobre el CONTENIDO de los documentos del expediente (texto base, dictámenes, mociones), usá la tool \`search_sil_corpus\` pasando \`expediente_numero: "${ctx.numero}"\` junto con las palabras clave. Esto busca SOLO dentro de los documentos de este expediente.`,
-    `4. Para preguntas sobre trámite, proponentes o fechas, usá la información de arriba — no necesitás llamar tools.`,
-    `5. Si no tenés la información, decilo claramente: "No tengo información sobre X para este expediente." No inventes datos.`,
-    `6. Citá las fuentes cuando uses \`search_sil_corpus\`: [N] (tipo de documento · fecha).`,
-  );
-
-  return lines.join('\n');
+  return blocks.join('\n');
 }
