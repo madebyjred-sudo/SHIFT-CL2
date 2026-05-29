@@ -115,7 +115,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --set-env-vars "CL2_ASSETS_BUCKET=shift-cl2-podcasts" \
   --set-env-vars "ASSET_GCS_BUCKET=shift-cl2-podcasts" \
   --set-env-vars "GEMINI_TRANSCRIPT_ENABLED=true" \
-  --set-env-vars "TRANSCRIPT_FETCH_STRATEGY=ytdlp;gemini;lib" \
+  --set-env-vars "TRANSCRIPT_FETCH_STRATEGY=lib,ytdlp,gemini" \
   --set-env-vars "TRANSCRIPT_MIN_WORDS_PER_MINUTE=30" \
   --set-env-vars "TRANSCRIPT_MAX_GARBAGE_RATIO=0.30" \
   --set-env-vars "YT_COOKIES_PATH=/secrets/youtube-cookies.txt" \
