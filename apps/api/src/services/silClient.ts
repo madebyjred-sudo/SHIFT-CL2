@@ -530,7 +530,7 @@ export async function searchReglamento(args: {
               query_text: args.query,
               match_count: overFetch,
               filter_session_id: null,
-              filter_source_type: null,
+              filter_source_type: 'reglamento',
               filter_source_ref_prefix: 'Reglamento Asamblea',
               rrf_k: 60,
             })
@@ -553,7 +553,7 @@ export async function searchReglamento(args: {
                 query_embedding: queryEmbedding,
                 match_count: overFetch,
                 filter_session_id: null,
-                filter_source_type: null,
+                filter_source_type: 'reglamento',
                 filter_source_ref_prefix: 'Reglamento Asamblea',
               })
               .abortSignal(signal);
