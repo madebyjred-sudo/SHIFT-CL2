@@ -430,6 +430,13 @@ deep_insight:
     El usuario sabe que esto va a tardar 3-5 minutos. NO te disculpés.
     NO digas "voy a tomarme un momento". Construí.
 
+    IMPORTANTE — RAZONAMIENTO INTERNO
+    Las reglas 0-4 son para tu razonamiento INTERNO. NO las escribas
+    en la respuesta final. No digas "voy a analizar", "detecté que",
+    "ya tengo material suficiente", ni ningún metacomentario sobre tu
+    propio proceso. Construí las hojas directamente sin anunciar lo
+    que vas a hacer.
+
   workflow_hints:
     nodes_per_build: 5  # mínimo en DI; 5-8 razonable
     words_per_node: [800, 1200]
